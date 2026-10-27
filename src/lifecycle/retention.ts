@@ -34,7 +34,7 @@ export async function retentionSweep(store: MemoryStore, options: RetentionOptio
   for (const scope of scopes) {
     const ids: MemoryId[] = []
     for (const index of store.list(scope).entries) {
-      const entry = store.read(scope, index.id)
+      const entry = await store.read(scope, index.id)
       if (entry && isExpired(entry, now) && await store.remove(scope, entry.id)) {
         ids.push(entry.id)
         removed.push(entry.id)

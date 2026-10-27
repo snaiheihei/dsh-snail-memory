@@ -1,9 +1,9 @@
 import { access, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { MemoryEntry, MemoryScope, StoreState } from './types.js'
+import type { MemoryEntry, MemoryScope, StoreState, StoredMemoryEntry } from './types.js'
 import { workspaceId } from './types.js'
 import type { StorePaths } from './paths.js'
-import { chunkMemoryDetail, type MemoryDetailChunk } from './chunks.js'
+import { chunkMemoryDetail, MEMORY_CHUNK_THRESHOLD, type MemoryDetailChunk } from './chunks.js'
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -19,7 +19,7 @@ function escapeText(value: string): string {
   return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
 }
 
-function scopeEntries(state: StoreState, scope: MemoryScope): MemoryEntry[] {
+function scopeEntries(state: StoreState, scope: MemoryScope): StoredMemoryEntry[] {
   return state.entries.filter(entry => scope.kind === 'global'
     ? entry.scope.kind === 'global'
     : entry.scope.kind === 'workspace' && entry.scope.workspaceId === scope.workspaceId)
@@ -37,7 +37,7 @@ function indexMarkdown(state: StoreState, scope: MemoryScope): string {
   ]
   const detailPrefix = scope.kind === 'global' ? '../details' : '../../details'
   for (const entry of entries) {
-    const target = chunkMemoryDetail(entry.detail).length > 0 ? `${entry.id}/INDEX.md` : `${entry.id}.md`
+    const target = entry.detailChars > MEMORY_CHUNK_THRESHOLD ? `${entry.id}/INDEX.md` : `${entry.id}.md`
     lines.push(`- [${escapeText(entry.summary)}](${detailPrefix}/${target}) — ${entry.category}; verified ${entry.lastVerifiedAt}; revision ${entry.revision}`)
   }
   if (entries.length === 0) lines.push('- （无条目）')
@@ -114,25 +114,27 @@ async function removeOrphanDetails(paths: StorePaths, state: StoreState): Promis
   }
 }
 
-export async function writeProjections(paths: StorePaths, state: StoreState): Promise<void> {
+export async function writeDetailProjection(paths: StorePaths, entry: MemoryEntry): Promise<void> {
+  await mkdir(paths.details, { recursive: true })
+  const metadata = `# ${escapeText(entry.summary)}\n\n- Category: ${entry.category}\n- Updated: ${entry.updatedAt}\n- Last verified: ${entry.lastVerifiedAt}\n- Revision: ${entry.revision}\n`
+  const chunks = chunkMemoryDetail(entry.detail)
+  if (chunks.length === 0) {
+    await writeFile(paths.detail(entry.id), `${metadata}\n${escapeText(entry.detail)}\n`, 'utf8')
+    await rm(paths.detailDirectory(entry.id), { recursive: true, force: true })
+    await rm(`${paths.detailDirectory(entry.id)}.tmp`, { recursive: true, force: true })
+    await rm(`${paths.detailDirectory(entry.id)}.bak`, { recursive: true, force: true })
+    return
+  }
+  await writeChunkDirectory(paths, entry, chunks, metadata)
+  await rm(paths.detail(entry.id), { force: true })
+}
+
+export async function writeIndexProjections(paths: StorePaths, state: StoreState): Promise<void> {
   const scopes: MemoryScope[] = [
     { kind: 'global' },
     ...Object.keys(state.workspaces).map(id => ({ kind: 'workspace' as const, workspaceId: workspaceId(id) })),
   ]
   await mkdir(paths.details, { recursive: true })
-  for (const entry of state.entries) {
-    const metadata = `# ${escapeText(entry.summary)}\n\n- Category: ${entry.category}\n- Updated: ${entry.updatedAt}\n- Last verified: ${entry.lastVerifiedAt}\n- Revision: ${entry.revision}\n`
-    const chunks = chunkMemoryDetail(entry.detail)
-    if (chunks.length === 0) {
-      await writeFile(paths.detail(entry.id), `${metadata}\n${escapeText(entry.detail)}\n`, 'utf8')
-      await rm(paths.detailDirectory(entry.id), { recursive: true, force: true })
-      await rm(`${paths.detailDirectory(entry.id)}.tmp`, { recursive: true, force: true })
-      await rm(`${paths.detailDirectory(entry.id)}.bak`, { recursive: true, force: true })
-      continue
-    }
-    await writeChunkDirectory(paths, entry, chunks, metadata)
-    await rm(paths.detail(entry.id), { force: true })
-  }
   await removeOrphanDetails(paths, state)
   for (const scope of scopes) {
     const directory = scope.kind === 'global' ? paths.global : paths.workspace(scope.workspaceId)

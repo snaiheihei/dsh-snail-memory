@@ -25,11 +25,9 @@ function generatedId(scope: MemoryScope, category: string, summary: string) {
   return memoryId(createHash('sha256').update(`${key}\0${category}\0${summary.toLowerCase()}`).digest('hex'))
 }
 
-function fullEntries(store: MemoryStore, scope: MemoryScope): MemoryEntry[] {
-  return store.list(scope).entries.flatMap(index => {
-    const entry = store.read(scope, index.id)
-    return entry ? [entry] : []
-  })
+async function fullEntries(store: MemoryStore, scope: MemoryScope): Promise<MemoryEntry[]> {
+  const entries = await Promise.all(store.list(scope).entries.map(index => store.read(scope, index.id)))
+  return entries.filter((entry): entry is MemoryEntry => entry !== null)
 }
 
 export async function consolidateMemories(store: MemoryStore, options: ConsolidateOptions): Promise<number> {
@@ -41,7 +39,7 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
   ]
   let written = 0
   for (const scope of scopes) {
-    const entries = fullEntries(store, scope)
+    const entries = await fullEntries(store, scope)
     if (entries.length === 0) continue
     const newestFirst = entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     let input = ''
@@ -68,7 +66,7 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
     })
     const changed: MemoryEntry[] = []
     for (const candidate of parsed.candidates) {
-      const existing = candidate.id ? store.read(scope, candidate.id) : fullEntries(store, scope).find(entry =>
+      const existing = candidate.id ? await store.read(scope, candidate.id) : (await fullEntries(store, scope)).find(entry =>
         entry.category === candidate.category && entry.summary.toLowerCase() === candidate.summary.toLowerCase())
       // An id absent from this scope may belong to another scope; never move it.
       if (candidate.id && !existing) continue
@@ -91,7 +89,7 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
       changed.push(saved)
       written += 1
       for (const oldId of candidate.supersedes ?? []) {
-        if (oldId !== saved.id && store.read(scope, oldId)) await store.remove(scope, oldId)
+        if (oldId !== saved.id && await store.read(scope, oldId)) await store.remove(scope, oldId)
       }
     }
     if (changed.length) await options.onChange?.(scope, changed)

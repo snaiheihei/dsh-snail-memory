@@ -7,6 +7,7 @@ import { MemoryStore } from '../../src/store/store.js'
 
 const failure = vi.hoisted(() => ({
   partTwo: false,
+  detailRecord: false,
   raceDirectory: null as string | null,
   raceCalls: 0,
 }))
@@ -17,6 +18,7 @@ vi.mock('node:fs/promises', async importOriginal => {
     ...actual,
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
       if (failure.partTwo && String(args[0]).endsWith('part-002.md')) throw new Error('injected chunk write failure')
+      if (failure.detailRecord && String(args[0]).includes('detail-data')) throw new Error('injected detail record failure')
       return actual.writeFile(...args)
     },
     rm: async (...args: Parameters<typeof actual.rm>) => {
@@ -34,13 +36,39 @@ const stores: MemoryStore[] = []
 
 afterEach(async () => {
   failure.partTwo = false
+  failure.detailRecord = false
   failure.raceDirectory = null
   failure.raceCalls = 0
   await Promise.all(stores.splice(0).map(store => store.close()))
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-describe('chunk projection publication', () => {
+describe('projection and detail publication', () => {
+  it('keeps the previous authoritative revision when writing a new detail record fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-detail-record-'))
+    roots.push(root)
+    const store = await MemoryStore.open({ root, heartbeatMs: 60_000 })
+    stores.push(store)
+    const scope = { kind: 'global' } as const
+    const base = {
+      scope,
+      category: 'project-convention',
+      summary: 'Atomic detail record',
+      sourceRefs: [{ sessionId: 'session-1' }],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    } as const
+    const entry = await store.upsert({ ...base, detail: 'old-authoritative-detail' })
+    failure.detailRecord = true
+
+    await expect(store.upsert({ ...base, id: entry.id, detail: 'new-authoritative-detail' }))
+      .rejects.toThrow('injected detail record failure')
+
+    expect((await store.read(scope, entry.id))?.detail).toBe('old-authoritative-detail')
+    const persisted = JSON.parse(await readFile(join(root, 'state.v2.json'), 'utf8'))
+    expect(persisted.entries[0].revision).toBe(entry.revision)
+    expect(persisted.entries[0].detailChars).toBe('old-authoritative-detail'.length)
+  })
+
   it('keeps the previous complete chunk set when publishing a correction fails', async () => {
     const root = await mkdtemp(join(tmpdir(), 'snail-memory-projection-'))
     roots.push(root)
@@ -66,6 +94,9 @@ describe('chunk projection publication', () => {
     expect(first).toContain('old-')
     expect(first).not.toContain('new-')
     expect(third).toContain('old-')
+    expect((await store.read(scope, entry.id))?.detail).toBe(oldDetail)
+    const persisted = JSON.parse(await readFile(join(root, 'state.v2.json'), 'utf8'))
+    expect(persisted.entries[0].revision).toBe(entry.revision)
   })
 
   it('keeps the previous small detail when switching to chunks fails', async () => {

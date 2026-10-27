@@ -1,18 +1,21 @@
 import { appendFile, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { WriterLock } from './lock.js'
-import { emptyState, readState, writeJsonAtomic } from './json.js'
+import { emptyState, readLegacyState, readState, writeJsonAtomic, type LegacyStoreState } from './json.js'
 import { StorePaths } from './paths.js'
-import { writeProjections } from './projections.js'
+import { writeDetailProjection, writeIndexProjections } from './projections.js'
+import { readDetailRecord, removeUnreferencedDetailRecords, writeDetailRecord } from './records.js'
 import type {
   DesiredInjection,
   MemoryEntry,
   MemoryId,
   MemoryIndex,
+  MemoryIndexEntry,
   MemoryMeta,
   MemoryScope,
   SessionMemoryState,
   StoreState,
+  StoredMemoryEntry,
   UpsertMemoryInput,
   WorkspaceIndexRef,
 } from './types.js'
@@ -41,10 +44,24 @@ function scopeKey(scope: MemoryScope): string {
   return scope.kind === 'global' ? 'global' : scope.workspaceId
 }
 
-function withoutDetail(entry: MemoryEntry): Omit<MemoryEntry, 'detail'> {
-  const index = { ...entry }
-  delete (index as { detail?: string }).detail
+function storedEntry(entry: MemoryEntry): StoredMemoryEntry {
+  const stored = { ...entry, detailChars: entry.detail.length } as StoredMemoryEntry & { detail?: string }
+  delete stored.detail
+  return stored
+}
+
+function withoutDetail(entry: StoredMemoryEntry): MemoryIndexEntry {
+  const index = { ...entry } as MemoryIndexEntry & { detailChars?: number }
+  delete index.detailChars
   return index
+}
+
+function migrateState(legacy: LegacyStoreState): StoreState {
+  return {
+    ...legacy,
+    formatVersion: 2,
+    entries: legacy.entries.map(storedEntry),
+  }
 }
 
 export class MemoryStore {
@@ -52,15 +69,18 @@ export class MemoryStore {
   private state: StoreState
   private queue: Promise<unknown> = Promise.resolve()
   private closed = false
+  private readonly legacyEntries?: ReadonlyMap<string, MemoryEntry>
 
   private constructor(
     options: Required<MemoryStoreOptions>,
     private readonly lock: WriterLock,
     state: StoreState,
+    legacyEntries?: readonly MemoryEntry[],
   ) {
     this.paths = new StorePaths(options.root)
     this.state = state
     this.now = options.now
+    if (legacyEntries) this.legacyEntries = new Map(legacyEntries.map(entry => [entry.id as string, entry]))
   }
 
   private readonly now: () => Date
@@ -72,11 +92,21 @@ export class MemoryStore {
       now: options.now ?? (() => new Date()),
       root: options.root,
     }
-    const lock = await WriterLock.acquire(resolved.root, new StorePaths(resolved.root).lock, resolved)
+    const paths = new StorePaths(resolved.root)
+    const lock = await WriterLock.acquire(resolved.root, paths.lock, resolved)
     try {
-      const state = await readState(new StorePaths(resolved.root).state)
-      const store = new MemoryStore(resolved, lock, state)
-      if (lock.writable) await writeProjections(store.paths, state)
+      const current = await readState(paths.state)
+      const legacy = current ? null : await readLegacyState(paths.legacyState)
+      const state = current ?? (legacy ? migrateState(legacy) : emptyState())
+      const store = new MemoryStore(resolved, lock, state, legacy && !lock.writable ? legacy.entries : undefined)
+      if (lock.writable) {
+        if (legacy) await store.migrateLegacy(legacy.entries)
+        else {
+          await writeIndexProjections(store.paths, state)
+          await removeUnreferencedDetailRecords(store.paths, state)
+          await rm(store.paths.legacyState, { force: true })
+        }
+      }
       return store
     } catch (error) {
       await lock.close()
@@ -111,9 +141,15 @@ export class MemoryStore {
     }
   }
 
-  read(scope: MemoryScope, id: MemoryId): MemoryEntry | null {
+  async read(scope: MemoryScope, id: MemoryId): Promise<MemoryEntry | null> {
     const entry = this.state.entries.find(candidate => candidate.id === id && scopeKey(candidate.scope) === scopeKey(scope))
-    return entry ? structuredClone(entry) : null
+    if (!entry) return null
+    if (this.legacyEntries) {
+      const legacy = this.legacyEntries.get(id)
+      if (!legacy || legacy.revision !== entry.revision) throw new Error(`Cannot read legacy detail ${id} at revision ${entry.revision}`)
+      return structuredClone(legacy)
+    }
+    return readDetailRecord(this.paths, entry)
   }
 
   getSessionState(sessionId: string): SessionMemoryState {
@@ -137,13 +173,18 @@ export class MemoryStore {
         updatedAt: timestamp,
         revision,
       }
-      draft.entries = [...draft.entries.filter(candidate => candidate.id !== entry.id), entry]
+      draft.entries = [...draft.entries.filter(candidate => candidate.id !== entry.id), storedEntry(entry)]
       if (input.scope.kind === 'workspace') {
         const current = draft.workspaces[input.scope.workspaceId]
         draft.workspaces[input.scope.workspaceId] = { createdAt: current?.createdAt ?? timestamp, updatedAt: timestamp }
       }
       draft.meta.dirty = true
       return structuredClone(entry)
+    }, async (_entry, draft) => {
+      await removeUnreferencedDetailRecords(this.paths, draft)
+    }, async entry => {
+      await writeDetailRecord(this.paths, entry)
+      await writeDetailProjection(this.paths, entry)
     })
   }
 
@@ -160,6 +201,7 @@ export class MemoryStore {
       await Promise.all([
         rm(this.paths.detail(id), { force: true }),
         rm(this.paths.detailDirectory(id), { recursive: true, force: true }),
+        rm(this.paths.detailDataDirectory(id), { recursive: true, force: true }),
       ])
     })
   }
@@ -196,22 +238,33 @@ export class MemoryStore {
     return revision
   }
 
+  private async migrateLegacy(entries: readonly MemoryEntry[]): Promise<void> {
+    for (const entry of entries) await writeDetailRecord(this.paths, entry)
+    for (const entry of entries) await writeDetailProjection(this.paths, entry)
+    await writeJsonAtomic(this.paths.state, this.state)
+    await writeIndexProjections(this.paths, this.state)
+    await removeUnreferencedDetailRecords(this.paths, this.state)
+    await rm(this.paths.legacyState, { force: true })
+  }
+
   private transaction<T>(
     operation: string,
     update: (draft: StoreState) => T,
-    finalize?: (result: T) => Promise<void>,
+    finalize?: (result: T, draft: StoreState) => Promise<void>,
+    prepare?: (result: T, draft: StoreState) => Promise<void>,
   ): Promise<T> {
     const run = this.queue.then(async () => {
       if (!this.writable) throw new MemoryStoreReadonlyError('This Snail Memory host is read-only')
       await this.lock.assertOwner()
       const draft = structuredClone(this.state)
       const result = update(draft)
+      await prepare?.(result, draft)
       draft.revision += 1
       await appendFile(this.paths.audit, `${JSON.stringify({ time: this.now().toISOString(), operation, revision: draft.revision })}\n`, 'utf8')
       await writeJsonAtomic(this.paths.state, draft)
-      await writeProjections(this.paths, draft)
-      await finalize?.(result)
       this.state = draft
+      await writeIndexProjections(this.paths, draft)
+      await finalize?.(result, draft)
       return result
     })
     this.queue = run.catch(() => {})

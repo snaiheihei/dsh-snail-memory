@@ -101,9 +101,9 @@ export class MemoryController {
     return this.store.list(scope)
   }
 
-  private readMemory(request: ReadRequest): MemoryEntry {
+  private async readMemory(request: ReadRequest): Promise<MemoryEntry> {
     this.assertWorkspace(request.scope)
-    const entry = this.store.read(request.scope, request.id)
+    const entry = await this.store.read(request.scope, request.id)
     if (!entry) throw new MemoryApiError('memory-not-found', 'The memory entry does not exist.', 404)
     return entry
   }

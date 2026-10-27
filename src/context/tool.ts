@@ -51,7 +51,7 @@ export function createMemoryReadTool(memories: MemoryContextService) {
     async execute(args, exec) {
       const sessionId = exec.agent?.session.id
       if (!sessionId) return { found: false }
-      const entry = memories.readDetail(sessionId, args.layer as MemoryLayer, memoryId(args.memory_id))
+      const entry = await memories.readDetail(sessionId, args.layer as MemoryLayer, memoryId(args.memory_id))
       if (!entry) return { found: false }
       const chunks = chunkMemoryDetail(entry.detail)
       if (chunks.length === 0) {

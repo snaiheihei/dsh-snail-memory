@@ -55,6 +55,7 @@ export interface UpsertMemoryInput {
 }
 
 export type MemoryIndexEntry = Omit<MemoryEntry, 'detail'>
+export type StoredMemoryEntry = MemoryIndexEntry & { readonly detailChars: number }
 
 export interface WorkspaceIndexRef {
   readonly workspaceId: WorkspaceId
@@ -108,9 +109,9 @@ export interface MemoryMeta {
 }
 
 export interface StoreState {
-  readonly formatVersion: 1
+  readonly formatVersion: 2
   revision: number
-  entries: MemoryEntry[]
+  entries: StoredMemoryEntry[]
   workspaces: Record<string, { readonly createdAt: string; updatedAt: string }>
   scopeRevisions: { global: number; workspaces: Record<string, number> }
   sessions: Record<string, SessionMemoryState>

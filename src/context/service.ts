@@ -125,7 +125,7 @@ export class MemoryContextService {
     if (metadata) this.queued.delete(`${sessionId}:${metadata.layer}:${metadata.injectionId}`)
   }
 
-  readDetail(sessionId: string, layer: MemoryLayer, id: MemoryId): MemoryEntry | null {
+  async readDetail(sessionId: string, layer: MemoryLayer, id: MemoryId): Promise<MemoryEntry | null> {
     const state = this.store.getSessionState(sessionId)
     if (!state.layers[layer].enabled) return null
     const scope = this.scopeFor(sessionId, layer)

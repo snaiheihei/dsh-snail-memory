@@ -60,7 +60,7 @@ export async function distillSession(store: MemoryStore, options: DistillOptions
     const id = stableId(scope, candidate.category, candidate.summary)
     const matching = store.list(scope).entries.find(entry => entry.category === candidate.category
       && entry.summary.trim().toLowerCase() === candidate.summary.trim().toLowerCase())
-    const existing = store.read(scope, id) ?? (matching ? store.read(scope, matching.id) : null)
+    const existing = await store.read(scope, id) ?? (matching ? await store.read(scope, matching.id) : null)
     if (existing && existing.summary === candidate.summary.trim() && existing.detail === candidate.detail.trim()) {
       entries.push(existing)
       continue

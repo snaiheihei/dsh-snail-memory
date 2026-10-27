@@ -86,7 +86,7 @@ describe('MemoryController', () => {
 
     await expect(controller.call('remove', { scope: { kind: 'global' }, id: entry.id })).resolves.toEqual({ removed: true })
     await expect(controller.call('remove', { scope: { kind: 'global' }, id: entry.id })).resolves.toEqual({ removed: false })
-    expect(store.read({ kind: 'global' }, entry.id)).toBeNull()
+    await expect(store.read({ kind: 'global' }, entry.id)).resolves.toBeNull()
     expect(store.getSessionState('session-1')).toEqual(before)
   })
 

@@ -194,8 +194,8 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
 
     await service.consolidate()
 
-    expect(store.read(globalScope, target.id)?.summary).toBe('New global decision')
-    expect(store.read(workspaceScope, workspace.id)?.summary).toBe('Workspace convention')
+    expect((await store.read(globalScope, target.id))?.summary).toBe('New global decision')
+    expect((await store.read(workspaceScope, workspace.id))?.summary).toBe('Workspace convention')
     expect(store.list(workspaceScope).entries).toHaveLength(1)
   })
 

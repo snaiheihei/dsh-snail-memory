@@ -1,10 +1,24 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import type * as FsPromises from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryStore, MemoryStoreReadonlyError } from '../../src/store/store.js'
 import type { MemoryScope, UpsertMemoryInput } from '../../src/store/types.js'
-import { workspaceId } from '../../src/store/types.js'
+import { memoryId, workspaceId } from '../../src/store/types.js'
+
+const fileReads = vi.hoisted(() => [] as string[])
+
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof FsPromises>()
+  return {
+    ...actual,
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      fileReads.push(String(args[0]))
+      return actual.readFile(...args)
+    },
+  }
+})
 
 const roots: string[] = []
 const stores: MemoryStore[] = []
@@ -33,6 +47,7 @@ function input(scope: MemoryScope, summary: string): UpsertMemoryInput {
 }
 
 afterEach(async () => {
+  fileReads.length = 0
   await Promise.all(stores.splice(0).map(store => store.close()))
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
@@ -91,8 +106,12 @@ describe('MemoryStore', () => {
     const scope: MemoryScope = { kind: 'global' }
     const entry = await store.upsert({ ...input(scope, 'Changing detail'), detail: 'a'.repeat(13_000) })
     const chunkDirectory = join(root, 'details', entry.id)
+    const firstRecord = store.paths.detailRecord(entry.id, entry.revision)
 
-    await store.upsert({ ...input(scope, 'Changing detail'), id: entry.id, detail: 'b'.repeat(8_500) })
+    const corrected = await store.upsert({ ...input(scope, 'Changing detail'), id: entry.id, detail: 'b'.repeat(8_500) })
+    await expect(readFile(firstRecord, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await store.read(scope, entry.id))?.detail).toBe('b'.repeat(8_500))
+    expect(corrected.revision).toBeGreaterThan(entry.revision)
     await expect(readFile(join(chunkDirectory, 'part-004.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(chunkDirectory, 'part-003.md'), 'utf8')).toContain('b')
 
@@ -100,10 +119,11 @@ describe('MemoryStore', () => {
     await expect(readFile(join(chunkDirectory, 'INDEX.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(store.paths.detail(entry.id), 'utf8')).toContain('small')
 
-    await store.upsert({ ...input(scope, 'Changing detail'), id: entry.id, detail: 'c'.repeat(8_001) })
+    const recreated = await store.upsert({ ...input(scope, 'Changing detail'), id: entry.id, detail: 'c'.repeat(8_001) })
     await expect(readFile(store.paths.detail(entry.id), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     await store.remove(scope, entry.id)
     await expect(readFile(join(chunkDirectory, 'part-001.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(store.paths.detailRecord(entry.id, recreated.revision), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('restores entries and session state after reopening', async () => {
@@ -130,6 +150,63 @@ describe('MemoryStore', () => {
     })
   })
 
+  it('keeps details out of the parent state and reads them only on demand', async () => {
+    const root = await tempRoot()
+    const first = await open(root)
+    const scope: MemoryScope = { kind: 'global' }
+    const entry = await first.upsert({ ...input(scope, 'Lazy detail'), detail: 'detail-' + 'x'.repeat(20_000) })
+    await first.close()
+    fileReads.length = 0
+
+    const second = await open(root)
+    expect(second.list(scope).entries[0]).toMatchObject({ id: entry.id, summary: 'Lazy detail' })
+    expect(fileReads.some(path => path.includes(join('detail-data', entry.id)))).toBe(false)
+
+    expect((await second.read(scope, entry.id))?.detail).toBe('detail-' + 'x'.repeat(20_000))
+    expect(fileReads.filter(path => path.includes(join('detail-data', entry.id)))).toHaveLength(1)
+    const persisted = JSON.parse(await readFile(join(root, 'state.v2.json'), 'utf8'))
+    expect(persisted.formatVersion).toBe(2)
+    expect(persisted.entries[0]).not.toHaveProperty('detail')
+    expect(persisted.entries[0].detailChars).toBe(20_007)
+  })
+
+  it('migrates v1 inline details to versioned records', async () => {
+    const root = await tempRoot()
+    const id = memoryId('00000000-0000-4000-8000-000000000001')
+    const timestamp = '2026-10-26T00:00:00.000Z'
+    await writeFile(join(root, 'state.v1.json'), JSON.stringify({
+      formatVersion: 1,
+      revision: 7,
+      entries: [{
+        ...input({ kind: 'global' }, 'Migrated detail'),
+        id,
+        detail: 'legacy complete detail',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        revision: 3,
+      }],
+      workspaces: {},
+      scopeRevisions: { global: 3, workspaces: {} },
+      sessions: {},
+      meta: {
+        dirty: false,
+        nextConsolidationAt: null,
+        nextRetentionAt: null,
+        lastConsolidationAt: null,
+        lastRetentionAt: null,
+        lastError: null,
+        pending: {},
+      },
+    }))
+
+    const store = await open(root)
+    expect((await store.read({ kind: 'global' }, id))?.detail).toBe('legacy complete detail')
+    const migrated = JSON.parse(await readFile(join(root, 'state.v2.json'), 'utf8'))
+    expect(migrated.entries[0]).toMatchObject({ id, detailChars: 'legacy complete detail'.length })
+    expect(migrated.entries[0]).not.toHaveProperty('detail')
+    await expect(readFile(join(root, 'state.v1.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('forgets only memory content and preserves session history metadata', async () => {
     const store = await open(await tempRoot())
     const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
@@ -140,7 +217,7 @@ describe('MemoryStore', () => {
 
     expect(await store.remove(scope, entry.id)).toBe(true)
 
-    expect(store.read(scope, entry.id)).toBeNull()
+    await expect(store.read(scope, entry.id)).resolves.toBeNull()
     expect(store.list(scope).entries).toEqual([])
     expect(store.getSessionState('session-1').layers.workspace.enabled).toBe(true)
     await expect(readFile(store.paths.detail(entry.id), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })

@@ -148,7 +148,7 @@ export class MemoryLifecycleService {
 
   async correct(input: UpsertMemoryInput & { id: MemoryId }): Promise<MemoryEntry> {
     this.validateInput(input)
-    const existing = this.store.read(input.scope, input.id)
+    const existing = await this.store.read(input.scope, input.id)
     if (!existing) throw new Error('Cannot correct a memory that does not exist in this scope')
     const entry = await this.store.upsert(input)
     await this.markChanged('correct', entry.scope, [entry.id])

@@ -1,0 +1,6 @@
+{
+  "formatVersion": 1,
+  "id": "demo-workspace-convention",
+  "revision": 1,
+  "detail": "这是一条虚构的 workspace 项目约定。演示命令：npm run test -- tests/store tests/context。该命令仅用于展示数据格式。"
+}

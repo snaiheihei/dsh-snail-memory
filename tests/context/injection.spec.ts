@@ -128,10 +128,10 @@ describe('MemoryContextService', () => {
       lastVerifiedAt: '2026-10-26T00:00:00.000Z',
     })
 
-    expect(context.readDetail('session-1', 'global', memoryId('missing'))).toBeNull()
-    await expect(Promise.resolve(context.readDetail('session-1', 'global', entry.id))).resolves.toBeNull()
+    await expect(context.readDetail('session-1', 'global', memoryId('missing'))).resolves.toBeNull()
+    await expect(context.readDetail('session-1', 'global', entry.id)).resolves.toBeNull()
     await context.enable(agent, 'global')
-    expect(context.readDetail('session-1', 'global', entry.id)?.detail).toBe('Never rewrite a committed memory snapshot.')
+    expect((await context.readDetail('session-1', 'global', entry.id))?.detail).toBe('Never rewrite a committed memory snapshot.')
   })
 
   it('uses the attached workspace id for workspace memory', async () => {

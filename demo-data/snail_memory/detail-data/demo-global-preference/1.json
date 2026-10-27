@@ -1,0 +1,6 @@
+{
+  "formatVersion": 1,
+  "id": "demo-global-preference",
+  "revision": 1,
+  "detail": "这是一条虚构的全局偏好记忆。回答技术问题时，先给出可直接使用的结论，再补充必要的原因、限制条件和验证方法。"
+}
