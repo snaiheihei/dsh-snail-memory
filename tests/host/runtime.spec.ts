@@ -1,0 +1,73 @@
+import { describe, expect, it } from 'vitest'
+import type { GenerateOptions, LlmCallConfig, LlmRuntime, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import { DshAuxiliaryModel, renderSessionTranscript, resolveSessionWorkspace, selectModelRoute } from '../../src/runtime.js'
+
+describe('dsh runtime adapters', () => {
+  it('resolves workspace membership by stable session id and preserves Ungrouped', () => {
+    const workspaces = [
+      { id: 'workspace-1', sessionIds: ['session-1'] },
+      { id: 'workspace-2', sessionIds: ['session-2'] },
+    ]
+
+    expect(resolveSessionWorkspace(workspaces, 'session-2')).toBe('workspace-2')
+    expect(resolveSessionWorkspace(workspaces, 'missing')).toBeUndefined()
+  })
+
+  it('uses an explicit auxiliary route first, then a live agent route', () => {
+    const agents = [{ options: { provider: 'live-provider', model: 'live-model' } }]
+    expect(selectModelRoute(agents, { provider: 'configured', model: 'fixed' })).toEqual({ provider: 'configured', model: 'fixed' })
+    expect(selectModelRoute(agents)).toEqual({ provider: 'live-provider', model: 'live-model' })
+    expect(selectModelRoute([{ options: {} }])).toBeUndefined()
+  })
+
+  it('renders durable conversation and tool evidence without reinjecting memory snapshots', () => {
+    const transcript = renderSessionTranscript([
+      { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Build failed' }] } },
+      { seq: 2, type: 'user/message', data: { source: { kind: 'snail-memory' }, content: [{ type: 'text', text: 'old memory' }] } },
+      { seq: 3, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Use the focused test' }] } } },
+      { seq: 4, type: 'tool/result', data: { message: { content: [{ type: 'text', text: '6 tests passed' }] } } },
+      { seq: 5, type: 'request/context', data: { content: [{ type: 'text', text: 'hidden context' }] } },
+    ])
+
+    expect(transcript).toContain('Build failed')
+    expect(transcript).toContain('Use the focused test')
+    expect(transcript).toContain('6 tests passed')
+    expect(transcript).not.toContain('old memory')
+    expect(transcript).not.toContain('hidden context')
+  })
+
+  it('keeps the prepared config immutable across the one-shot auxiliary dispatch', async () => {
+    const config: LlmCallConfig = { provider: 'provider', model: 'model', maxTokens: 128 }
+    let preparedSignal: AbortSignal | undefined
+    let dispatched: GenerateOptions | undefined
+    const prepared = {
+      config,
+      async *stream(options: GenerateOptions) {
+        dispatched = options
+        yield { type: 'text-delta', index: 0, text: '{"candidates":[]}' }
+      },
+    } as unknown as PreparedLlmCall
+    const runtime = {
+      prepareCall(received: LlmCallConfig, signal?: AbortSignal) {
+        expect(received).toEqual({ provider: 'provider', model: 'model', maxTokens: 128 })
+        preparedSignal = signal
+        return Promise.resolve(prepared)
+      },
+    } as unknown as LlmRuntime
+    const model = new DshAuxiliaryModel(runtime)
+    const controller = new AbortController()
+
+    const call = await model.prepareCall({ provider: 'provider', model: 'model', maxTokens: 128, signal: controller.signal })
+    const chunks: unknown[] = []
+    for await (const chunk of call.stream({
+      provider: 'provider', model: 'model', maxTokens: 128,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'untrusted input' }] }],
+    })) chunks.push(chunk)
+
+    expect(preparedSignal).toBe(controller.signal)
+    expect(dispatched).toMatchObject(config)
+    expect(dispatched?.system).toContain('untrusted')
+    expect(dispatched?.messages[0]).toMatchObject({ role: 'user' })
+    expect(chunks).toEqual([{ type: 'text-delta', index: 0, text: '{"candidates":[]}' }])
+  })
+})

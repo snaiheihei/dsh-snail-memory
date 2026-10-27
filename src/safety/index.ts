@@ -1,0 +1,5 @@
+export { redactDetectedCredentials, sanitizeBeforeUse } from './redact.js'
+export { scanSecrets } from './scanner.js'
+export { admitSource, buildUntrustedContext, isSourceAllowed, prepareMemoryCandidate } from './policy.js'
+export type { AcquisitionMode, FindingAction, MemoryCandidateOptions, RedactionFinding, SafetyErrorCode, SanitizedText, ScanOptions, ScanResult, SecretKind, SourceAdmission, SourceRejectionReason, UntrustedContextOptions } from './types.js'
+export { SafetyError } from './types.js'

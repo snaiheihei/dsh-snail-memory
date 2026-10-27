@@ -1,0 +1,17 @@
+{
+  "id": "dsh-snail-memory",
+  "name": "Snail Memory",
+  "version": "0.1.0",
+  "description": {
+    "en": "Single-user global and workspace memory with explicit, append-only context injection.",
+    "zh": "单用户全局与 workspace 分层记忆，采用显式、只追加的上下文注入。"
+  },
+  "license": "MIT",
+  "engines": {
+    "dsh": "0.2.1-rc.3"
+  },
+  "components": {
+    "host": "dist/index.js",
+    "client": "dist/client.js"
+  }
+}

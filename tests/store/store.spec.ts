@@ -1,0 +1,145 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { MemoryStore, MemoryStoreReadonlyError } from '../../src/store/store.js'
+import type { MemoryScope, UpsertMemoryInput } from '../../src/store/types.js'
+import { workspaceId } from '../../src/store/types.js'
+
+const roots: string[] = []
+const stores: MemoryStore[] = []
+
+async function tempRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'snail-memory-store-'))
+  roots.push(root)
+  return root
+}
+
+async function open(root: string): Promise<MemoryStore> {
+  const store = await MemoryStore.open({ root, heartbeatMs: 60_000 })
+  stores.push(store)
+  return store
+}
+
+function input(scope: MemoryScope, summary: string): UpsertMemoryInput {
+  return {
+    scope,
+    category: 'project-convention',
+    summary,
+    detail: `${summary} details`,
+    sourceRefs: [{ sessionId: 'session-1' }],
+    lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+  }
+}
+
+afterEach(async () => {
+  await Promise.all(stores.splice(0).map(store => store.close()))
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
+
+describe('MemoryStore', () => {
+  it('keeps global and workspace entries separate and publishes workspace references', async () => {
+    const store = await open(await tempRoot())
+    const globalScope: MemoryScope = { kind: 'global' }
+    const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+
+    await store.upsert(input(globalScope, 'Use pnpm'))
+    await store.upsert(input(workspaceScope, 'Run focused tests'))
+
+    expect(store.list(globalScope).entries.map(entry => entry.summary)).toEqual(['Use pnpm'])
+    expect(store.list(workspaceScope).entries.map(entry => entry.summary)).toEqual(['Run focused tests'])
+    const globalIndex = store.list(globalScope)
+    expect(globalIndex.workspaces).toEqual([
+      expect.objectContaining({ workspaceId: workspaceId('workspace-1'), entryCount: 1 }),
+    ])
+    expect(globalIndex.workspaces[0]).not.toHaveProperty('detail')
+  })
+
+  it('links workspace index entries to the shared detail projection', async () => {
+    const root = await tempRoot()
+    const store = await open(root)
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const entry = await store.upsert(input(scope, 'Run focused tests'))
+
+    const markdown = await readFile(join(root, 'workspaces', 'workspace-1', 'INDEX.md'), 'utf8')
+    expect(markdown).toContain(`](../../details/${entry.id}.md)`)
+  })
+
+  it('restores entries and session state after reopening', async () => {
+    const root = await tempRoot()
+    const first = await open(root)
+    const scope: MemoryScope = { kind: 'global' }
+    await first.upsert(input(scope, 'Prefer explicit APIs'))
+    await first.updateSessionState('session-1', state => {
+      state.layers.global.enabled = true
+      state.layers.global.committed.push({
+        injectionId: 'injection-1',
+        revision: 1,
+        tokens: 42,
+        committedAt: '2026-10-26T00:00:00.000Z',
+      })
+    })
+    await first.close()
+
+    const second = await open(root)
+    expect(second.list(scope).entries[0]?.summary).toBe('Prefer explicit APIs')
+    expect(second.getSessionState('session-1').layers.global).toMatchObject({
+      enabled: true,
+      committed: [{ injectionId: 'injection-1', tokens: 42 }],
+    })
+  })
+
+  it('forgets only memory content and preserves session history metadata', async () => {
+    const store = await open(await tempRoot())
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const entry = await store.upsert(input(scope, 'Obsolete convention'))
+    await store.updateSessionState('session-1', state => {
+      state.layers.workspace.enabled = true
+    })
+
+    expect(await store.remove(scope, entry.id)).toBe(true)
+
+    expect(store.read(scope, entry.id)).toBeNull()
+    expect(store.list(scope).entries).toEqual([])
+    expect(store.getSessionState('session-1').layers.workspace.enabled).toBe(true)
+    await expect(readFile(store.paths.detail(entry.id), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await store.remove(scope, entry.id)).toBe(false)
+  })
+
+  it('opens a second host as read-only instead of allowing concurrent writes', async () => {
+    const root = await tempRoot()
+    const writer = await open(root)
+    const reader = await open(root)
+    const scope: MemoryScope = { kind: 'global' }
+
+    expect(writer.writable).toBe(true)
+    expect(reader.writable).toBe(false)
+    await expect(reader.upsert(input(scope, 'Must not write'))).rejects.toBeInstanceOf(MemoryStoreReadonlyError)
+    await reader.upsert(input(scope, 'Must not write')).catch(() => {})
+    expect(reader.list(scope).entries).toEqual([])
+  })
+
+  it('recovers a stale writer lock', async () => {
+    const root = await tempRoot()
+    await writeFile(join(root, 'lock.json'), JSON.stringify({
+      writerId: 'dead-writer',
+      heartbeatAt: '2020-01-01T00:00:00.000Z',
+    }))
+    const store = await MemoryStore.open({
+      root,
+      heartbeatMs: 60_000,
+      lockStaleMs: 1,
+      now: () => new Date('2026-10-26T00:00:00.000Z'),
+    })
+    stores.push(store)
+
+    expect(store.writable).toBe(true)
+  })
+
+  it('fails loudly on a corrupt authoritative snapshot', async () => {
+    const root = await tempRoot()
+    await writeFile(join(root, 'state.v1.json'), '{not json')
+
+    await expect(open(root)).rejects.toThrow(/state\.v1\.json/)
+  })
+})
