@@ -148,16 +148,20 @@ export class MemoryStore {
   }
 
   async remove(scope: MemoryScope, id: MemoryId): Promise<boolean> {
-    const removed = await this.transaction('memory/forget', draft => {
+    return this.transaction('memory/forget', draft => {
       const exists = draft.entries.some(entry => entry.id === id && scopeKey(entry.scope) === scopeKey(scope))
       if (!exists) return false
       draft.entries = draft.entries.filter(entry => entry.id !== id)
       this.nextScopeRevision(draft, scope)
       draft.meta.dirty = true
       return true
+    }, async removed => {
+      if (!removed) return
+      await Promise.all([
+        rm(this.paths.detail(id), { force: true }),
+        rm(this.paths.detailDirectory(id), { recursive: true, force: true }),
+      ])
     })
-    if (removed) await rm(this.paths.detail(id), { force: true })
-    return removed
   }
 
   async updateSessionState(sessionId: string, update: (state: SessionMemoryState) => void): Promise<SessionMemoryState> {
@@ -192,7 +196,11 @@ export class MemoryStore {
     return revision
   }
 
-  private transaction<T>(operation: string, update: (draft: StoreState) => T): Promise<T> {
+  private transaction<T>(
+    operation: string,
+    update: (draft: StoreState) => T,
+    finalize?: (result: T) => Promise<void>,
+  ): Promise<T> {
     const run = this.queue.then(async () => {
       if (!this.writable) throw new MemoryStoreReadonlyError('This Snail Memory host is read-only')
       await this.lock.assertOwner()
@@ -202,6 +210,7 @@ export class MemoryStore {
       await appendFile(this.paths.audit, `${JSON.stringify({ time: this.now().toISOString(), operation, revision: draft.revision })}\n`, 'utf8')
       await writeJsonAtomic(this.paths.state, draft)
       await writeProjections(this.paths, draft)
+      await finalize?.(result)
       this.state = draft
       return result
     })

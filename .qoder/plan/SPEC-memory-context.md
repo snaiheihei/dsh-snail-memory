@@ -24,8 +24,8 @@ src/context/message-source.ts → snail-memory MessageSourceMap 合并
 src/context/snapshot.ts       → 摘要、索引、时效与不可信提示渲染
 src/context/injection.ts      → desired/queued/committed 对账
 src/context/service.ts        → enable、refresh、恢复和统计
-src/context/tool.ts           → snail_memory_read 受限详情工具
-tests/context/                → latch、revision、顺序和恢复测试
+src/context/tool.ts           → snail_memory_read 受限详情与分片读取工具
+tests/context/                → latch、revision、顺序、恢复和分片读取测试
 ```
 
 ## Code Style
@@ -55,6 +55,15 @@ agent.inject(createUserMessage({
 - 已提交快照永不 replace；忘记只阻止未来注入和详情读取。
 - `snail_memory_read` 仅接受当前 Session 已启用 scope 和已知 MemoryId，不开放任意路径。
 
+### 大详情读取契约
+
+- 未分片记忆只传 `layer + memory_id` 时保持原契约，返回父摘要、完整 detail 和最近验证时间。
+- 分片记忆只传 `layer + memory_id` 时返回父摘要、最近验证时间及有序分片清单，不返回任何分片正文；清单仅含 `chunk_id`、序号、字符数和估算 token，供模型二次选择。
+- 分片记忆同时传 `chunk_id` 时只返回该分片正文及父元数据，不夹带其他分片或完整父 detail。`chunk_id` 使用 `part-NNN`，只在所属父条目内解释。
+- 未分片记忆传入任意 `chunk_id`（包括空字符串）、未知或空 `chunk_id`、未知父记忆均返回未找到，不得以返回完整父 detail 作为降级。
+- 工具 output schema 必须区分清单与单片结果；分片清单不得通过 `detail` 或 preview 泄漏正文。模型可见内容仍经普通工具调用/结果进入 Session，本功能不增加或改写 Session 日志。
+- 分片不改变常驻快照、enable、refresh revision、desired/committed 语义；主快照继续只含父摘要。
+
 ## KV Cache Effect
 
 - enable 首次注入：只在历史尾部追加一个 user surface node，不重写 system node 0；保留此前前缀，追加后产生新的后缀。
@@ -69,6 +78,7 @@ agent.inject(createUserMessage({
 - 自动只一次、refresh 同 revision no-op、新 revision 追加。
 - queued 后重启、commit 后重启、重复 session/event、取消和 dispose。
 - workspace 缺失/删除、Ungrouped、详情工具越权。
+- 大详情默认清单无正文、指定单片无其他正文、未知分片未找到、未分片读取完全兼容。
 - 快照包含 revision、生成时间、天数提醒、不可信提示，且正文可重建。
 - 验证估算 token 只统计已提交 injection。
 
@@ -83,7 +93,8 @@ agent.inject(createUserMessage({
 - reload、Host 重启和另一浏览器均恢复相同开关与提交状态。
 - enable 后最新可用摘要只自动注入一次，refresh 语义符合上述约定。
 - 所有进入模型的记忆均表现为普通 Session 用户/工具事件。
-- 无 system prompt 头部污染，无记忆删除引起的对话修改。
+- 大详情默认读取不返回正文，单片读取只返回目标分片；未分片与越权行为无回归。
+- 无 system prompt 头部污染，无记忆删除或分片引起的对话修改。
 
 ## Open Questions
 

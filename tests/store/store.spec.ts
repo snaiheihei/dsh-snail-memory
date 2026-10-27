@@ -65,6 +65,47 @@ describe('MemoryStore', () => {
     expect(markdown).toContain(`](../../details/${entry.id}.md)`)
   })
 
+  it('projects large details into chunks without expanding the parent index', async () => {
+    const root = await tempRoot()
+    const store = await open(root)
+    const scope: MemoryScope = { kind: 'global' }
+    const detail = `Heading\n\n${'a'.repeat(9_000)}`
+    const entry = await store.upsert({ ...input(scope, 'Large detail'), detail })
+
+    const index = await readFile(join(root, 'global', 'INDEX.md'), 'utf8')
+    const chunkIndex = await readFile(join(root, 'details', entry.id, 'INDEX.md'), 'utf8')
+    const firstChunk = await readFile(join(root, 'details', entry.id, 'part-001.md'), 'utf8')
+
+    expect(index).toContain(`](../details/${entry.id}/INDEX.md)`)
+    expect(index.match(/Large detail/g)).toHaveLength(1)
+    expect(index).not.toContain('part-001')
+    expect(chunkIndex).toContain('part-001.md')
+    expect(chunkIndex).not.toContain('a'.repeat(100))
+    expect(firstChunk).toContain('Heading')
+    await expect(readFile(join(root, 'details', `${entry.id}.md`), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('removes stale chunk projections after corrections and deletion', async () => {
+    const root = await tempRoot()
+    const store = await open(root)
+    const scope: MemoryScope = { kind: 'global' }
+    const entry = await store.upsert({ ...input(scope, 'Changing detail'), detail: 'a'.repeat(13_000) })
+    const chunkDirectory = join(root, 'details', entry.id)
+
+    await store.upsert({ ...input(scope, 'Changing detail'), id: entry.id, detail: 'b'.repeat(8_500) })
+    await expect(readFile(join(chunkDirectory, 'part-004.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(chunkDirectory, 'part-003.md'), 'utf8')).toContain('b')
+
+    await store.upsert({ ...input(scope, 'Changing detail'), id: entry.id, detail: 'small' })
+    await expect(readFile(join(chunkDirectory, 'INDEX.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(store.paths.detail(entry.id), 'utf8')).toContain('small')
+
+    await store.upsert({ ...input(scope, 'Changing detail'), id: entry.id, detail: 'c'.repeat(8_001) })
+    await expect(readFile(store.paths.detail(entry.id), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await store.remove(scope, entry.id)
+    await expect(readFile(join(chunkDirectory, 'part-001.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('restores entries and session state after reopening', async () => {
     const root = await tempRoot()
     const first = await open(root)

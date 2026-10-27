@@ -73,3 +73,12 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 - 本轮未补做移动视口 UI 验证，也未逐事件核对压缩 Session 的完整注入顺序；已验证正常 Session 的 desired/committed 对账和下一次提问后的提交结果。
 - Composer 的 queued/committed 数字仍受既有 UI 新鲜度限制，可能需 reload 或重新打开管理页才显示最新 committed 状态；权威 `state.v1.json` 已确认两层 committed。
 - 删除只影响记忆而不删除对话历史的交互已在先前无凭据 Web 冒烟中验证；本轮真实模型测试未删除这两条蒸馏证据。
+
+### 大详情分片增量（2026-10-27）
+
+- 已同步更新能力地图及 memory-store、memory-context、memory-api Spec：父 JSON 正文保持权威，详情大于 8,000 字符时确定性拆为至多 4,000 字符的无损分片。
+- scope 主索引和核心摘要仍只保留父条目；大详情投影为 `details/<id>/INDEX.md` 与 `part-NNN.md`，小详情保持 `details/<id>.md`。纠正、缩片、形态切换和删除会清理陈旧投影。
+- `snail_memory_read` 对大详情默认只返回有序分片清单及字符/token 估算；指定 `chunk_id` 仅返回目标单片。小详情、未启用层和未知 id 的兼容/拒绝行为均有测试。
+- 分片功能未修改 enable、refresh revision、desired/committed 或 dsh Session 持久化逻辑；管理 RPC 仍提供人类查看用的父完整详情。
+- 独立复核后补充四个回归边界：分片目录使用临时目录完整写入并切换，失败保留旧整套投影；删除清理纳入事务队列，避免同 ID 重建竞争；空 `chunk_id` 不再回退完整正文；小详情升级分片时先成功发布新目录再删除旧文件，写失败保留旧小详情。
+- 已实际通过 28 个测试文件、114 项测试，以及 typecheck、lint、build。本轮未重新执行真实 Host/模型分片冒烟，也未向真实 Host 安装新构建。

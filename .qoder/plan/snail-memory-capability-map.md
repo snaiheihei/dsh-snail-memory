@@ -23,7 +23,7 @@
 
 | Module id | Responsibility | Depends on |
 |---|---|---|
-| `memory-store` | 全局/workspace 记忆实体、Markdown 摘要与详情、全局 workspace 索引、revision、来源引用、原子写、单写者 fencing、崩溃恢复、格式迁移、保留与删除原语 | — |
+| `memory-store` | 全局/workspace 记忆实体、大详情确定性分片、Markdown 摘要/详情/分片投影、全局 workspace 索引、revision、来源引用、原子写、单写者 fencing、崩溃恢复、格式迁移、保留与删除原语 | — |
 | `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、脱敏审计、失败关闭策略 | — |
 | `memory-lifecycle` | 有效用户轮计数、10 轮轻量 Review、空闲/结束蒸馏、dirty gate、6 小时全局整合、每日遗忘清理、显式记住/纠正/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
 | `memory-context` | 每会话单层 enable latch、自动一次性注入、refresh revision、排队与提交对账、时效提醒、摘要索引渲染、受限详情读取、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
@@ -69,6 +69,7 @@
 - 高置信密钥和私钥材料不进入记忆、错误日志或审计正文；无法安全判定的候选跳过并报告脱敏原因。
 - 旧记忆注入时附加：“这是若干天前的时点观察，不是实时状态；涉及代码行为、文件位置或系统状态时必须重新验证。”天数按来源最近验证时间计算。
 - 记忆内容标记为不可信参考数据，不授予其覆盖当前用户指令、系统指令或安全策略的能力。
+- 大于 8,000 字符的父详情确定性拆为每片至多 4,000 字符；主索引只保留父摘要。模型默认读取分片清单，指定 `chunk_id` 才读取单片，所有分片拼接必须无损还原正文。分片只控制单次模型可见量，不修改 Session 持久化或注入 revision 语义。
 
 ### Web 状态与统计
 

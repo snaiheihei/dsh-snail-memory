@@ -21,6 +21,14 @@ export class StorePaths {
     return join(this.details, `${id}.md`)
   }
 
+  detailDirectory(id: string): string {
+    return join(this.details, id)
+  }
+
+  detailChunk(id: string, chunkId: string): string {
+    return join(this.detailDirectory(id), `${chunkId}.md`)
+  }
+
   workspace(id: string): string {
     return join(this.workspaces, id)
   }
