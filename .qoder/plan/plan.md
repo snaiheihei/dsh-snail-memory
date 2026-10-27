@@ -48,3 +48,28 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 ## 完成定义
 
 六份 Spec 的可测试 Success Criteria 均满足；所有数据默认位于 `~/.dsh/snail_memory`；安装无需修改 dsh；Web 所有请求功能可用；测试和构建真实通过；未完成的真实 Host/UI 验证必须明确列出，不得宣称已验证。
+
+## 实施与验证记录（2026-10-27）
+
+### 完成状态
+
+- 六个垂直切片均已实现；插件源码、Host/Client bundle、Spec、测试和构建脚本已纳入 Git，基线提交为 `437a60a`（`feat: implement Snail Memory plugin`）。
+- 目标 `deepseek-harness` 保持 `0.2.1-rc.3`，通过树外 tarball 和 `dsh plugin --profile web add` 安装；未修改 dsh 或 `dsh-prime-memory` 源码。
+- 自动化验证已实际通过：25 个测试文件、103 项测试，以及 typecheck、lint、build。tarball 安装和组合配置检查通过。
+
+### 真实模型端到端验证
+
+- 使用独立 `$DSH_HOME`、独立 47895 端口和用户提供的 credentials-local 文件，不复制、打印或提交凭据。为缩短测试，仅在隔离配置中设置 `reviewEveryUserTurns: 1`、`idleDelayMinutes: 0`、`consolidationCooldownHours: 0`；产品默认值未改。
+- 小米目录中的 `mimo-v2.5` 和 `mimo-v2.5-pro` 均由真实 API 返回 `Unsupported model`；改用 `mimo-v2.6-flash` 后，普通对话成功并精确返回 `E2E_MODEL_OK`。
+- 真实辅助模型完成会话蒸馏，写入 2 条 workspace 记忆，workspace scope revision 从 0 前进到 2；两条记忆均保留来源 Session 的 `sourceRefs`，详情和 Markdown 投影可读。
+- 真实整合随后完成：`lastConsolidationAt` 已写入，`pending` 清空，`dirty` 为 false，`lastError` 为 null。
+- global 与 workspace 两层逐层 enable 后各生成一次快照；下一次真实提问精确返回 `E2E_MEMORY_OK`，两层快照均由 post-commit 事件转为 committed。workspace 注入为 revision 2，global 仅含 workspace 索引引用。
+- Web Memory 管理页实际显示 2 条 workspace 条目、312 个估算注入 tokens、revision 2、分类、来源、详情和删除入口；global tab 显示 0 条全局正文及对应 workspace 引用。
+- 对测试存储执行高置信密钥、Bearer 和凭据路径扫描，无命中；audit 未出现 summary、detail、snapshot 或 sourceRefs 正文。
+- 配置热重载和多实例竞争期间观察到第二实例按设计进入只读；最终验证在写锁恢复且 `writable: true` 的干净 Host 中完成。
+
+### 保留边界
+
+- 本轮未补做移动视口 UI 验证，也未逐事件核对压缩 Session 的完整注入顺序；已验证正常 Session 的 desired/committed 对账和下一次提问后的提交结果。
+- Composer 的 queued/committed 数字仍受既有 UI 新鲜度限制，可能需 reload 或重新打开管理页才显示最新 committed 状态；权威 `state.v1.json` 已确认两层 committed。
+- 删除只影响记忆而不删除对话历史的交互已在先前无凭据 Web 冒烟中验证；本轮真实模型测试未删除这两条蒸馏证据。

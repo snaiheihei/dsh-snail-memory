@@ -55,7 +55,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-describe('MemoryLifecycleService', () => {
+// These file-backed tests perform many real atomic writes while Vitest runs other suites in parallel.
+describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
   it('counts only completed user turns and respects the 9/10/11 boundary and duplicate notifications', async () => {
     const { service } = await setup(['{"candidates":[]}'])
     await service.start()
