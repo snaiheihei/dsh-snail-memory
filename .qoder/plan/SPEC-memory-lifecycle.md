@@ -36,6 +36,7 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - `idleDelayMinutes = 15`；新活动取消旧 idle timer，dispose 不再启动 maintenance。
 - `consolidationCooldownHours = 6`；dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
 - `retentionSweepHours = 24`。
+- 首次加载只恢复已有记忆、调度和注入状态，不自动遍历并蒸馏全部历史 Session；历史回填不是默认生命周期任务。
 - 保留期：环境事实 30 天、项目约定/排障经验 180 天、用户偏好/长期决策不自动过期；过期结论先从未验证时间判定。
 - Review 输入最多 24,000 字符，蒸馏最多 48,000 字符，整合最多 64,000 字符；详情单条最多 16,000 字符。
 - Review/蒸馏的转录投影仅保留真实用户消息、助手消息和普通工具结果；通过 `tool/call.callId` 排除 `snail_memory_read` 的 `tool/result`，不按结果正文过滤，也不修改原始 Session。
