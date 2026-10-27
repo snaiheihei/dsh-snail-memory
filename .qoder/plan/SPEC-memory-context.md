@@ -54,6 +54,7 @@ agent.inject(createUserMessage({
 - 相同 injection id 不得重复 committed 计数；重复通知不重复 token 统计。
 - 已提交快照永不 replace；忘记只阻止未来注入和详情读取。
 - `snail_memory_read` 仅接受当前 Session 已启用 scope 和已知 MemoryId，不开放任意路径。
+- `readDetail()` 异步按父索引中的 id/revision 读取目标权威详情记录；enable、refresh 和快照渲染只消费内存父索引，不预读完整详情。工具输出契约不因存储懒加载而改变。
 
 ### 大详情读取契约
 

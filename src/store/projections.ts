@@ -4,6 +4,7 @@ import type { MemoryEntry, MemoryScope, StoreState, StoredMemoryEntry } from './
 import { workspaceId } from './types.js'
 import type { StorePaths } from './paths.js'
 import { chunkMemoryDetail, MEMORY_CHUNK_THRESHOLD, type MemoryDetailChunk } from './chunks.js'
+import { writeTextAtomic } from './json.js'
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -119,7 +120,7 @@ export async function writeDetailProjection(paths: StorePaths, entry: MemoryEntr
   const metadata = `# ${escapeText(entry.summary)}\n\n- Category: ${entry.category}\n- Updated: ${entry.updatedAt}\n- Last verified: ${entry.lastVerifiedAt}\n- Revision: ${entry.revision}\n`
   const chunks = chunkMemoryDetail(entry.detail)
   if (chunks.length === 0) {
-    await writeFile(paths.detail(entry.id), `${metadata}\n${escapeText(entry.detail)}\n`, 'utf8')
+    await writeTextAtomic(paths.detail(entry.id), `${metadata}\n${escapeText(entry.detail)}\n`)
     await rm(paths.detailDirectory(entry.id), { recursive: true, force: true })
     await rm(`${paths.detailDirectory(entry.id)}.tmp`, { recursive: true, force: true })
     await rm(`${paths.detailDirectory(entry.id)}.bak`, { recursive: true, force: true })
@@ -127,6 +128,15 @@ export async function writeDetailProjection(paths: StorePaths, entry: MemoryEntr
   }
   await writeChunkDirectory(paths, entry, chunks, metadata)
   await rm(paths.detail(entry.id), { force: true })
+}
+
+export async function removeDetailProjection(paths: StorePaths, id: string): Promise<void> {
+  await Promise.all([
+    rm(paths.detail(id), { force: true }),
+    rm(paths.detailDirectory(id), { recursive: true, force: true }),
+    rm(`${paths.detailDirectory(id)}.tmp`, { recursive: true, force: true }),
+    rm(`${paths.detailDirectory(id)}.bak`, { recursive: true, force: true }),
+  ])
 }
 
 export async function writeIndexProjections(paths: StorePaths, state: StoreState): Promise<void> {
@@ -139,7 +149,7 @@ export async function writeIndexProjections(paths: StorePaths, state: StoreState
   for (const scope of scopes) {
     const directory = scope.kind === 'global' ? paths.global : paths.workspace(scope.workspaceId)
     await mkdir(directory, { recursive: true })
-    await writeFile(join(directory, 'INDEX.md'), indexMarkdown(state, scope), 'utf8')
-    await writeFile(join(directory, 'MEMORY.md'), coreMarkdown(state, scope), 'utf8')
+    await writeTextAtomic(join(directory, 'INDEX.md'), indexMarkdown(state, scope))
+    await writeTextAtomic(join(directory, 'MEMORY.md'), coreMarkdown(state, scope))
   }
 }

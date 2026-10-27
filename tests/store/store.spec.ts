@@ -8,6 +8,7 @@ import type { MemoryScope, UpsertMemoryInput } from '../../src/store/types.js'
 import { memoryId, workspaceId } from '../../src/store/types.js'
 
 const fileReads = vi.hoisted(() => [] as string[])
+const fileReadControl = vi.hoisted(() => ({ delayDetails: false }))
 
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof FsPromises>()
@@ -15,6 +16,9 @@ vi.mock('node:fs/promises', async importOriginal => {
     ...actual,
     readFile: async (...args: Parameters<typeof actual.readFile>) => {
       fileReads.push(String(args[0]))
+      if (fileReadControl.delayDetails && String(args[0]).includes('detail-data')) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
       return actual.readFile(...args)
     },
   }
@@ -48,6 +52,7 @@ function input(scope: MemoryScope, summary: string): UpsertMemoryInput {
 
 afterEach(async () => {
   fileReads.length = 0
+  fileReadControl.delayDetails = false
   await Promise.all(stores.splice(0).map(store => store.close()))
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
@@ -224,6 +229,38 @@ describe('MemoryStore', () => {
     expect(await store.remove(scope, entry.id)).toBe(false)
   })
 
+  it('reads unmigrated v1 details on a secondary host without writing', async () => {
+    const root = await tempRoot()
+    const writer = await open(root)
+    const id = memoryId('00000000-0000-4000-8000-000000000002')
+    const timestamp = '2026-10-26T00:00:00.000Z'
+    await writeFile(join(root, 'state.v1.json'), JSON.stringify({
+      formatVersion: 1,
+      revision: 1,
+      entries: [{
+        ...input({ kind: 'global' }, 'Read-only legacy'),
+        id,
+        detail: 'legacy secondary detail',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        revision: 1,
+      }],
+      workspaces: {},
+      scopeRevisions: { global: 1, workspaces: {} },
+      sessions: {},
+      meta: {
+        dirty: false, nextConsolidationAt: null, nextRetentionAt: null,
+        lastConsolidationAt: null, lastRetentionAt: null, lastError: null, pending: {},
+      },
+    }))
+
+    const reader = await open(root)
+    expect(reader.writable).toBe(false)
+    expect((await reader.read({ kind: 'global' }, id))?.detail).toBe('legacy secondary detail')
+    await expect(readFile(join(root, 'state.v2.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(writer.writable).toBe(true)
+  })
+
   it('opens a second host as read-only instead of allowing concurrent writes', async () => {
     const root = await tempRoot()
     const writer = await open(root)
@@ -235,6 +272,34 @@ describe('MemoryStore', () => {
     await expect(reader.upsert(input(scope, 'Must not write'))).rejects.toBeInstanceOf(MemoryStoreReadonlyError)
     await reader.upsert(input(scope, 'Must not write')).catch(() => {})
     expect(reader.list(scope).entries).toEqual([])
+  })
+
+  it('refreshes a secondary host before reading corrected or deleted details', async () => {
+    const root = await tempRoot()
+    const writer = await open(root)
+    const reader = await open(root)
+    const scope: MemoryScope = { kind: 'global' }
+    const entry = await writer.upsert({ ...input(scope, 'Secondary read'), detail: 'old-detail' })
+    expect((await reader.read(scope, entry.id))?.detail).toBe('old-detail')
+
+    await writer.upsert({ ...input(scope, 'Secondary read'), id: entry.id, detail: 'new-detail' })
+    expect((await reader.read(scope, entry.id))?.detail).toBe('new-detail')
+
+    await writer.remove(scope, entry.id)
+    await expect(reader.read(scope, entry.id)).resolves.toBeNull()
+  })
+
+  it('serializes local detail reads with deletion', async () => {
+    const store = await open(await tempRoot())
+    const scope: MemoryScope = { kind: 'global' }
+    const entry = await store.upsert({ ...input(scope, 'Read race'), detail: 'readable-before-delete' })
+    fileReadControl.delayDetails = true
+
+    const reading = store.read(scope, entry.id)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await store.remove(scope, entry.id)
+
+    expect((await reading)?.detail).toBe('readable-before-delete')
   })
 
   it('recovers a stale writer lock', async () => {

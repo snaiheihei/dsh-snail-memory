@@ -6,6 +6,7 @@ export class StorePaths {
   readonly audit: string
   readonly lock: string
   readonly detailData: string
+  readonly projectionPending: string
   readonly details: string
   readonly global: string
   readonly workspaces: string
@@ -16,6 +17,7 @@ export class StorePaths {
     this.audit = join(root, 'audit.v1.jsonl')
     this.lock = join(root, 'lock.json')
     this.detailData = join(root, 'detail-data')
+    this.projectionPending = join(root, 'projection-pending.v1.json')
     this.details = join(root, 'details')
     this.global = join(root, 'global')
     this.workspaces = join(root, 'workspaces')

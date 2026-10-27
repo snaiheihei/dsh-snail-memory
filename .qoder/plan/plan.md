@@ -82,3 +82,11 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 - 分片功能未修改 enable、refresh revision、desired/committed 或 dsh Session 持久化逻辑；管理 RPC 仍提供人类查看用的父完整详情。
 - 独立复核后补充四个回归边界：分片目录使用临时目录完整写入并切换，失败保留旧整套投影；删除清理纳入事务队列，避免同 ID 重建竞争；空 `chunk_id` 不再回退完整正文；小详情升级分片时先成功发布新目录再删除旧文件，写失败保留旧小详情。
 - 已实际通过 28 个测试文件、114 项测试，以及 typecheck、lint、build。本轮未重新执行真实 Host/模型分片冒烟，也未向真实 Host 安装新构建。
+
+### 父索引驻留与详情懒加载增量（2026-10-27）
+
+- 权威状态升级为 `state.v2.json` 与 `detail-data/<id>/<revision>.json`：内存只驻留父索引、Session 和调度状态；list、enable、refresh 及保留期清理不读取完整详情，单条 read 按 id/revision 异步加载。
+- 保留 v1 可写迁移和只读兼容读取；迁移先写详情记录与投影，再发布 v2，成功后才删除 v1。外部 RPC、Web 完整详情、工具分片读取和 Session 契约保持不变。
+- 写事务使用只含父 id 的 `projection-pending.v1.json` 协调多文件发布：提交前失败恢复旧投影，提交后派生失败返回 committed 结果并留待重启或后续事务恢复；小详情和 INDEX/MEMORY 采用原子文本写入。
+- writer 本地 read 与写入串行；第二 Host 在 read 前刷新父状态并在记录 ENOENT 时重试。补充父状态失败、索引失败重开恢复、只读 v1、跨 Host 纠正/删除和 read/remove 竞争回归测试。
+- 已实际通过 28 个测试文件、124 项测试，以及 typecheck、lint、build 和 `git diff --check`。本轮未向真实 Host 安装新构建，也未重新执行真实 UI/模型 E2E；懒加载及恢复结论来自自动化与故障注入验证。

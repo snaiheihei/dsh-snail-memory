@@ -23,7 +23,7 @@
 
 | Module id | Responsibility | Depends on |
 |---|---|---|
-| `memory-store` | 全局/workspace 记忆实体、大详情确定性分片、Markdown 摘要/详情/分片投影、全局 workspace 索引、revision、来源引用、原子写、单写者 fencing、崩溃恢复、格式迁移、保留与删除原语 | — |
+| `memory-store` | 全局/workspace 父索引驻留、版本化权威详情懒加载、大详情确定性分片、Markdown 摘要/详情/分片投影、全局 workspace 索引、revision、来源引用、原子写、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
 | `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、脱敏审计、失败关闭策略 | — |
 | `memory-lifecycle` | 有效用户轮计数、10 轮轻量 Review、空闲/结束蒸馏、dirty gate、6 小时全局整合、每日遗忘清理、显式记住/纠正/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
 | `memory-context` | 每会话单层 enable latch、自动一次性注入、refresh revision、排队与提交对账、时效提醒、摘要索引渲染、受限详情读取、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
@@ -42,6 +42,9 @@
 - 每条记忆具有稳定 id、scope、五类固定标签、摘要、详情、创建/更新/最近验证时间、来源 Session/事件引用、revision 和必要的取代/过期元数据。
 - 标签为：用户偏好、项目约定、环境事实、已验证的排障经验、重要的长期决策。
 - 普通更新采用原子发布；格式升级使用不可变世代和相邻迁移，不覆盖已提交的旧世代。
+- `state.v2.json` 只保存父索引、Session 与运行状态；`detail-data/<id>/<revision>.json` 保存当前父索引指向的不可变详情。启动、list、enable 和 refresh 不加载详情正文，store.read 按 id/revision 异步读取目标记录。
+- v1 仅在可写启动时迁移：详情记录与详情投影完整就绪后发布 v2，成功后才删除 v1；只读 Host 对未迁移 v1 使用兼容读取。新详情和投影先于父状态切换，旧详情世代在发布后清理。
+- 投影事务通过只含父 id 的持久 pending intent 恢复：提交前失败回到当前父状态对应投影，提交后失败保留 committed 结果并在重启或后续事务重试；writer 本地读取与写入串行，只读 Host 读取时刷新父状态。
 - 全局整合在各自 scope 内去重、合并、修正冲突和清理过期结论，同时更新全局核心摘要与 workspace 引用索引；跨 scope 晋升默认需要显式意图。
 
 ### 生命周期

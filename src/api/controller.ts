@@ -55,7 +55,7 @@ export class MemoryController {
         case 'enable': return await this.enable(payload as LayerRequest, false)
         case 'refresh': return await this.enable(payload as LayerRequest, true)
         case 'list': return this.list((payload as ScopeRequest).scope)
-        case 'read': return this.readMemory(payload as ReadRequest)
+        case 'read': return await this.readMemory(payload as ReadRequest)
         case 'remove': return { removed: await this.forget(payload as ReadRequest) }
         case 'remember': return await this.writeMemory(payload as WriteRequest, false)
         case 'correct': return await this.writeMemory(payload as CorrectRequest, true)

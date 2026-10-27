@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -88,6 +88,19 @@ describe('MemoryController', () => {
     await expect(controller.call('remove', { scope: { kind: 'global' }, id: entry.id })).resolves.toEqual({ removed: false })
     await expect(store.read({ kind: 'global' }, entry.id)).resolves.toBeNull()
     expect(store.getSessionState('session-1')).toEqual(before)
+  })
+
+  it('sanitizes lazy detail read failures at the controller boundary', async () => {
+    const { controller, store } = await setup()
+    const entry = await controller.call('remember', {
+      scope: { kind: 'global' }, category: 'long-term-decision', summary: 'Safe read error', detail: 'Detail',
+    })
+    await writeFile(store.paths.detailRecord(entry.id, entry.revision), '{not json')
+
+    await expect(controller.call('read', { scope: { kind: 'global' }, id: entry.id })).rejects.toMatchObject({
+      code: 'internal',
+      message: 'Snail Memory could not complete the operation.',
+    })
   })
 
   it('rejects missing sessions, unknown workspaces, and reads of missing entries', async () => {

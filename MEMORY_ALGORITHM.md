@@ -1,6 +1,6 @@
 # Snail Memory：记忆算法、设计技巧与演进
 
-本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-27 的大详情分片实现为基线。
+本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-27 的大详情分片、父索引驻留与详情懒加载实现为基线。
 
 文中严格区分三类机制：
 
@@ -45,7 +45,7 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
                          至多 6 小时后：scope 内语义整合
                          每 24 小时：保留期与显式过期清理
                                              │
-                              权威 JSON + Markdown 投影
+                       父索引 JSON + 版本化详情 JSON + Markdown 投影
                                              │
                 enable / refresh → 摘要索引快照 → append-only 注入
                                              │
@@ -77,9 +77,9 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 ### 3.3 父记忆是唯一实体
 
-每条 `MemoryEntry` 包含稳定 ID、scope、类别、摘要、完整详情、创建/更新/最近验证时间、条目 revision、来源引用，以及可选的过期和取代元数据。
+每条 `MemoryEntry` 包含稳定 ID、scope、类别、摘要、完整详情、创建/更新/最近验证时间、条目 revision、来源引用，以及可选的过期和取代元数据。磁盘驻留时把它拆成父索引和版本化详情；`read()` 按 id/revision 读取详情后重新组成同一逻辑实体。
 
-主索引只移除 `detail`，不会把分片变成独立记忆。全局索引、workspace 索引、模型快照和 Web 管理页都围绕同一个父条目工作。
+主索引不包含 `detail`，内部另存 `detailChars` 用于详情形态和完整性校验，不会把分片变成独立记忆。全局索引、workspace 索引、模型快照和 Web 管理页都围绕同一个父条目工作。
 
 ## 4. 生命周期触发算法
 
@@ -193,7 +193,7 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 1. Store 按 `updatedAt` 新到旧排列，ID 作为稳定次序兜底。
 2. enable 或 refresh 时渲染该层摘要索引。
 3. 全局快照额外携带 workspace 引用，不携带 workspace 正文。
-4. 模型确有需要时调用 `snail_memory_read`，提供已启用 layer 和父 memory ID。
+4. 模型确有需要时调用 `snail_memory_read`，提供已启用 layer 和父 memory ID；Store 此时才按 id/revision 异步读取目标权威详情记录。
 5. 小详情直接返回；大详情先返回分片清单，再按 chunk ID 读取单片。
 
 每条快照记忆带类别、ID、摘要和“若干天前”的时点提示，并明确它是不可信参考数据，不能覆盖当前用户、系统或安全指令。
@@ -290,19 +290,34 @@ Web 管理页仍读取父完整详情供人查看；分片限制只针对模型�
 
 ## 11. 持久化与并发设计
 
-默认数据根为 `$DSH_HOME/snail_memory`。`state.v1.json` 是唯一权威状态，Markdown 是可重建投影，不与 JSON 形成双事实源。
+默认数据根为 `$DSH_HOME/snail_memory`。当前权威存储由父状态和其指向的详情世代组成，Markdown 只是投影：
+
+```text
+state.v2.json                         父索引、Session、调度状态；不含完整 detail
+detail-data/<id>/<revision>.json     不可变权威详情；父索引的 revision 选择当前世代
+details/<id>.md                      小详情可读投影
+details/<id>/part-NNN.md             大详情分片可读投影
+global/、workspaces/                 INDEX.md 与 MEMORY.md 索引投影
+```
+
+Host 启动只读取 `state.v2.json` 到 `MemoryStore`。`list()`、`enable()` 和 `refresh()` 都消费这份内存父索引；只有 `read()`、生命周期中确需正文的整合/去重，以及 UI/工具的详情请求才读取目标详情记录。因此详情懒加载减少的是启动读取、JSON 解析和常驻内存，不改变既有模型召回方式。
+
+首次可写启动发现旧 `state.v1.json` 时，先把内联详情写成版本化记录并生成详情投影，再原子发布 v2，全部成功后才删除 v1。只读实例遇到尚未迁移的 v1 时使用兼容读取；它不执行迁移或删除旧文件。
 
 关键技巧：
 
-- 所有 CRUD、Session 状态和调度元数据进入同一串行写队列。
-- 权威 JSON 原子替换；写失败不向调用方伪造成功。
-- 同一 root 使用独占锁、heartbeat、stale 判定和 writer fencing；第二 Host 明确只读。
+- 所有 CRUD、Session 状态和调度元数据进入同一串行写队列；writer 的单条详情读取也进入该队列，避免读取与纠正、删除竞争。
+- 新详情先写入 `detail-data/<id>/<newRevision>.json`，对应详情 Markdown 也完整发布成功后，才原子切换 `state.v2.json`；这些步骤失败时父 revision 不前进。
+- 每次事务先持久化只含受影响父 id 的 `projection-pending.v1.json`。提交前失败按当前父状态尝试恢复旧投影，恢复本身失败时保留 intent；崩溃或提交后派生失败同样保留 intent，由下次可写启动或后续事务按父状态重建详情和索引、清理未引用记录，再删除 intent。
+- 父状态发布后立即更新内存，再写 INDEX/MEMORY 投影和清理旧详情世代。派生失败不能把内存回退到旧权威状态，也不能把已提交操作误报为未提交。
+- 权威 JSON、小详情和 INDEX/MEMORY 均原子替换；读取时校验记录 id、revision 和 `detailChars`，损坏或缺失不错误回退到其他正文。
+- 同一 root 使用独占锁、heartbeat、stale 判定和 writer fencing；第二 Host 明确只读。只读 Host 在详情读取前刷新 v2 父状态，记录 ENOENT 时再刷新重试，以观察另一 Host 已提交的纠正和删除。
 - Windows 原子 rename 的短暂 EPERM 使用有限退避，不无上限重试。
-- 大详情先在同级临时目录写完整套分片，再切换目标目录；失败恢复旧目录，后续启动清理临时/备份残留。
-- 纠正导致缩片、大小形态切换或删除时清理旧投影。
-- 删除收尾也位于同一事务队列内，避免“旧删除任务”误删随后同 ID 重建的新分片。
+- 大详情先在同级临时目录写完整套分片，再切换目标目录；失败恢复旧目录，后续投影清理临时/备份残留。
+- 纠正导致缩片、大小形态切换或删除时清理旧投影；纠正发布后清理旧权威详情世代。
+- 删除收尾也位于同一事务队列内，避免“旧删除任务”误删随后同 ID 重建的新记录或分片。
 
-这里最重要的不变量不是“每个文件都写过”，而是“任何时刻都不能把半套新分片和半套旧分片当成一个可用版本”。
+这里有两个核心不变量：父状态只能指向已经完整写入的详情世代；任何时刻都不能把半套新分片和半套旧分片当成一个可用版本。启动只重建 INDEX/MEMORY，不为了刷新所有人类详情投影而重新全量读取正文。
 
 ## 12. 关键设计技巧与方案取舍
 
@@ -381,7 +396,15 @@ store + safety
 3. **空 chunk ID 被当成未提供**：可能意外回退完整正文。改为用 `!== undefined` 判断参数是否提供。
 4. **小详情升级分片时过早删除旧文件**：新分片写失败会导致旧小详情投影消失。改为先成功发布完整分片目录，再删除旧 `.md` 文件。
 
-自动化验证由初版的 25 个测试文件、103 项测试，增加到当前 28 个测试文件、114 项测试；同时通过 typecheck、lint 和 build。大详情增量尚未重新执行真实 Host/模型分片冒烟，不能把这组自动化结果等同于新的真实环境验收。
+自动化验证由初版的 25 个测试文件、103 项测试，增加到大详情阶段的 28 个测试文件、114 项测试；同时通过 typecheck、lint 和 build。大详情增量尚未重新执行真实 Host/模型分片冒烟，不能把这组自动化结果等同于新的真实环境验收。
+
+### 阶段六：从全量状态驻留演进为父索引驻留
+
+初版启动把 `state.v1.json` 中的所有完整正文读入内存，虽然 enable/refresh 只使用摘要，但详情数量增长仍会放大启动 I/O、JSON 解析和常驻内存。v2 将父索引与不可变详情世代分开：正常启动、list 和快照生成只消费父元数据，只有明确的详情读取、整合或 UI 请求才按 id/revision 读取目标正文。
+
+这次演进没有改变模型召回、分片契约或 Session 格式，但把多文件一致性变成核心问题。最终实现以父状态提交为边界，配合版本化详情、只含 id 的投影恢复 intent、提交前回滚、提交后重试和读写串行化；第二 Host 通过刷新父状态观察纠正与删除，保留期清理也不再逐条读取正文。
+
+该增量实际通过 28 个测试文件、124 项测试，以及 typecheck、lint 和 build。未重新执行真实 Host/UI/模型验证，因此这些结果证明的是自动化契约与故障注入边界，不等同于新的真实环境验收。
 
 ## 14. 当前边界与后续演进方向
 
@@ -405,6 +428,7 @@ store + safety
 |---|---|
 | 数据模型、scope、revision、会话状态 | `src/store/types.ts`、`src/store/store.ts` |
 | 原子 JSON、锁与 fencing | `src/store/json.ts`、`src/store/lock.ts` |
+| 版本化权威详情与按需读取 | `src/store/records.ts`、`src/store/store.ts` |
 | 大详情切分与 Markdown 投影 | `src/store/chunks.ts`、`src/store/projections.ts` |
 | 有效轮与生命周期调度 | `src/lifecycle/counters.ts`、`src/lifecycle/scheduler.ts` |
 | 蒸馏、整合、遗忘 | `src/lifecycle/distill.ts`、`src/lifecycle/consolidate.ts`、`src/lifecycle/retention.ts` |

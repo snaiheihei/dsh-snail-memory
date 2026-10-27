@@ -63,9 +63,13 @@ export async function readLegacyState(path: string): Promise<LegacyStoreState | 
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  await writeTextAtomic(path, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+export async function writeTextAtomic(path: string, text: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${randomUUID()}.tmp`
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  await writeFile(temporary, text, 'utf8')
   try {
     for (let attempt = 0; ; attempt += 1) {
       try {

@@ -1,9 +1,9 @@
-import { appendFile, rm } from 'node:fs/promises'
+import { appendFile, readFile, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { WriterLock } from './lock.js'
 import { emptyState, readLegacyState, readState, writeJsonAtomic, type LegacyStoreState } from './json.js'
 import { StorePaths } from './paths.js'
-import { writeDetailProjection, writeIndexProjections } from './projections.js'
+import { removeDetailProjection, writeDetailProjection, writeIndexProjections } from './projections.js'
 import { readDetailRecord, removeUnreferencedDetailRecords, writeDetailRecord } from './records.js'
 import type {
   DesiredInjection,
@@ -64,12 +64,29 @@ function migrateState(legacy: LegacyStoreState): StoreState {
   }
 }
 
+interface ProjectionPending {
+  readonly formatVersion: 1
+  readonly ids: string[]
+}
+
+function changedProjectionIds(before: StoreState, after: StoreState): string[] {
+  const previous = new Map(before.entries.map(entry => [entry.id as string, entry]))
+  const ids = new Set<string>()
+  for (const entry of after.entries) {
+    if (previous.get(entry.id)?.revision !== entry.revision) ids.add(entry.id)
+  }
+  for (const id of previous.keys()) {
+    if (!after.entries.some(entry => entry.id === id)) ids.add(id)
+  }
+  return [...ids]
+}
+
 export class MemoryStore {
   readonly paths: StorePaths
   private state: StoreState
   private queue: Promise<unknown> = Promise.resolve()
   private closed = false
-  private readonly legacyEntries?: ReadonlyMap<string, MemoryEntry>
+  private legacyEntries: ReadonlyMap<string, MemoryEntry> | undefined
 
   private constructor(
     options: Required<MemoryStoreOptions>,
@@ -102,6 +119,7 @@ export class MemoryStore {
       if (lock.writable) {
         if (legacy) await store.migrateLegacy(legacy.entries)
         else {
+          await store.recoverPendingProjections()
           await writeIndexProjections(store.paths, state)
           await removeUnreferencedDetailRecords(store.paths, state)
           await rm(store.paths.legacyState, { force: true })
@@ -142,6 +160,21 @@ export class MemoryStore {
   }
 
   async read(scope: MemoryScope, id: MemoryId): Promise<MemoryEntry | null> {
+    const run = this.queue.then(async () => {
+      if (!this.lock.writable) await this.reloadSecondary()
+      try {
+        return await this.readCurrent(scope, id)
+      } catch (error) {
+        if (this.lock.writable || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        await this.reloadSecondary()
+        return this.readCurrent(scope, id)
+      }
+    })
+    this.queue = run.catch(() => {})
+    return run
+  }
+
+  private async readCurrent(scope: MemoryScope, id: MemoryId): Promise<MemoryEntry | null> {
     const entry = this.state.entries.find(candidate => candidate.id === id && scopeKey(candidate.scope) === scopeKey(scope))
     if (!entry) return null
     if (this.legacyEntries) {
@@ -150,6 +183,13 @@ export class MemoryStore {
       return structuredClone(legacy)
     }
     return readDetailRecord(this.paths, entry)
+  }
+
+  private async reloadSecondary(): Promise<void> {
+    const current = await readState(this.paths.state)
+    if (!current) return
+    this.state = current
+    this.legacyEntries = undefined
   }
 
   getSessionState(sessionId: string): SessionMemoryState {
@@ -199,8 +239,7 @@ export class MemoryStore {
     }, async removed => {
       if (!removed) return
       await Promise.all([
-        rm(this.paths.detail(id), { force: true }),
-        rm(this.paths.detailDirectory(id), { recursive: true, force: true }),
+        removeDetailProjection(this.paths, id),
         rm(this.paths.detailDataDirectory(id), { recursive: true, force: true }),
       ])
     })
@@ -240,11 +279,44 @@ export class MemoryStore {
 
   private async migrateLegacy(entries: readonly MemoryEntry[]): Promise<void> {
     for (const entry of entries) await writeDetailRecord(this.paths, entry)
+    await writeJsonAtomic(this.paths.projectionPending, {
+      formatVersion: 1,
+      ids: entries.map(entry => entry.id),
+    } satisfies ProjectionPending)
     for (const entry of entries) await writeDetailProjection(this.paths, entry)
     await writeJsonAtomic(this.paths.state, this.state)
-    await writeIndexProjections(this.paths, this.state)
+    await this.recoverPendingProjections()
     await removeUnreferencedDetailRecords(this.paths, this.state)
     await rm(this.paths.legacyState, { force: true })
+  }
+
+  private async readPendingProjections(): Promise<ProjectionPending | null> {
+    let text: string
+    try {
+      text = await readFile(this.paths.projectionPending, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+    const value = JSON.parse(text) as Partial<ProjectionPending>
+    if (value.formatVersion !== 1 || !Array.isArray(value.ids)
+      || value.ids.some(id => typeof id !== 'string')) {
+      throw new Error('Cannot read projection recovery intent')
+    }
+    return value as ProjectionPending
+  }
+
+  private async recoverPendingProjections(): Promise<void> {
+    const pending = await this.readPendingProjections()
+    if (!pending) return
+    for (const id of pending.ids) {
+      const index = this.state.entries.find(entry => entry.id === id)
+      if (index) await writeDetailProjection(this.paths, await readDetailRecord(this.paths, index))
+      else await removeDetailProjection(this.paths, id)
+    }
+    await writeIndexProjections(this.paths, this.state)
+    await removeUnreferencedDetailRecords(this.paths, this.state)
+    await rm(this.paths.projectionPending, { force: true })
   }
 
   private transaction<T>(
@@ -256,15 +328,28 @@ export class MemoryStore {
     const run = this.queue.then(async () => {
       if (!this.writable) throw new MemoryStoreReadonlyError('This Snail Memory host is read-only')
       await this.lock.assertOwner()
+      await this.recoverPendingProjections()
       const draft = structuredClone(this.state)
       const result = update(draft)
-      await prepare?.(result, draft)
-      draft.revision += 1
-      await appendFile(this.paths.audit, `${JSON.stringify({ time: this.now().toISOString(), operation, revision: draft.revision })}\n`, 'utf8')
-      await writeJsonAtomic(this.paths.state, draft)
+      const ids = changedProjectionIds(this.state, draft)
+      await writeJsonAtomic(this.paths.projectionPending, { formatVersion: 1, ids } satisfies ProjectionPending)
+      try {
+        await prepare?.(result, draft)
+        draft.revision += 1
+        await appendFile(this.paths.audit, `${JSON.stringify({ time: this.now().toISOString(), operation, revision: draft.revision })}\n`, 'utf8')
+        await writeJsonAtomic(this.paths.state, draft)
+      } catch (error) {
+        await this.recoverPendingProjections().catch(() => {})
+        throw error
+      }
       this.state = draft
-      await writeIndexProjections(this.paths, draft)
-      await finalize?.(result, draft)
+      try {
+        await writeIndexProjections(this.paths, draft)
+        await finalize?.(result, draft)
+        await rm(this.paths.projectionPending, { force: true })
+      } catch {
+        // The authoritative state is committed. Keep the intent for a later retry.
+      }
       return result
     })
     this.queue = run.catch(() => {})

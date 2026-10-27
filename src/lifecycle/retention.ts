@@ -1,5 +1,5 @@
 import type { MemoryStore } from '../store/store.js'
-import type { MemoryCategory, MemoryEntry, MemoryId, MemoryScope } from '../store/types.js'
+import type { MemoryCategory, MemoryId, MemoryIndexEntry, MemoryScope } from '../store/types.js'
 
 const DAY_MS = 86_400_000
 const RETENTION_DAYS: Partial<Record<MemoryCategory, number>> = {
@@ -13,7 +13,7 @@ export interface RetentionOptions {
   readonly onChange?: (scope: MemoryScope, ids: readonly MemoryId[]) => Promise<void> | void
 }
 
-export function isExpired(entry: MemoryEntry, now: Date): boolean {
+export function isExpired(entry: MemoryIndexEntry, now: Date): boolean {
   if (entry.expiresAt !== undefined) {
     const explicit = new Date(entry.expiresAt).getTime()
     if (Number.isFinite(explicit) && explicit <= now.getTime()) return true
@@ -33,9 +33,8 @@ export async function retentionSweep(store: MemoryStore, options: RetentionOptio
   const removed: MemoryId[] = []
   for (const scope of scopes) {
     const ids: MemoryId[] = []
-    for (const index of store.list(scope).entries) {
-      const entry = await store.read(scope, index.id)
-      if (entry && isExpired(entry, now) && await store.remove(scope, entry.id)) {
+    for (const entry of store.list(scope).entries) {
+      if (isExpired(entry, now) && await store.remove(scope, entry.id)) {
         ids.push(entry.id)
         removed.push(entry.id)
       }

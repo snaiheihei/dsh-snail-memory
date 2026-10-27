@@ -215,9 +215,11 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     await store.upsert({ scope, category: 'project-convention', summary: 'Old convention', detail: 'Old convention.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2026-01-01T00:00:00.000Z' })
     await store.upsert({ scope, category: 'preference', summary: 'Durable preference', detail: 'Durable preference.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2020-01-01T00:00:00.000Z' })
     await store.upsert({ scope, category: 'long-term-decision', summary: 'Durable decision', detail: 'Durable decision.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2020-01-01T00:00:00.000Z' })
+    const read = vi.spyOn(store, 'read')
 
     await service.retentionSweep()
 
+    expect(read).not.toHaveBeenCalled()
     expect(store.list(scope).entries.map(entry => entry.category).sort()).toEqual(['long-term-decision', 'preference'])
     expect(changes.map(change => change.kind)).toEqual(['retention'])
   })
