@@ -38,6 +38,7 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - `retentionSweepHours = 24`。
 - 保留期：环境事实 30 天、项目约定/排障经验 180 天、用户偏好/长期决策不自动过期；过期结论先从未验证时间判定。
 - Review 输入最多 24,000 字符，蒸馏最多 48,000 字符，整合最多 64,000 字符；详情单条最多 16,000 字符。
+- Review/蒸馏的转录投影仅保留真实用户消息、助手消息和普通工具结果；通过 `tool/call.callId` 排除 `snail_memory_read` 的 `tool/result`，不按结果正文过滤，也不修改原始 Session。
 - 注入索引上限 1,200 估算 token，核心摘要上限 800 估算 token；超出时保留最新高置信条目并报告截断。
 
 ## Code Style
@@ -57,6 +58,7 @@ pending?.count += 1
 - idle debounce、非 idle maintenance 竞态、dispose、archive/stop。
 - 6 小时冷却、dirty gate、每日清理、单 timer 和卸载 drain。
 - LLM 空输出、非 JSON、部分有效候选、秘密输出、超时和重试。
+- `snail_memory_read` 结果不进入蒸馏输入，普通工具结果继续保留。
 - 验证整合不跨 scope 自动晋升，不修改 Session。
 
 ## Boundaries

@@ -36,10 +36,20 @@ function textContent(value: unknown): string {
 
 /** Project only durable evidence; memory and request-context events never distill back into themselves. */
 export function renderSessionTranscript(events: readonly TranscriptEvent[]): string {
+  const memoryReadCallIds = new Set(events.flatMap(event => {
+    const data = record(event.data)
+    return event.type === 'tool/call' && data.name === 'snail_memory_read' && typeof data.callId === 'string'
+      ? [data.callId]
+      : []
+  }))
   return events.flatMap(event => {
     if (!['user/message', 'assistant/message', 'tool/result'].includes(event.type)) return []
     const data = record(event.data)
     if (event.type === 'user/message' && record(data.source).kind !== 'user') return []
+    if (event.type === 'tool/result') {
+      const callId = record(record(data.message).source).callId
+      if (typeof callId === 'string' && memoryReadCallIds.has(callId)) return []
+    }
     const text = textContent(event.type === 'user/message' ? data : data.message)
     return text ? [`# ${event.seq} ${event.type}\n${text}`] : []
   }).join('\n\n')

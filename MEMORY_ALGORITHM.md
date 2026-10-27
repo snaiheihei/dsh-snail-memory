@@ -106,6 +106,8 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 活动事件会刷新 idle intent 的创建时间，形成 debounce。三类入口最终复用同一个 `distillSession`，区别主要是输入预算和调度原因。
 
+蒸馏读取的是 `renderSessionTranscript()` 生成的投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情的能力不变。
+
 当前实现取转录的**开头**相应字符数，而不是完整历史或最新窗口。这是预算保护，不应被理解为全量记忆覆盖。
 
 ### 4.3 单 timer 与持久 intent
@@ -431,6 +433,7 @@ store + safety
 | 版本化权威详情与按需读取 | `src/store/records.ts`、`src/store/store.ts` |
 | 大详情切分与 Markdown 投影 | `src/store/chunks.ts`、`src/store/projections.ts` |
 | 有效轮与生命周期调度 | `src/lifecycle/counters.ts`、`src/lifecycle/scheduler.ts` |
+| 蒸馏转录投影 | `src/runtime.ts` |
 | 蒸馏、整合、遗忘 | `src/lifecycle/distill.ts`、`src/lifecycle/consolidate.ts`、`src/lifecycle/retention.ts` |
 | 辅助模型调用与输出校验 | `src/lifecycle/llm.ts` |
 | 秘密扫描、脱敏与来源准入 | `src/safety/` |

@@ -36,6 +36,18 @@ describe('dsh runtime adapters', () => {
     expect(transcript).not.toContain('hidden context')
   })
 
+  it('excludes snail memory read results while preserving other tool evidence', () => {
+    const transcript = renderSessionTranscript([
+      { seq: 1, type: 'tool/call', data: { callId: 'call-memory', name: 'snail_memory_read', arguments: '{}' } },
+      { seq: 2, type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'call-memory' }, content: [{ type: 'text', text: 'full memory detail' }] } } },
+      { seq: 3, type: 'tool/call', data: { callId: 'call-test', name: 'run_tests', arguments: '{}' } },
+      { seq: 4, type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'call-test' }, content: [{ type: 'text', text: '6 tests passed' }] } } },
+    ])
+
+    expect(transcript).not.toContain('full memory detail')
+    expect(transcript).toContain('6 tests passed')
+  })
+
   it('keeps the prepared config immutable across the one-shot auxiliary dispatch', async () => {
     const config: LlmCallConfig = { provider: 'provider', model: 'model', maxTokens: 128 }
     let preparedSignal: AbortSignal | undefined
