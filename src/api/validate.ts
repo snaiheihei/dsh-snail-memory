@@ -80,7 +80,8 @@ function write(input: Record<string, unknown>) {
 export function validatePayload(method: RpcMethod, payload: unknown): RpcPayload {
   const input = record(payload)
   switch (method) {
-    case 'getSessionState': return { sessionId: session(input.sessionId)! }
+    case 'getSessionState':
+    case 'disable': return { sessionId: session(input.sessionId)! }
     case 'enable':
     case 'refresh': {
       if (input.layer !== 'global' && input.layer !== 'workspace') throw new MemoryApiError('invalid-request', 'Invalid memory layer.')

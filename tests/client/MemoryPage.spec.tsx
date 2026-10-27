@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryPage } from '../../client/src/MemoryPage.js'
 import { MemoryClientStore } from '../../client/src/store.js'
 import type { WorkspaceId } from '../../src/store/types.js'
-import { ENTRY, FakeRpc, GLOBAL_SCOPE, memoryIndex, sessionState, t, WORKSPACE_SCOPE } from './fixtures.js'
+import { ENTRY, FakeRpc, memoryIndex, sessionState, t, WORKSPACE_SCOPE } from './fixtures.js'
 
 afterEach(cleanup)
 
@@ -81,7 +81,7 @@ describe('MemoryPage', () => {
     expect(rpc.calls.filter(call => call.method === 'list')).toHaveLength(1)
   })
 
-  it('loads detail and requires confirmation before deleting only the memory entry', async () => {
+  it('reads global aggregate details from their source workspace without offering deletion', async () => {
     const rpc = readyRpc()
     const store = new MemoryClientStore(rpc)
     render(<MemoryPage sessionId="session-1" store={store} t={t} />)
@@ -89,14 +89,25 @@ describe('MemoryPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
     expect(await screen.findByRole('dialog', { name: 'Use pnpm workspaces' })).toBeTruthy()
     expect(screen.getByText(ENTRY.detail)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Delete memory' }))
+    expect(rpc.calls.find(call => call.method === 'read')?.payload).toEqual({ scope: WORKSPACE_SCOPE, id: ENTRY.id })
+    expect(screen.queryByRole('button', { name: 'Delete memory' })).toBeNull()
+    expect(rpc.count('remove')).toBe(0)
+  })
+
+  it('requires confirmation before deleting a workspace memory only', async () => {
+    const rpc = readyRpc()
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete memory' }))
     expect(screen.getByText('Delete this memory? Conversation history and already injected snapshots will be kept.')).toBeTruthy()
     expect(rpc.count('remove')).toBe(0)
 
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }))
     expect(await screen.findByText('Memory deleted. Conversation history was not deleted; injected snapshots remain.')).toBeTruthy()
-    expect(rpc.calls.find(call => call.method === 'remove')?.payload).toEqual({ scope: GLOBAL_SCOPE, id: ENTRY.id })
-    await waitFor(() => expect(rpc.count('list')).toBeGreaterThanOrEqual(2))
+    expect(rpc.calls.find(call => call.method === 'remove')?.payload).toEqual({ scope: WORKSPACE_SCOPE, id: ENTRY.id })
+    await waitFor(() => expect(rpc.count('list')).toBeGreaterThanOrEqual(3))
     expect(rpc.calls.every(call => !String(call.method).toLowerCase().includes('sessiondelete'))).toBe(true)
   })
 
@@ -104,6 +115,7 @@ describe('MemoryPage', () => {
     const rpc = readyRpc()
     const store = new MemoryClientStore(rpc)
     render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
     fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Delete memory' }))
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))

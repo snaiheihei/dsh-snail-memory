@@ -49,6 +49,17 @@ describe('Snail Memory HTTP RPC', () => {
     expect(response.body).toMatchObject({ ok: true, value: { method: 'list' } })
   })
 
+  it('validates and dispatches disable with only a session id', async () => {
+    const { handler } = setup(async (method, payload) => ({ method, payload }))
+    const response = await request(handler, {
+      url: '/snail-memory/rpc/disable',
+      body: JSON.stringify({ sessionId: 'session-1' }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ ok: true, value: { method: 'disable', payload: { sessionId: 'session-1' } } })
+  })
+
   it('rejects unknown methods and non-POST transport without entering the controller', async () => {
     let calls = 0
     const { handler } = setup(async () => { calls += 1; return {} })

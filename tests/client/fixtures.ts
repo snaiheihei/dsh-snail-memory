@@ -48,7 +48,7 @@ export function memoryIndex(scope: MemoryScope = GLOBAL_SCOPE): MemoryIndex {
   return {
     scope,
     revision: 2,
-    entries: scope.kind === 'global' ? [ENTRY] : [{ ...ENTRY, scope }],
+    entries: scope.kind === 'global' ? [{ ...ENTRY, scope: WORKSPACE_SCOPE }] : [{ ...ENTRY, scope }],
     workspaces: scope.kind === 'global'
       ? [{ workspaceId: WORKSPACE, entryCount: 3, revision: 7, updatedAt: '2026-01-03T00:00:00.000Z' }]
       : [],

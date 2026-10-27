@@ -1,5 +1,6 @@
 import { appendFile, readFile, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { entriesForScope, revisionForScope, workspaceIndexRefs } from './aggregate.js'
 import { WriterLock } from './lock.js'
 import { emptyState, readLegacyState, readState, writeJsonAtomic, type LegacyStoreState } from './json.js'
 import { StorePaths } from './paths.js'
@@ -17,9 +18,8 @@ import type {
   StoreState,
   StoredMemoryEntry,
   UpsertMemoryInput,
-  WorkspaceIndexRef,
 } from './types.js'
-import { memoryId, workspaceId } from './types.js'
+import { memoryId } from './types.js'
 
 export class MemoryStoreReadonlyError extends Error {
   override readonly name = 'MemoryStoreReadonlyError'
@@ -38,6 +38,12 @@ function emptyLayer() {
 
 function emptySession(sessionId: string): SessionMemoryState {
   return { sessionId, layers: { global: emptyLayer(), workspace: emptyLayer() } }
+}
+
+function normalizeSessionSelection(state: SessionMemoryState): SessionMemoryState {
+  // Legacy builds allowed both latches. Prefer the narrower workspace scope.
+  if (state.layers.global.enabled && state.layers.workspace.enabled) state.layers.global.enabled = false
+  return state
 }
 
 function scopeKey(scope: MemoryScope): string {
@@ -137,25 +143,14 @@ export class MemoryStore {
   }
 
   list(scope: MemoryScope): MemoryIndex {
-    const entries = this.state.entries
-      .filter(entry => scopeKey(entry.scope) === scopeKey(scope))
+    const entries = entriesForScope(this.state, scope)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
       .map(withoutDetail)
-    const workspaces: WorkspaceIndexRef[] = scope.kind === 'global'
-      ? Object.entries(this.state.workspaces).map(([id, meta]) => ({
-          workspaceId: workspaceId(id),
-          entryCount: this.state.entries.filter(entry => scopeKey(entry.scope) === id).length,
-          revision: this.state.scopeRevisions.workspaces[id] ?? 0,
-          updatedAt: meta.updatedAt,
-        })).sort((a, b) => a.workspaceId.localeCompare(b.workspaceId))
-      : []
     return {
       scope,
-      revision: scope.kind === 'global'
-        ? this.state.scopeRevisions.global
-        : this.state.scopeRevisions.workspaces[scope.workspaceId] ?? 0,
+      revision: revisionForScope(this.state, scope),
       entries,
-      workspaces,
+      workspaces: scope.kind === 'global' ? workspaceIndexRefs(this.state) : [],
     }
   }
 
@@ -193,7 +188,7 @@ export class MemoryStore {
   }
 
   getSessionState(sessionId: string): SessionMemoryState {
-    return structuredClone(this.state.sessions[sessionId] ?? emptySession(sessionId))
+    return normalizeSessionSelection(structuredClone(this.state.sessions[sessionId] ?? emptySession(sessionId)))
   }
 
   getMeta(): MemoryMeta {
@@ -249,7 +244,7 @@ export class MemoryStore {
     return this.transaction('session-state/update', draft => {
       const state = structuredClone(draft.sessions[sessionId] ?? emptySession(sessionId))
       update(state)
-      draft.sessions[sessionId] = state
+      draft.sessions[sessionId] = normalizeSessionSelection(state)
       return structuredClone(state)
     })
   }

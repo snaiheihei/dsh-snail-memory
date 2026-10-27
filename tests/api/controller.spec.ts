@@ -48,6 +48,25 @@ afterEach(async () => {
 })
 
 describe('MemoryController', () => {
+  it('disables memory and rejects independent global writes', async () => {
+    const { controller, store } = await setup()
+    await controller.call('enable', { sessionId: 'session-1', layer: 'global' })
+
+    await expect(controller.call('disable', { sessionId: 'session-1' }))
+      .resolves.toMatchObject({ status: 'disabled' })
+    expect(store.getSessionState('session-1').layers.global.enabled).toBe(false)
+    await expect(controller.call('remember', {
+      scope: { kind: 'global' }, category: 'preference', summary: 'Independent global', detail: 'Not allowed.',
+    })).rejects.toMatchObject({ code: 'invalid-operation' })
+    await expect(controller.call('correct', {
+      scope: { kind: 'global' }, id: memoryId('legacy'), category: 'preference', summary: 'Independent global', detail: 'Not allowed.',
+    })).rejects.toMatchObject({ code: 'invalid-operation' })
+    await expect(controller.call('remove', { scope: { kind: 'global' }, id: memoryId('legacy') }))
+      .rejects.toMatchObject({ code: 'invalid-operation' })
+    await expect(controller.call('read', { scope: { kind: 'global' }, id: memoryId('legacy') }))
+      .rejects.toMatchObject({ code: 'invalid-operation' })
+  })
+
   it('enables and refreshes a live session through the shared context service', async () => {
     const { store, controller, messages } = await setup()
 
@@ -70,14 +89,15 @@ describe('MemoryController', () => {
 
   it('sanitizes explicit memories and writes corrections immediately', async () => {
     const { controller, store } = await setup()
+    const scope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') } as const
     const remembered = await controller.call('remember', {
-      scope: { kind: 'global' }, category: 'preference', summary: 'api_key="sk-abcdefghijklmnop1234"', detail: 'Keep answers concise.',
+      scope, category: 'preference', summary: 'api_key="sk-abcdefghijklmnop1234"', detail: 'Keep answers concise.',
     })
     expect(remembered.summary).toContain('[REDACTED')
     expect(store.list({ kind: 'global' }).revision).toBe(1)
 
     const corrected = await controller.call('correct', {
-      id: remembered.id, scope: { kind: 'global' }, category: 'preference', summary: 'Prefer detail', detail: 'Include tradeoffs.',
+      id: remembered.id, scope, category: 'preference', summary: 'Prefer detail', detail: 'Include tradeoffs.',
     })
     expect(corrected.id).toBe(remembered.id)
     expect(corrected.createdAt).toBe(remembered.createdAt)
@@ -88,24 +108,26 @@ describe('MemoryController', () => {
     const { controller, store } = await setup()
     await controller.call('enable', { sessionId: 'session-1', layer: 'global' })
     const before = store.getSessionState('session-1')
+    const scope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') } as const
     const entry = await controller.call('remember', {
-      scope: { kind: 'global' }, category: 'long-term-decision', summary: 'Append only', detail: 'Never rewrite history.',
+      scope, category: 'long-term-decision', summary: 'Append only', detail: 'Never rewrite history.',
     })
 
-    await expect(controller.call('remove', { scope: { kind: 'global' }, id: entry.id })).resolves.toEqual({ removed: true })
-    await expect(controller.call('remove', { scope: { kind: 'global' }, id: entry.id })).resolves.toEqual({ removed: false })
-    await expect(store.read({ kind: 'global' }, entry.id)).resolves.toBeNull()
+    await expect(controller.call('remove', { scope, id: entry.id })).resolves.toEqual({ removed: true })
+    await expect(controller.call('remove', { scope, id: entry.id })).resolves.toEqual({ removed: false })
+    await expect(store.read(scope, entry.id)).resolves.toBeNull()
     expect(store.getSessionState('session-1')).toEqual(before)
   })
 
   it('sanitizes lazy detail read failures at the controller boundary', async () => {
     const { controller, store } = await setup()
+    const scope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') } as const
     const entry = await controller.call('remember', {
-      scope: { kind: 'global' }, category: 'long-term-decision', summary: 'Safe read error', detail: 'Detail',
+      scope, category: 'long-term-decision', summary: 'Safe read error', detail: 'Detail',
     })
     await writeFile(store.paths.detailRecord(entry.id, entry.revision), '{not json')
 
-    await expect(controller.call('read', { scope: { kind: 'global' }, id: entry.id })).rejects.toMatchObject({
+    await expect(controller.call('read', { scope, id: entry.id })).rejects.toMatchObject({
       code: 'internal',
       message: 'Snail Memory could not complete the operation.',
     })
@@ -116,7 +138,7 @@ describe('MemoryController', () => {
 
     await expect(controller.call('enable', { sessionId: 'missing', layer: 'global' })).rejects.toMatchObject({ code: 'session-not-found' })
     await expect(controller.call('list', { scope: { kind: 'workspace', workspaceId: workspaceId('unknown') } })).rejects.toMatchObject({ code: 'workspace-not-found' })
-    await expect(controller.call('read', { scope: { kind: 'global' }, id: memoryId('missing') })).rejects.toMatchObject({ code: 'memory-not-found' })
+    await expect(controller.call('read', { scope: { kind: 'workspace', workspaceId: workspaceId('workspace-1') }, id: memoryId('missing') })).rejects.toMatchObject({ code: 'memory-not-found' })
   })
 
   it('uses the lifecycle write path so explicit changes enter maintenance scheduling', async () => {
@@ -131,9 +153,10 @@ describe('MemoryController', () => {
       resolveSession: () => undefined,
       lifecycle,
     })
-    const entry = await controller.call('remember', { scope: { kind: 'global' }, category: 'preference', summary: 'Remember', detail: 'Now' })
-    await controller.call('correct', { id: entry.id, scope: { kind: 'global' }, category: 'preference', summary: 'Correct', detail: 'Now' })
-    await controller.call('remove', { scope: { kind: 'global' }, id: entry.id })
+    const scope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') } as const
+    const entry = await controller.call('remember', { scope, category: 'preference', summary: 'Remember', detail: 'Now' })
+    await controller.call('correct', { id: entry.id, scope, category: 'preference', summary: 'Correct', detail: 'Now' })
+    await controller.call('remove', { scope, id: entry.id })
 
     expect(calls).toEqual(['remember', 'correct', 'forget'])
   })
@@ -178,7 +201,7 @@ describe('MemoryController', () => {
 
   it('keeps reads available on a secondary read-only host but rejects writes', async () => {
     const { root, store } = await setup()
-    await store.upsert({ scope: { kind: 'global' }, category: 'preference', summary: 'Readable', detail: 'Still available.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    await store.upsert({ scope: { kind: 'workspace', workspaceId: workspaceId('workspace-1') }, category: 'preference', summary: 'Readable', detail: 'Still available.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
     const secondary = await open(root)
     const settings = await MemorySettingsStore.open(secondary)
     const controller = new MemoryController(secondary, new MemoryContextService(secondary, {}), {
@@ -190,7 +213,7 @@ describe('MemoryController', () => {
     await expect(controller.call('list', { scope: { kind: 'global' } })).resolves.toMatchObject({ entries: [{ summary: 'Readable' }] })
     await expect(controller.call('remember', {
       scope: { kind: 'global' }, category: 'preference', summary: 'No write', detail: 'Rejected.',
-    })).rejects.toMatchObject({ code: 'read-only' })
+    })).rejects.toMatchObject({ code: 'invalid-operation' })
     await expect(controller.call('updateSettings', {
       reviewEveryUserTurns: 2,
       idleDelayMinutes: 1,

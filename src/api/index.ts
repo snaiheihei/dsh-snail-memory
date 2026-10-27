@@ -12,7 +12,7 @@ export function registerMemoryApi(ctx: Context, controller: MemoryController): (
   const disposeCommand = ctx.commands.register({
     name: 'memory',
     description: 'Remember, correct, forget, or inspect Snail Memory',
-    input: { hint: 'status | remember <global|workspace> <text> | correct <global|workspace> <id> <text> | forget <global|workspace> <id>' },
+    input: { hint: 'status | remember workspace <text> | correct workspace <id> <text> | forget workspace <id>' },
     recordInput: false,
     handler: invocation => executeMemoryCommand(controller, invocation.rawInput, invocation.agent.session.id),
   })

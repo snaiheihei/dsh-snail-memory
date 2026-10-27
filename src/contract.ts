@@ -13,7 +13,7 @@ import type { MemoryOperationResult } from './context/service.js'
 
 export const RPC_ROUTE_PREFIX = '/snail-memory/rpc'
 export const RPC_METHODS = [
-  'getSessionState', 'enable', 'refresh', 'list', 'read', 'remove', 'remember', 'correct', 'status',
+  'getSessionState', 'enable', 'disable', 'refresh', 'list', 'read', 'remove', 'remember', 'correct', 'status',
   'getSettings', 'updateSettings', 'listWorkspaces',
 ] as const
 

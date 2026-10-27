@@ -16,6 +16,7 @@ interface DetailState {
   readonly scope: MemoryScope
   readonly summary: string
   readonly id: MemoryEntry['id']
+  readonly readOnly: boolean
   readonly entry?: MemoryEntry
   readonly error?: string
 }
@@ -92,18 +93,19 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
 
   const openDetails = async (entry: MemoryIndexEntry): Promise<void> => {
     const request = ++detailRequest.current
-    setDetail({ scope: entry.scope, id: entry.id, summary: entry.summary })
+    const readOnly = tab === 'global'
+    setDetail({ scope: entry.scope, id: entry.id, summary: entry.summary, readOnly })
     setConfirming(false)
     setNotice(null)
     try {
       const full = await store.read(entry.scope, entry.id)
       if (mounted.current && detailRequest.current === request) {
-        setDetail({ scope: entry.scope, id: entry.id, summary: full.summary, entry: full })
+        setDetail({ scope: entry.scope, id: entry.id, summary: full.summary, entry: full, readOnly })
       }
     } catch (reason) {
       if (mounted.current && detailRequest.current === request) {
         setDetail({
-          scope: entry.scope, id: entry.id, summary: entry.summary,
+          scope: entry.scope, id: entry.id, summary: entry.summary, readOnly,
           error: reason instanceof Error ? reason.message : String(reason),
         })
       }
@@ -190,9 +192,10 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
           {index !== undefined && entries.length === 0 && <p>{t(tab === 'global' ? 'emptyGlobal' : 'emptyWorkspace')}</p>}
           <ul className="snail-memory-list">
             {entries.map(entry => (
-              <li className="snail-memory-entry" key={entry.id}>
+              <li className="snail-memory-entry" key={`${entry.scope.kind}:${entry.scope.kind === 'workspace' ? entry.scope.workspaceId : ''}:${entry.id}`}>
                 <h2>{entry.summary}</h2>
                 <p>{t(CATEGORY_COPY[entry.category])}</p>
+                {tab === 'global' && entry.scope.kind === 'workspace' && <p>{t('workspace')}: {entry.scope.workspaceId}</p>}
                 <small>{t('updatedAt')}: {entry.updatedAt} · {t('revision')} {entry.revision}</small>
                 {entry.sourceRefs.length > 0 && (
                   <p>{t('sources')}: {entry.sourceRefs.map(ref => `${ref.sessionId}${ref.eventSeqs === undefined ? '' : ` (${t('events')} ${ref.eventSeqs.join(', ')})`}`).join('; ')}</p>
@@ -234,7 +237,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               <button type="button" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
               <button type="button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
             </> : <>
-              <button type="button" disabled={detail.entry === undefined} onClick={() => setConfirming(true)}>{t('delete')}</button>
+              {!detail.readOnly && <button type="button" disabled={detail.entry === undefined} onClick={() => setConfirming(true)}>{t('delete')}</button>}
               <button type="button" autoFocus onClick={closeDetails}>{t('close')}</button>
             </>}
           </div>

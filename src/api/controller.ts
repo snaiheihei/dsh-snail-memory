@@ -47,6 +47,7 @@ export class MemoryController {
   }
 
   call(method: 'getSessionState', payload: SessionRequest): Promise<SessionStateView>
+  call(method: 'disable', payload: SessionRequest): Promise<MemoryOperationResult>
   call(method: 'enable' | 'refresh', payload: LayerRequest): Promise<MemoryOperationResult>
   call(method: 'list', payload: ScopeRequest): Promise<MemoryIndex>
   call(method: 'read', payload: ReadRequest): Promise<MemoryEntry>
@@ -63,6 +64,7 @@ export class MemoryController {
       switch (method) {
         case 'getSessionState': return this.sessionState((payload as SessionRequest).sessionId)
         case 'enable': return await this.enable(payload as LayerRequest, false)
+        case 'disable': return await this.disable((payload as SessionRequest).sessionId)
         case 'refresh': return await this.enable(payload as LayerRequest, true)
         case 'list': return this.list((payload as ScopeRequest).scope)
         case 'read': return await this.readMemory(payload as ReadRequest)
@@ -109,8 +111,13 @@ export class MemoryController {
       : this.context.enable(resolved.agent, payload.layer, resolved.workspaceId)
   }
 
+  private async disable(sessionId: string): Promise<MemoryOperationResult> {
+    if (!this.options.resolveSession(sessionId)) throw new MemoryApiError('session-not-found', 'The session is not live.', 404)
+    return this.context.disable(sessionId)
+  }
+
   private list(scope: MemoryScope): MemoryIndex {
-    this.assertWorkspace(scope)
+    this.assertWorkspace(scope, true)
     return this.store.list(scope)
   }
 
@@ -146,7 +153,10 @@ export class MemoryController {
       : this.store.remove(request.scope, request.id)
   }
 
-  private assertWorkspace(scope: MemoryScope): void {
+  private assertWorkspace(scope: MemoryScope, aggregate = false): void {
+    if (scope.kind === 'global' && !aggregate) {
+      throw new MemoryApiError('invalid-operation', 'Global memory is a read-only aggregate; use its source workspace.', 409)
+    }
     if (scope.kind === 'workspace' && this.options.isWorkspace && !this.options.isWorkspace(scope.workspaceId)) {
       throw new MemoryApiError('workspace-not-found', 'The workspace does not exist.', 404)
     }

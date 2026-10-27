@@ -7,7 +7,7 @@ import { safeError } from './errors.js'
 
 export type MemoryCommandResult = CommandResult
 
-const USAGE = 'Usage: /memory status | remember <global|workspace> <text> | correct <global|workspace> <id> <text> | forget <global|workspace> <id>'
+const USAGE = 'Usage: /memory status | remember workspace <text> | correct workspace <id> <text> | forget workspace <id>'
 
 function scope(value: string | undefined): MemoryScope | undefined {
   if (value === 'global') return { kind: 'global' }
@@ -33,11 +33,12 @@ export async function executeMemoryCommand(
     }
     let target = scope(layer)
     if (!target || !rest) return { kind: 'error', text: USAGE }
-    if (target.kind === 'workspace') {
-      const id = controller.workspaceForSession?.(sessionId)
-      if (!id) return { kind: 'error', text: 'Workspace memory requires a session attached to a workspace.' }
-      target = { kind: 'workspace', workspaceId: id }
+    if (target.kind === 'global') {
+      return { kind: 'error', text: 'Global memory is a read-only aggregate; use workspace memory.' }
     }
+    const attachedWorkspaceId = controller.workspaceForSession(sessionId)
+    if (!attachedWorkspaceId) return { kind: 'error', text: 'Workspace memory requires a session attached to a workspace.' }
+    target = { kind: 'workspace', workspaceId: attachedWorkspaceId }
     if (action === 'forget') {
       if (/\s/u.test(rest)) return { kind: 'error', text: USAGE }
       const result = await controller.call('remove', { scope: target, id: memoryId(rest) })
@@ -45,7 +46,7 @@ export async function executeMemoryCommand(
     }
     if (action === 'remember') {
       const request: WriteRequest = {
-        scope: target, category: target.kind === 'global' ? 'preference' : 'project-convention',
+        scope: target, category: 'project-convention',
         summary: rest, detail: rest, sessionId,
       }
       const entry = await controller.call('remember', request)

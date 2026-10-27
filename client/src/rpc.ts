@@ -6,13 +6,14 @@ import type { MemoryEntry, MemoryIndex } from '../../src/store/types.js'
 
 export type MemoryRpcMethod = RpcMethod
 export interface MemoryOperationResult {
-  readonly status: 'enabled' | 'already-enabled' | 'refreshed' | 'up-to-date'
+  readonly status: 'enabled' | 'already-enabled' | 'disabled' | 'refreshed' | 'up-to-date'
   readonly injectionId?: string
 }
 
 export interface RpcRequestMap {
   readonly getSessionState: SessionRequest
   readonly enable: LayerRequest
+  readonly disable: SessionRequest
   readonly refresh: LayerRequest
   readonly list: ScopeRequest
   readonly read: ReadRequest
@@ -28,6 +29,7 @@ export interface RpcRequestMap {
 export interface RpcResponseMap {
   readonly getSessionState: SessionStateView
   readonly enable: MemoryOperationResult
+  readonly disable: MemoryOperationResult
   readonly refresh: MemoryOperationResult
   readonly list: MemoryIndex
   readonly read: MemoryEntry

@@ -33,10 +33,8 @@ async function fullEntries(store: MemoryStore, scope: MemoryScope): Promise<Memo
 export async function consolidateMemories(store: MemoryStore, options: ConsolidateOptions): Promise<number> {
   if (!options.model || !options.provider || !options.modelName) throw new Error('No auxiliary model route is available')
   const now = options.now?.() ?? new Date()
-  const scopes: MemoryScope[] = [
-    { kind: 'global' },
-    ...store.list({ kind: 'global' }).workspaces.map(ref => ({ kind: 'workspace' as const, workspaceId: workspaceId(ref.workspaceId) })),
-  ]
+  const scopes: MemoryScope[] = store.list({ kind: 'global' }).workspaces
+    .map(ref => ({ kind: 'workspace' as const, workspaceId: workspaceId(ref.workspaceId) }))
   let written = 0
   for (const scope of scopes) {
     const entries = await fullEntries(store, scope)

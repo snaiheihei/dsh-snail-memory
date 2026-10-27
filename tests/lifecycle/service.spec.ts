@@ -143,7 +143,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect((await service.runIntent('review:session-1')).written).toBe(0)
     expect(store.list(scope).entries).toHaveLength(1)
     expect(store.list(scope).entries[0]?.revision).toBe(1)
-    expect(store.list({ kind: 'global' }).entries).toEqual([])
+    expect(store.list({ kind: 'global' }).entries).toEqual(store.list(scope).entries)
     expect(changes.map(change => change.kind)).toEqual(['distill'])
   })
 
@@ -179,7 +179,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getMeta().pending['idle:session-1']).toBeUndefined()
   })
 
-  it('consolidates conflicts only within their existing scope', async () => {
+  it('leaves legacy global entries untouched and never consolidates across scopes', async () => {
     const globalScope: MemoryScope = { kind: 'global' }
     const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
     const { service, store, responses } = await setup([
@@ -194,9 +194,10 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
 
     await service.consolidate()
 
-    expect((await store.read(globalScope, target.id))?.summary).toBe('New global decision')
+    expect((await store.read(globalScope, target.id))?.summary).toBe('Old global decision')
     expect((await store.read(workspaceScope, workspace.id))?.summary).toBe('Workspace convention')
     expect(store.list(workspaceScope).entries).toHaveLength(1)
+    expect(store.list(globalScope).entries.map(entry => entry.id)).toEqual([workspace.id])
   })
 
   it('runs lifecycle work through the injected maintenance host', async () => {
@@ -208,9 +209,11 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(calls).toBe(1)
   })
 
-  it('expires facts and conventions by verification age but retains preferences and decisions', async () => {
+  it('expires workspace facts and conventions but retains preferences, decisions, and legacy global entries', async () => {
     const { service, store, changes } = await setup()
-    const scope: MemoryScope = { kind: 'global' }
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const legacyScope: MemoryScope = { kind: 'global' }
+    const legacy = await store.upsert({ scope: legacyScope, category: 'environment-fact', summary: 'Legacy global', detail: 'Preserved without aggregation.', sourceRefs: [], lastVerifiedAt: '2020-01-01T00:00:00.000Z' })
     await store.upsert({ scope, category: 'environment-fact', summary: 'Old environment', detail: 'Old environment.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2026-09-01T00:00:00.000Z' })
     await store.upsert({ scope, category: 'project-convention', summary: 'Old convention', detail: 'Old convention.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2026-01-01T00:00:00.000Z' })
     await store.upsert({ scope, category: 'preference', summary: 'Durable preference', detail: 'Durable preference.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2020-01-01T00:00:00.000Z' })
@@ -221,6 +224,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
 
     expect(read).not.toHaveBeenCalled()
     expect(store.list(scope).entries.map(entry => entry.category).sort()).toEqual(['long-term-decision', 'preference'])
+    expect((await store.read(legacyScope, legacy.id))?.summary).toBe('Legacy global')
     expect(changes.map(change => change.kind)).toEqual(['retention'])
   })
 })

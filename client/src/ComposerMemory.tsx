@@ -10,7 +10,8 @@ interface ComposerMemoryProps {
   readonly t: MemoryTranslator
 }
 
-type Operation = { readonly sessionId: string; readonly layer: MemoryLayer; readonly method: 'enable' | 'refresh' }
+type Selection = 'disabled' | MemoryLayer
+type Operation = { readonly sessionId: string; readonly selection: Selection; readonly method: 'enable' | 'disable' | 'refresh' }
 
 export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
   useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
@@ -35,19 +36,24 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
 
   const state = store.getSession(sessionId)
   const unavailable = state?.workspaceId === undefined
+  const selection: Selection = state?.layers.workspace.enabled ? 'workspace' : state?.layers.global.enabled ? 'global' : 'disabled'
+  const busy = operation?.sessionId === sessionId
 
-  const run = async (layer: MemoryLayer, method: 'enable' | 'refresh'): Promise<void> => {
+  const run = async (targetSelection: Selection, method: 'enable' | 'disable' | 'refresh'): Promise<void> => {
     if (operation !== null) return
-    const target = { sessionId, layer, method } as const
+    const target = { sessionId, selection: targetSelection, method } as const
     setOperation(target)
     setFeedback(null)
     setError(null)
     try {
-      const result = method === 'enable' ? await store.enable(sessionId, layer) : await store.refresh(sessionId, layer)
+      const result = method === 'disable' ? await store.disable(sessionId)
+        : method === 'enable' ? await store.enable(sessionId, targetSelection as MemoryLayer)
+          : await store.refresh(sessionId, targetSelection as MemoryLayer)
       if (!mounted.current || currentSession.current !== sessionId) return
-      const suffix = layer === 'global' ? 'Global' : 'Workspace'
-      const key: MemoryCopyKey = result.status === 'up-to-date' ? `upToDate${suffix}`
-        : result.status === 'refreshed' ? `refreshed${suffix}` : `enabled${suffix}`
+      const suffix = targetSelection === 'global' ? 'Global' : 'Workspace'
+      const key: MemoryCopyKey = result.status === 'disabled' ? 'memoryDisabled'
+        : result.status === 'up-to-date' ? `upToDate${suffix}`
+          : result.status === 'refreshed' ? `refreshed${suffix}` : `enabled${suffix}`
       setFeedback({ sessionId, text: t(key) })
     } catch (reason) {
       if (mounted.current && currentSession.current === sessionId) {
@@ -59,38 +65,36 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
   }
 
   return (
-    <div className="snail-memory-controls" aria-label={t('panel')}>
-      {(['global', 'workspace'] as const).map(layer => {
-        const layerState = state?.layers[layer]
-        const enabled = layerState?.enabled === true
-        const busy = operation?.sessionId === sessionId && operation.layer === layer
-        const workspaceDisabled = layer === 'workspace' && unavailable
-        const suffix = layer === 'global' ? 'Global' : 'Workspace'
-        return (
-          <div className="snail-memory-layer" key={layer} title={workspaceDisabled ? t('ungrouped') : t(layer)}>
-            <span className="snail-memory-status">{layer === 'global' ? 'G' : 'W'}</span>
-            {enabled && <span className="snail-memory-status">{t('enabled')}</span>}
-            {!enabled && (
-              <button
-                type="button"
-                aria-label={t(`enable${suffix}`)}
-                disabled={state === undefined || busy || workspaceDisabled}
-                onClick={() => { void run(layer, 'enable') }}
-              >+</button>
-            )}
-            <button
-              type="button"
-              aria-label={t(`refresh${suffix}`)}
-              disabled={!enabled || busy || workspaceDisabled}
-              onClick={() => { void run(layer, 'refresh') }}
-            ><RefreshIcon /></button>
-            {busy && <span className="snail-memory-feedback" role="status">{t(`${operation?.method === 'enable' ? 'enabling' : 'refreshing'}${suffix}`)}</span>}
-            {(layerState?.pending ?? 0) > 0 && (
-              <span className="snail-memory-feedback" role="status">{layerState?.pending ?? 0} {t(layer === 'global' ? 'globalSnapshotsQueued' : 'workspaceSnapshotsQueued')}</span>
-            )}
-          </div>
-        )
-      })}
+    <div className="snail-memory-controls">
+      <div className="snail-memory-layer" role="radiogroup" aria-label={t('panel')}>
+        {(['disabled', 'workspace', 'global'] as const).map(option => {
+          const suffix = option === 'global' ? 'Global' : 'Workspace'
+          const label = option === 'disabled' ? t('disableMemory') : t(`enable${suffix}`)
+          return (
+            <label key={option} title={option === 'workspace' && unavailable ? t('ungrouped') : label}>
+              <input
+                type="radio"
+                name={`snail-memory-layer-${sessionId}`}
+                value={option}
+                checked={selection === option}
+                disabled={state === undefined || busy || (option === 'workspace' && unavailable)}
+                onChange={() => { void run(option, option === 'disabled' ? 'disable' : 'enable') }}
+              />
+              {label}
+            </label>
+          )
+        })}
+        {selection !== 'disabled' && <button
+          type="button"
+          aria-label={t(selection === 'global' ? 'refreshGlobal' : 'refreshWorkspace')}
+          disabled={state === undefined || busy}
+          onClick={() => { void run(selection, 'refresh') }}
+        ><RefreshIcon /></button>}
+      </div>
+      {busy && <span className="snail-memory-feedback" role="status">{t(operation.method === 'disable' ? 'disablingMemory' : `${operation.method === 'enable' ? 'enabling' : 'refreshing'}${operation.selection === 'global' ? 'Global' : 'Workspace'}`)}</span>}
+      {selection !== 'disabled' && (state?.layers[selection].pending ?? 0) > 0 && (
+        <span className="snail-memory-feedback" role="status">{state?.layers[selection].pending ?? 0} {t(selection === 'global' ? 'globalSnapshotsQueued' : 'workspaceSnapshotsQueued')}</span>
+      )}
       {unavailable && <span className="snail-memory-feedback">{t('ungrouped')}</span>}
       {feedback?.sessionId === sessionId && <span className="snail-memory-feedback" role="status">{feedback.text}</span>}
       {error?.sessionId === sessionId && <span className="snail-memory-feedback snail-memory-error" role="alert">{error.text}</span>}

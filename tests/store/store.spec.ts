@@ -58,7 +58,41 @@ afterEach(async () => {
 })
 
 describe('MemoryStore', () => {
-  it('keeps global and workspace entries separate and publishes workspace references', async () => {
+  it('builds global as a live aggregate of every workspace and excludes legacy global entries', async () => {
+    const store = await open(await tempRoot())
+    const globalScope: MemoryScope = { kind: 'global' }
+    const first: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const second: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-2') }
+    await store.upsert(input(globalScope, 'Legacy independent global'))
+    await store.upsert(input(first, 'First workspace convention'))
+    await store.upsert(input(second, 'Second workspace convention'))
+    const before = store.list(globalScope)
+
+    expect(before.entries.map(entry => entry.summary)).toEqual([
+      'Second workspace convention',
+      'First workspace convention',
+    ])
+    expect(before.entries.map(entry => entry.scope)).toEqual([second, first])
+    const revision = before.revision
+    await store.updateSessionState('session-1', state => { state.layers.global.enabled = true })
+    expect(store.list(globalScope).revision).toBe(revision)
+    await store.upsert(input(first, 'Another first workspace convention'))
+    expect(store.list(globalScope).revision).toBeGreaterThan(revision)
+  })
+
+  it('normalizes legacy dual-enabled sessions to workspace only', async () => {
+    const store = await open(await tempRoot())
+    await store.updateSessionState('session-1', state => {
+      state.layers.global.enabled = true
+      state.layers.workspace.enabled = true
+    })
+
+    const state = store.getSessionState('session-1')
+    expect(state.layers.workspace.enabled).toBe(true)
+    expect(state.layers.global.enabled).toBe(false)
+  })
+
+  it('keeps legacy global entries out of the aggregate and publishes workspace references', async () => {
     const store = await open(await tempRoot())
     const globalScope: MemoryScope = { kind: 'global' }
     const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
@@ -66,7 +100,7 @@ describe('MemoryStore', () => {
     await store.upsert(input(globalScope, 'Use pnpm'))
     await store.upsert(input(workspaceScope, 'Run focused tests'))
 
-    expect(store.list(globalScope).entries.map(entry => entry.summary)).toEqual(['Use pnpm'])
+    expect(store.list(globalScope).entries.map(entry => entry.summary)).toEqual(['Run focused tests'])
     expect(store.list(workspaceScope).entries.map(entry => entry.summary)).toEqual(['Run focused tests'])
     const globalIndex = store.list(globalScope)
     expect(globalIndex.workspaces).toEqual([
@@ -88,7 +122,7 @@ describe('MemoryStore', () => {
   it('projects large details into chunks without expanding the parent index', async () => {
     const root = await tempRoot()
     const store = await open(root)
-    const scope: MemoryScope = { kind: 'global' }
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
     const detail = `Heading\n\n${'a'.repeat(9_000)}`
     const entry = await store.upsert({ ...input(scope, 'Large detail'), detail })
 
@@ -131,11 +165,11 @@ describe('MemoryStore', () => {
     await expect(readFile(store.paths.detailRecord(entry.id, recreated.revision), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('restores entries and session state after reopening', async () => {
+  it('restores legacy entries and session state after reopening', async () => {
     const root = await tempRoot()
     const first = await open(root)
     const scope: MemoryScope = { kind: 'global' }
-    await first.upsert(input(scope, 'Prefer explicit APIs'))
+    const entry = await first.upsert(input(scope, 'Prefer explicit APIs'))
     await first.updateSessionState('session-1', state => {
       state.layers.global.enabled = true
       state.layers.global.committed.push({
@@ -148,7 +182,8 @@ describe('MemoryStore', () => {
     await first.close()
 
     const second = await open(root)
-    expect(second.list(scope).entries[0]?.summary).toBe('Prefer explicit APIs')
+    expect((await second.read(scope, entry.id))?.summary).toBe('Prefer explicit APIs')
+    expect(second.list(scope).entries.map(item => item.summary)).toEqual([])
     expect(second.getSessionState('session-1').layers.global).toMatchObject({
       enabled: true,
       committed: [{ injectionId: 'injection-1', tokens: 42 }],
@@ -158,7 +193,7 @@ describe('MemoryStore', () => {
   it('keeps details out of the parent state and reads them only on demand', async () => {
     const root = await tempRoot()
     const first = await open(root)
-    const scope: MemoryScope = { kind: 'global' }
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
     const entry = await first.upsert({ ...input(scope, 'Lazy detail'), detail: 'detail-' + 'x'.repeat(20_000) })
     await first.close()
     fileReads.length = 0

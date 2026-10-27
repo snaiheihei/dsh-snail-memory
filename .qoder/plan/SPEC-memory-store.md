@@ -1,5 +1,7 @@
 # Spec: memory-store
 
+> 2026-10-27 修订：独立 global 条目和双层独立开关已废止；global 改为所有 workspace 的动态只读聚合，旧 global 数据仅兼容保留。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余存储与故障恢复规则继续有效。
+
 ## Objective
 
 为 Snail Memory 提供单用户、全局/workspace 分层的持久存储。存储是所有读写、索引展示、注入 revision 和删除语义的权威来源；原始 Session 永远不由本模块修改。

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryLifecycleService } from '../../src/lifecycle/service.js'
 import { MemorySettingsStore } from '../../src/lifecycle/settings.js'
 import { MemoryStore } from '../../src/store/store.js'
+import { workspaceId } from '../../src/store/types.js'
 
 const roots: string[] = []
 const stores: MemoryStore[] = []
@@ -98,7 +99,7 @@ describe('MemorySettingsStore', () => {
     const store = await open(root)
     const settings = await MemorySettingsStore.open(store)
     const lifecycle = new MemoryLifecycleService(store, { settings, now: () => new Date('2026-10-26T00:00:00.000Z') })
-    const scope = { kind: 'global' } as const
+    const scope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') } as const
     await store.upsert({ scope, category: 'environment-fact', summary: 'Keep environment', detail: 'Zero disables automatic expiry.', sourceRefs: [], lastVerifiedAt: '2020-01-01T00:00:00.000Z' })
     await store.upsert({ scope, category: 'preference', summary: 'Expire preference', detail: 'The new one-day policy applies.', sourceRefs: [], lastVerifiedAt: '2026-10-20T00:00:00.000Z' })
 

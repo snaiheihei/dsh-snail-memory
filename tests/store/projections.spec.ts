@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryStore } from '../../src/store/store.js'
+import { workspaceId } from '../../src/store/types.js'
 
 const failure = vi.hoisted(() => ({
   partTwo: false,
@@ -130,7 +131,7 @@ describe('projection and detail publication', () => {
     roots.push(root)
     const store = await MemoryStore.open({ root, heartbeatMs: 60_000 })
     stores.push(store)
-    const scope = { kind: 'global' } as const
+    const scope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') } as const
     failure.indexProjection = true
 
     const entry = await store.upsert({

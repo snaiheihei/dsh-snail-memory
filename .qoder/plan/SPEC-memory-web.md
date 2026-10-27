@@ -1,5 +1,7 @@
 # Spec: memory-web
 
+> 2026-10-27 修订：两个独立 enable 按钮已替换为关闭/workspace/global 三态单选和当前层 refresh；全局页展示所有 workspace 聚合条目且只读，删除在具体 workspace 页执行。以 `SPEC-global-aggregate-memory.md` 为当前契约。
+
 ## Objective
 
 在独立 Client bundle 中实现 Composer 全局/workspace 记忆控件和左侧 Memory 页面。所有持久状态来自 Host RPC，页面 reload、Host 重启和另一浏览器不得依赖 localStorage 恢复权威状态。

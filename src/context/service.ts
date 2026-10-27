@@ -29,7 +29,7 @@ export interface MemoryContextOptions {
 }
 
 export interface MemoryOperationResult {
-  readonly status: 'enabled' | 'already-enabled' | 'refreshed' | 'up-to-date'
+  readonly status: 'enabled' | 'already-enabled' | 'refreshed' | 'up-to-date' | 'disabled'
   readonly injectionId?: string
 }
 
@@ -58,13 +58,23 @@ export class MemoryContextService {
     const scope = this.scopeFor(sessionId, layer, workspaceId)
     await this.store.updateSessionState(sessionId, state => {
       if (scope.kind === 'workspace') state.workspaceId = scope.workspaceId
-      state.layers[layer].enabled = true
+      for (const candidate of ['global', 'workspace'] as const) {
+        state.layers[candidate].enabled = candidate === layer
+      }
     })
     if (!before.layers[layer].desired.some(item => item.automatic)) {
       await this.createDesired(agent, layer, scope, true)
     }
     await this.restore(agent)
     return { status: 'enabled' }
+  }
+
+  async disable(sessionId: string): Promise<MemoryOperationResult> {
+    await this.store.updateSessionState(sessionId, state => {
+      state.layers.global.enabled = false
+      state.layers.workspace.enabled = false
+    })
+    return { status: 'disabled' }
   }
 
   async refresh(agent: InjectionAgent, layer: MemoryLayer): Promise<MemoryOperationResult> {
@@ -86,6 +96,7 @@ export class MemoryContextService {
   async restore(agent: InjectionAgent): Promise<void> {
     const state = this.store.getSessionState(agent.session.id)
     for (const layer of ['global', 'workspace'] as const) {
+      if (!state.layers[layer].enabled) continue
       for (const desired of pendingInjection(state, layer)) {
         const key = `${agent.session.id}:${layer}:${desired.injectionId}`
         if (this.queued.has(key)) continue
@@ -127,11 +138,15 @@ export class MemoryContextService {
     if (metadata) this.queued.delete(`${sessionId}:${metadata.layer}:${metadata.injectionId}`)
   }
 
-  async readDetail(sessionId: string, layer: MemoryLayer, id: MemoryId): Promise<MemoryEntry | null> {
+  async readDetail(sessionId: string, layer: MemoryLayer, id: MemoryId, sourceWorkspaceId?: WorkspaceId): Promise<MemoryEntry | null> {
     const state = this.store.getSessionState(sessionId)
     if (!state.layers[layer].enabled) return null
-    const scope = this.scopeFor(sessionId, layer)
-    return this.store.read(scope, id)
+    if (layer === 'global') {
+      return sourceWorkspaceId
+        ? this.store.read({ kind: 'workspace', workspaceId: sourceWorkspaceId }, id)
+        : null
+    }
+    return this.store.read(this.scopeFor(sessionId, layer), id)
   }
 
   private scopeFor(sessionId: string, layer: MemoryLayer, workspaceId?: WorkspaceId): MemoryScope {

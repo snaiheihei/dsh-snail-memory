@@ -1,6 +1,7 @@
 import { access, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { MemoryEntry, MemoryScope, StoreState, StoredMemoryEntry } from './types.js'
+import { entriesForScope, revisionForScope, workspaceIndexRefs } from './aggregate.js'
+import type { MemoryEntry, MemoryScope, StoreState } from './types.js'
 import { workspaceId } from './types.js'
 import type { StorePaths } from './paths.js'
 import { chunkMemoryDetail, MEMORY_CHUNK_THRESHOLD, type MemoryDetailChunk } from './chunks.js'
@@ -20,18 +21,16 @@ function escapeText(value: string): string {
   return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
 }
 
-function scopeEntries(state: StoreState, scope: MemoryScope): StoredMemoryEntry[] {
-  return state.entries.filter(entry => scope.kind === 'global'
-    ? entry.scope.kind === 'global'
-    : entry.scope.kind === 'workspace' && entry.scope.workspaceId === scope.workspaceId)
+function sourceLabel(entry: { readonly scope: MemoryScope }): string {
+  return entry.scope.kind === 'workspace' ? `; workspace ${entry.scope.workspaceId}` : ''
 }
 
 function indexMarkdown(state: StoreState, scope: MemoryScope): string {
-  const entries = scopeEntries(state, scope)
+  const entries = entriesForScope(state, scope)
   const lines = [
-    scope.kind === 'global' ? '# Snail Memory — 总记忆索引' : `# Snail Memory — ${scope.workspaceId}`,
+    scope.kind === 'global' ? '# Snail Memory — 全局聚合索引' : `# Snail Memory — ${scope.workspaceId}`,
     '',
-    `Revision: ${scope.kind === 'global' ? state.scopeRevisions.global : state.scopeRevisions.workspaces[scope.workspaceId] ?? 0}`,
+    `Revision: ${revisionForScope(state, scope)}`,
     '',
     '## 条目',
     '',
@@ -39,23 +38,22 @@ function indexMarkdown(state: StoreState, scope: MemoryScope): string {
   const detailPrefix = scope.kind === 'global' ? '../details' : '../../details'
   for (const entry of entries) {
     const target = entry.detailChars > MEMORY_CHUNK_THRESHOLD ? `${entry.id}/INDEX.md` : `${entry.id}.md`
-    lines.push(`- [${escapeText(entry.summary)}](${detailPrefix}/${target}) — ${entry.category}; verified ${entry.lastVerifiedAt}; revision ${entry.revision}`)
+    lines.push(`- [${escapeText(entry.summary)}](${detailPrefix}/${target}) — ${entry.category}${sourceLabel(entry)}; verified ${entry.lastVerifiedAt}; revision ${entry.revision}`)
   }
   if (entries.length === 0) lines.push('- （无条目）')
   if (scope.kind === 'global') {
     lines.push('', '## Workspace 索引', '')
-    for (const [id, meta] of Object.entries(state.workspaces)) {
-      const count = scopeEntries(state, { kind: 'workspace', workspaceId: workspaceId(id) }).length
-      lines.push(`- [${id}](../workspaces/${id}/INDEX.md) — ${count} 条；revision ${state.scopeRevisions.workspaces[id] ?? 0}；updated ${meta.updatedAt}`)
+    for (const workspace of workspaceIndexRefs(state)) {
+      lines.push(`- [${workspace.workspaceId}](../workspaces/${workspace.workspaceId}/INDEX.md) — ${workspace.entryCount} 条；revision ${workspace.revision}；updated ${workspace.updatedAt}`)
     }
   }
   return `${lines.join('\n')}\n`
 }
 
 function coreMarkdown(state: StoreState, scope: MemoryScope): string {
-  const entries = scopeEntries(state, scope)
+  const entries = entriesForScope(state, scope)
   const lines = ['# Snail Memory — 核心摘要', '']
-  for (const entry of entries) lines.push(`- [${entry.category}] ${escapeText(entry.summary)}`)
+  for (const entry of entries) lines.push(`- [${entry.category}]${sourceLabel(entry)} ${escapeText(entry.summary)}`)
   if (entries.length === 0) lines.push('- （无核心摘要）')
   return `${lines.join('\n')}\n`
 }

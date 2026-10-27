@@ -1,5 +1,7 @@
 # Spec: memory-lifecycle
 
+> 2026-10-27 修订：自动蒸馏、整合和保留期只处理 workspace；global 是动态只读聚合，旧 global 条目不参与后台维护。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余调度与重试规则继续有效。
+
 ## Objective
 
 实现显式记忆操作和自动记忆生命周期：每 15 个有效用户轮轻量 Review、60 分钟空闲或结束蒸馏、dirty 时最多每 20 小时 scope 内整合、每 24 小时遗忘清理。

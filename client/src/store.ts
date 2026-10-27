@@ -175,6 +175,10 @@ export class MemoryClientStore {
     return this.mutateLayer('enable', sessionId, layer)
   }
 
+  disable(sessionId: string): Promise<MemoryOperationResult> {
+    return this.mutateLayer('disable', sessionId)
+  }
+
   refresh(sessionId: string, layer: MemoryLayer): Promise<MemoryOperationResult> {
     return this.mutateLayer('refresh', sessionId, layer)
   }
@@ -209,12 +213,16 @@ export class MemoryClientStore {
     this.listeners.clear()
   }
 
-  private mutateLayer(method: 'enable' | 'refresh', sessionId: string, layer: MemoryLayer): Promise<MemoryOperationResult> {
-    const key = `${method}:${sessionId}:${layer}`
+  private mutateLayer(method: 'enable' | 'refresh', sessionId: string, layer: MemoryLayer): Promise<MemoryOperationResult>
+  private mutateLayer(method: 'disable', sessionId: string): Promise<MemoryOperationResult>
+  private mutateLayer(method: 'enable' | 'disable' | 'refresh', sessionId: string, layer?: MemoryLayer): Promise<MemoryOperationResult> {
+    const key = `${method}:${sessionId}:${layer ?? ''}`
     const existing = this.mutations.get(key)
     if (existing !== undefined) return existing
     const operation = (async () => {
-      const result = await this.rpc.call(method, { sessionId, layer })
+      const result = method === 'disable'
+        ? await this.rpc.call(method, { sessionId })
+        : await this.rpc.call(method, { sessionId, layer: layer! })
       this.trackedSessions.add(sessionId)
       await this.notifyChanged()
       return result

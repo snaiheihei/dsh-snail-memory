@@ -1,5 +1,7 @@
 # Spec: memory-api
 
+> 2026-10-27 修订：新增 disable RPC；remember/correct/read/remove 不接受独立 global scope，全局列表仍是动态只读聚合。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余传输与错误边界继续有效。
+
 ## Objective
 
 提供树外插件自有的 Host 服务与同源 HTTP RPC，以及 `/memory` 人类命令。API 组合 store/lifecycle/context，不修改 dsh Remote 注册表或任何产品源码。

@@ -10,18 +10,18 @@
 
 ## 1. 设计目标与非目标
 
-Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一套对话压缩器。它把少量稳定知识保存到全局或 workspace 层，在会话明确启用后注入摘要索引，并允许模型按需读取详情。
+Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一套对话压缩器。它把少量稳定知识保存到 workspace 层，在会话明确选择当前 workspace 或全局聚合后注入摘要索引，并允许模型按需读取详情。
 
 核心目标：
 
-1. 全局与 workspace 分层，避免项目事实互相污染。
+1. workspace 隔离权威写入，全局按需汇总所有 workspace，不复制或二次蒸馏条目。
 2. 自动蒸馏与显式记住、纠正、忘记并存。
 3. 摘要优先、详情按需，大详情再按片读取，控制单次模型可见量。
 4. 所有模型可见内容都有普通 Session 消息或工具结果作为证据。
 5. 删除只影响记忆，不删除、替换或压缩对话历史。
 6. 重启可恢复，多 Host 不静默并发写，秘密不进入长期记忆和审计正文。
 
-当前明确不采用向量数据库、embedding 召回或查询相关性排序，也不自动把所有 workspace 记忆晋升到全局。它不是完整知识图谱或实时事实系统；旧记忆只是带来源时间的参考数据。
+当前明确不采用向量数据库、embedding 召回或查询相关性排序，也不把 workspace 记忆复制、晋升或整合成独立全局条目。全局只是所有 workspace 当前条目的动态只读聚合。它不是完整知识图谱或实时事实系统；旧记忆只是带来源时间的参考数据。
 
 ## 2. 总体算法视图
 
@@ -58,8 +58,10 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
 
 ### 3.1 两种 scope
 
-- `global`：保存用户明确写入的全局记忆，同时维护各 workspace 的引用、条目数、revision 和更新时间，不复制 workspace 正文。
-- `workspace`：保存当前 WorkspaceId 下的项目记忆。自动蒸馏只写这一层；Ungrouped 会话没有隐式 workspace，因此不会自动蒸馏到全局。
+- `workspace`：唯一可写的条目来源，保存当前 WorkspaceId 下的项目记忆。自动蒸馏、显式记住/纠正/忘记、整合和保留期清理都只在这一层执行；Ungrouped 会话没有隐式 workspace，因此不会自动蒸馏到全局。
+- `global`：所有 workspace 当前条目的动态只读聚合。列表、Markdown、注入快照和 Web 详情保留原条目的 scope 与 id，并按来源 workspace 读取详情；不接受独立写入，不做跨 workspace LLM 去重或冲突裁决。
+
+旧版独立 global 条目仍保留在权威 JSON 和详情数据中，但不进入新的聚合列表、投影、快照、整合或保留期清理，也不会被静默迁移或删除。
 
 WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作为记忆 ID。这样避免路径大小写、符号链接或目录解析变化直接重写记忆身份。
 
@@ -155,7 +157,7 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 自动蒸馏的新候选使用：
 
 ```text
-scopeKey = global | workspaceId
+scopeKey = workspaceId
 normalizedSummary = summary.trim().toLowerCase()
 memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 ```
@@ -166,7 +168,7 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 
 ## 6. 整合与冲突裁决
 
-整合按 global 和各 workspace 分别执行，不跨 scope 自动晋升。每个 scope 的处理过程为：
+整合按各 workspace 分别执行，不处理 global 聚合视图或旧 global 条目，也不跨 workspace 自动晋升。每个 workspace 的处理过程为：
 
 1. 按 `updatedAt` 从新到旧排列完整条目。
 2. 逐条装入最多 64,000 字符的模型输入；达到预算后停止加入更老条目。
@@ -200,12 +202,12 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 
 ### 8.1 召回不是向量搜索
 
-当前召回策略是“scope 内摘要索引 + 按 ID 精确读取”：
+当前召回策略是“所选层摘要索引 + 按 ID 精确读取”：
 
-1. Store 按 `updatedAt` 新到旧排列，ID 作为稳定次序兜底。
-2. enable 或 refresh 时渲染该层摘要索引。
-3. 全局快照额外携带 workspace 引用，不携带 workspace 正文。
-4. 模型确有需要时调用 `snail_memory_read`，提供已启用 layer 和父 memory ID；Store 此时才按 id/revision 异步读取目标权威详情记录。
+1. Store 按 `updatedAt` 新到旧排列，ID 作为稳定次序兜底；global 直接汇总所有 workspace 的父索引条目。
+2. enable 或 refresh 时渲染所选层摘要索引。
+3. 全局快照包含预算内的各 workspace 摘要、来源 workspace 和引用统计，不读取或注入完整详情，也不包含旧 global 条目。
+4. 模型确有需要时调用 `snail_memory_read`，提供已启用 layer 和父 memory ID；global 还必须提供快照中的来源 `workspace_id`。Store 此时才按 id/revision 异步读取目标权威详情记录。
 5. 小详情直接返回；大详情先返回分片清单，再按 chunk ID 读取单片。
 
 每条快照记忆带类别、ID、摘要和“若干天前”的时点提示，并明确它是不可信参考数据，不能覆盖当前用户、系统或安全指令。
@@ -220,11 +222,13 @@ estimatedTokens(text) = ceil(text.length / 4) + 8
 
 默认摘要条目预算为 1,200 估算 token，可通过 Settings 的 `snapshotTokenBudget` 调整并持久化。Context 在每次 Enable/Refresh 创建新快照时读取当前值；已有 desired 和已注入 Session 的历史快照保持不变。超限后停止加入后续条目，并提示还有条目可按 ID 读取。该估算不是 provider 的精确计费值；固定头、workspace 引用和尾部说明也不属于当前条目循环的硬上限。
 
-### 8.3 两层单向 enable
+### 8.3 关闭 / 当前 workspace / 全局三态单选
 
-新会话的 global 和 workspace 两层均为 disabled，只允许 disabled → enable，两层互不影响。每层只自动创建一次快照；Ungrouped 会话不能启用 workspace 详情读取。
+新会话默认关闭。enable(global) 或 enable(workspace) 会原子地选中目标并取消另一层；disable 同时关闭两层。Host 和 Composer 都以这份状态为准，Ungrouped 会话不能选择 workspace，但可以选择 global。旧数据若两层同时 enabled，恢复时以 workspace 为选中层。
 
-“只加载一次”指自动注入次数，不禁止用户显式 refresh。当前 refresh 仅在 scope revision 高于该层已有 desired 最大 revision 时创建新快照，否则恢复尚未提交的注入并返回 up-to-date。
+每层仍只自动创建一次快照，重复选择当前层幂等恢复；切换或关闭不删除 desired/committed，也不撤回已提交或已排队消息。restore 只恢复当前选中层的 pending injection，关闭层的历史 pending 不会继续排队。
+
+“只加载一次”指自动注入次数，不禁止用户显式 refresh。当前 refresh 只允许所选层，并且仅在该层 revision 高于已有 desired 最大 revision 时创建新快照，否则恢复尚未提交的注入并返回 up-to-date。
 
 ### 8.4 desired → queued → committed
 
@@ -343,7 +347,7 @@ LLM 适合提炼、同义合并和冲突解释，不适合承担权限、事务�
 
 ### 12.3 用 revision 驱动显式刷新
 
-scope revision 只在实际 upsert/remove 时前进。刷新基于 revision，而不是比较整段 Markdown，因此重复点击和进程恢复可以使用稳定规则判断是否需要新快照。
+workspace scope revision 只在实际 upsert/remove 时前进；global revision 是所有 workspace scope revision 的求和，因此任一 workspace 变化都会推进聚合 revision，而 Session 状态更新不会。刷新基于 revision，而不是比较整段 Markdown，因此重复点击和进程恢复可以使用稳定规则判断是否需要新快照。
 
 ### 12.4 用 append-only 换取可审计性
 
@@ -418,6 +422,12 @@ store + safety
 
 该增量实际通过 28 个测试文件、124 项测试，以及 typecheck、lint 和 build。未重新执行真实 Host/UI/模型验证，因此这些结果证明的是自动化契约与故障注入边界，不等同于新的真实环境验收。
 
+### 阶段七：从独立全局存储演进为动态聚合与互斥注入
+
+全局不再接受独立 remember/correct/forget，也不再只显示 workspace 引用。Store、Markdown、快照和 Web 统一从所有 workspace 的当前权威条目生成全局视图，详情按原 scope 和来源 workspace 读取；旧 global 数据仅为兼容保留，不参与展示或后台维护。自动蒸馏、整合和保留期仍只处理 workspace。
+
+Session 从两个独立 enable latch 演进为“关闭 / 当前 workspace / 全局”三态单选，新增 disable RPC，并在 Host 侧原子互斥和归一化旧双层状态。切换只影响后续恢复与新注入，既有 Session 快照仍遵守 append-only。
+
 ## 14. 当前边界与后续演进方向
 
 以下是当前限制或候选方向，不是已经实现的能力：
@@ -438,7 +448,7 @@ store + safety
 
 | 主题 | 主要实现 |
 |---|---|
-| 数据模型、scope、revision、会话状态 | `src/store/types.ts`、`src/store/store.ts` |
+| 数据模型、聚合、scope、revision、会话状态 | `src/store/types.ts`、`src/store/aggregate.ts`、`src/store/store.ts` |
 | 原子 JSON、锁与 fencing | `src/store/json.ts`、`src/store/lock.ts` |
 | 版本化权威详情与按需读取 | `src/store/records.ts`、`src/store/store.ts` |
 | 大详情切分与 Markdown 投影 | `src/store/chunks.ts`、`src/store/projections.ts` |

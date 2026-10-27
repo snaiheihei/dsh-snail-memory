@@ -1,5 +1,7 @@
 # Spec: memory-context
 
+> 2026-10-27 修订：两个独立 enable latch 和“禁止 disable”已废止；当前为关闭/workspace/global 三态单选，全局详情须带来源 workspace。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余注入与提交对账规则继续有效。
+
 ## Objective
 
 实现每会话全局/workspace 两个单向 enable latch、一次性自动摘要注入、显式 refresh、时效提醒和受限详情读取，保证所有模型可见记忆均可由 dsh Session 重建。
