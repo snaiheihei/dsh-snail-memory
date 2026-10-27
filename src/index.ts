@@ -14,7 +14,9 @@ import { registerMemoryApi } from './api/index.js'
 import { MemoryContextService } from './context/service.js'
 import { registerMemoryReadTool } from './context/tool.js'
 import { MemoryLifecycleService } from './lifecycle/service.js'
+import { DEFAULT_MEMORY_SETTINGS, MemorySettingsStore } from './lifecycle/settings.js'
 import { MemoryStore } from './store/store.js'
+import { workspaceId } from './store/types.js'
 import { DshAuxiliaryModel, renderSessionTranscript, resolveSessionWorkspace, selectModelRoute } from './runtime.js'
 
 export const name = 'snail-memory'
@@ -34,19 +36,35 @@ export const Config: z<Config> = z.object({
   dshHome: z.string(),
   provider: z.string(),
   model: z.string(),
-  reviewEveryUserTurns: z.number().min(1).default(10),
-  idleDelayMinutes: z.number().min(0).default(15),
-  consolidationCooldownHours: z.number().min(0).default(6),
+  reviewEveryUserTurns: z.number().min(1).default(15),
+  idleDelayMinutes: z.number().min(0).default(60),
+  consolidationCooldownHours: z.number().min(0).default(20),
   retentionSweepHours: z.number().min(0).default(24),
 })
 
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const root = join(resolveDshHome(config.dshHome), 'snail_memory')
   const store = await MemoryStore.open({ root })
-  const memories = new MemoryContextService(store, { maxSnapshotTokens: 1_200 })
+  let settings: MemorySettingsStore
+  try {
+    settings = await MemorySettingsStore.open(store, {
+      reviewEveryUserTurns: config.reviewEveryUserTurns ?? 15,
+      idleDelayMinutes: config.idleDelayMinutes ?? 60,
+      consolidationCooldownHours: config.consolidationCooldownHours ?? 20,
+      snapshotTokenBudget: DEFAULT_MEMORY_SETTINGS.snapshotTokenBudget,
+      retentionDays: { ...DEFAULT_MEMORY_SETTINGS.retentionDays },
+    })
+  } catch (error) {
+    await store.close()
+    throw error
+  }
+  const memories = new MemoryContextService(store, {
+    getSnapshotTokenBudget: () => settings.get().snapshotTokenBudget,
+  })
   const transcripts = new Map<string, string>()
   const configuredRoute = config.provider && config.model ? { provider: config.provider, model: config.model } : undefined
   const lifecycle = new MemoryLifecycleService(store, {
+    settings,
     model: new DshAuxiliaryModel(ctx.llm),
     route: () => selectModelRoute(ctx.agents.list(), configuredRoute),
     ...(config.reviewEveryUserTurns === undefined ? {} : { reviewEveryUserTurns: config.reviewEveryUserTurns }),
@@ -74,6 +92,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     resolveSession,
     isWorkspace: id => ctx.workspaceRegistry.list().some(workspace => workspace.id === id),
     lifecycle,
+    settings: lifecycle,
+    listWorkspaces: () => ctx.workspaceRegistry.list().map(workspace => ({ id: workspaceId(workspace.id), title: workspace.title })),
   })
   const disposeApi = registerMemoryApi(ctx, controller)
   const disposeTool = registerMemoryReadTool(ctx, memories)

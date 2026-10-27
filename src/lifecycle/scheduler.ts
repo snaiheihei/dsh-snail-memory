@@ -28,9 +28,31 @@ export class LifecycleScheduler {
 
   constructor(
     private readonly store: MemoryStore,
-    private readonly options: LifecycleSchedulerOptions,
+    private options: LifecycleSchedulerOptions,
   ) {
     this.now = options.now ?? (() => new Date())
+  }
+
+  updateIdleDelayMinutes(value: number): void {
+    if (!Number.isFinite(value) || value < 0) throw new Error('idleDelayMinutes must be a non-negative finite number')
+    this.options = { ...this.options, idleDelayMinutes: value }
+    this.schedule()
+  }
+
+  async updateConsolidationCooldownHours(value: number): Promise<void> {
+    if (!Number.isFinite(value) || value < 0) throw new Error('consolidationCooldownHours must be a non-negative finite number')
+    const current = this.store.getMeta()
+    if (current.dirty || current.pending.consolidate) {
+      const nextRunAt = new Date(this.now().getTime() + value * 3_600_000).toISOString()
+      await this.store.updateMeta(meta => {
+        if (meta.dirty) meta.nextConsolidationAt = nextRunAt
+        if (meta.pending.consolidate) {
+          meta.pending.consolidate = { ...meta.pending.consolidate, createdAt: nextRunAt }
+        }
+      })
+    }
+    this.options = { ...this.options, consolidationCooldownHours: value }
+    this.schedule()
   }
 
   async start(): Promise<void> {
@@ -148,11 +170,11 @@ export class LifecycleScheduler {
   }
 
   private get idleDelayMs(): number {
-    return (this.options.idleDelayMinutes ?? 15) * 60_000
+    return (this.options.idleDelayMinutes ?? 60) * 60_000
   }
 
   private get consolidationDelayMs(): number {
-    return (this.options.consolidationCooldownHours ?? 6) * 3_600_000
+    return (this.options.consolidationCooldownHours ?? 20) * 3_600_000
   }
 
   private get retentionDelayMs(): number {

@@ -1,6 +1,6 @@
 import type {
-  CorrectRequest, LayerRequest, MemoryStatus, ReadRequest, ScopeRequest, SessionRequest,
-  SessionStateView, WriteRequest, RpcPayload, RpcValue, RpcMethod,
+  CorrectRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, ScopeRequest, SessionRequest,
+  SessionStateView, WorkspaceView, WriteRequest, RpcPayload, RpcValue, RpcMethod,
 } from '../contract.js'
 import type { MemoryContextService, InjectionAgent, MemoryOperationResult } from '../context/service.js'
 import { pendingInjection, type MemoryStore } from '../store/store.js'
@@ -17,10 +17,17 @@ export interface MemoryWriteLifecycle {
   correct(input: UpsertMemoryInput & { id: MemoryId }): Promise<MemoryEntry>
   forget(scope: MemoryScope, id: MemoryId): Promise<boolean>
 }
+export interface MemorySettingsLifecycle {
+  getSettings(): MemorySettings
+  updateSettings(settings: MemorySettings): Promise<MemorySettings>
+}
+
 export interface MemoryControllerOptions {
   readonly resolveSession: (sessionId: string) => ResolvedSession | undefined
   readonly isWorkspace?: (workspaceId: string) => boolean
   readonly lifecycle?: MemoryWriteLifecycle
+  readonly settings?: MemorySettingsLifecycle
+  readonly listWorkspaces?: () => readonly WorkspaceView[]
   readonly now?: () => Date
 }
 
@@ -47,6 +54,9 @@ export class MemoryController {
   call(method: 'remember', payload: WriteRequest): Promise<MemoryEntry>
   call(method: 'correct', payload: CorrectRequest): Promise<MemoryEntry>
   call(method: 'status', payload: Record<string, never>): Promise<MemoryStatus>
+  call(method: 'getSettings', payload: Record<string, never>): Promise<MemorySettings>
+  call(method: 'updateSettings', payload: MemorySettings): Promise<MemorySettings>
+  call(method: 'listWorkspaces', payload: Record<string, never>): Promise<WorkspaceView[]>
   call(method: RpcMethod, payload: RpcPayload): Promise<RpcValue>
   async call(method: RpcMethod, payload: RpcPayload): Promise<RpcValue> {
     try {
@@ -60,6 +70,9 @@ export class MemoryController {
         case 'remember': return await this.writeMemory(payload as WriteRequest, false)
         case 'correct': return await this.writeMemory(payload as CorrectRequest, true)
         case 'status': return { writable: this.store.writable, ...this.store.getMeta() }
+        case 'getSettings': return this.settings().getSettings()
+        case 'updateSettings': return await this.settings().updateSettings(payload as MemorySettings)
+        case 'listWorkspaces': return [...(this.options.listWorkspaces?.() ?? [])]
       }
     } catch (error) {
       throw safeError(error)
@@ -137,6 +150,11 @@ export class MemoryController {
     if (scope.kind === 'workspace' && this.options.isWorkspace && !this.options.isWorkspace(scope.workspaceId)) {
       throw new MemoryApiError('workspace-not-found', 'The workspace does not exist.', 404)
     }
+  }
+
+  private settings(): MemorySettingsLifecycle {
+    if (!this.options.settings) throw new MemoryApiError('invalid-operation', 'Lifecycle settings are unavailable.', 409)
+    return this.options.settings
   }
 }
 

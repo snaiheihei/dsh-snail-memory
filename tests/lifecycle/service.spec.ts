@@ -57,29 +57,29 @@ afterEach(async () => {
 
 // These file-backed tests perform many real atomic writes while Vitest runs other suites in parallel.
 describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
-  it('counts only completed user turns and respects the 9/10/11 boundary and duplicate notifications', async () => {
+  it('counts only completed user turns and respects the 14/15/16 boundary and duplicate notifications', async () => {
     const { service } = await setup(['{"candidates":[]}'])
     await service.start()
 
-    for (let turn = 1; turn <= 9; turn += 1) {
+    for (let turn = 1; turn <= 14; turn += 1) {
       await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: `turn-${turn}`, source: { kind: 'user' } } })
       await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: `turn-${turn}`, status: 'completed' } })
     }
     await vi.advanceTimersByTimeAsync(0)
     expect(service.reviewCount).toBe(0)
 
-    await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: 'turn-10', source: { kind: 'user' } } })
-    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-10', status: 'completed' } })
-    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-10', status: 'completed' } })
+    await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: 'turn-15', source: { kind: 'user' } } })
+    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-15', status: 'completed' } })
+    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-15', status: 'completed' } })
     await vi.advanceTimersByTimeAsync(0)
     expect(service.reviewCount).toBe(1)
-    await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: 'turn-10', source: { kind: 'user' } } })
-    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-10', status: 'completed' } })
+    await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: 'turn-15', source: { kind: 'user' } } })
+    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-15', status: 'completed' } })
     await vi.advanceTimersByTimeAsync(0)
     expect(service.reviewCount).toBe(1)
 
-    await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: 'turn-11', source: { kind: 'user' } } })
-    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-11', status: 'error' } })
+    await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: 'turn-16', source: { kind: 'user' } } })
+    await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-16', status: 'error' } })
     await vi.advanceTimersByTimeAsync(0)
     expect(service.reviewCount).toBe(1)
   })
@@ -96,7 +96,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: 'turn-1', status: 'completed' } })
     await vi.advanceTimersByTimeAsync(0)
     expect(service.reviewCount).toBe(0)
-    for (let turn = 2; turn <= 10; turn += 1) {
+    for (let turn = 2; turn <= 15; turn += 1) {
       await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: `turn-${turn}`, source: { kind: 'user' } } })
       await service.handleSessionEvent('session-1', { type: 'agent/turn', data: { turnId: `turn-${turn}`, status: 'completed' } })
     }
@@ -165,12 +165,12 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     const { service, store } = await setup()
     await service.start()
     await service.handleSessionEvent('session-1', { type: 'user/message', data: { turnId: 'turn-1', source: { kind: 'user' } } })
-    await vi.advanceTimersByTimeAsync(14 * 60_000)
+    await vi.advanceTimersByTimeAsync(59 * 60_000)
 
     await service.handleSessionEvent('session-1', { type: 'turn/start', data: { turnId: 'turn-1' } })
-    await vi.advanceTimersByTimeAsync(14 * 60_000)
+    await vi.advanceTimersByTimeAsync(59 * 60_000)
     await service.handleSessionEvent('session-1', { type: 'tool/result', data: { turnId: 'turn-1' } })
-    await vi.advanceTimersByTimeAsync(14 * 60_000)
+    await vi.advanceTimersByTimeAsync(59 * 60_000)
     expect(store.getMeta().pending['idle:session-1']).toBeDefined()
 
     await vi.advanceTimersByTimeAsync(60_000)

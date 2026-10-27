@@ -1,4 +1,4 @@
-import type { SessionStateView } from '../../src/contract.js'
+import type { MemorySettings, SessionStateView, WorkspaceView } from '../../src/contract.js'
 import type { MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope } from '../../src/store/types.js'
 import type { MemoryOperationResult, MemoryRpc } from './rpc.js'
 
@@ -21,6 +21,12 @@ export class MemoryClientStore {
   private readonly mutations = new Map<string, Promise<MemoryOperationResult>>()
   private readonly listeners = new Set<() => void>()
   private readonly eventTarget: EventTarget | undefined
+  private settings: MemorySettings | undefined
+  private workspaces: readonly WorkspaceView[] | undefined
+  private settingsRequest = 0
+  private workspacesRequest = 0
+  private trackSettings = false
+  private trackWorkspaces = false
   private revision = 0
   private disposed = false
 
@@ -49,6 +55,22 @@ export class MemoryClientStore {
 
   getIndexError(scope: MemoryScope): string | undefined {
     return this.errors.get(`index:${scopeKey(scope)}`)
+  }
+
+  getSettings(): MemorySettings | undefined {
+    return this.settings
+  }
+
+  getWorkspaces(): readonly WorkspaceView[] | undefined {
+    return this.workspaces
+  }
+
+  getSettingsError(): string | undefined {
+    return this.errors.get('settings')
+  }
+
+  getWorkspacesError(): string | undefined {
+    return this.errors.get('workspaces')
   }
 
   async loadSession(sessionId: string): Promise<SessionStateView | undefined> {
@@ -88,6 +110,57 @@ export class MemoryClientStore {
     } catch (error) {
       if (this.current(this.indexRequests, key, request)) {
         this.errors.set(`index:${key}`, messageOf(error))
+        this.publish()
+      }
+      return undefined
+    }
+  }
+
+  async loadSettings(): Promise<MemorySettings | undefined> {
+    if (this.disposed) return undefined
+    this.trackSettings = true
+    const request = ++this.settingsRequest
+    try {
+      const settings = await this.rpc.call('getSettings', {})
+      if (this.disposed || request !== this.settingsRequest) return undefined
+      this.settings = settings
+      this.errors.delete('settings')
+      this.publish()
+      return settings
+    } catch (error) {
+      if (!this.disposed && request === this.settingsRequest) {
+        this.errors.set('settings', messageOf(error))
+        this.publish()
+      }
+      return undefined
+    }
+  }
+
+  async updateSettings(settings: MemorySettings): Promise<MemorySettings> {
+    const updated = await this.rpc.call('updateSettings', settings)
+    if (!this.disposed) {
+      this.settingsRequest += 1
+      this.settings = updated
+      this.errors.delete('settings')
+      this.publish()
+    }
+    return updated
+  }
+
+  async loadWorkspaces(): Promise<readonly WorkspaceView[] | undefined> {
+    if (this.disposed) return undefined
+    this.trackWorkspaces = true
+    const request = ++this.workspacesRequest
+    try {
+      const workspaces = await this.rpc.call('listWorkspaces', {})
+      if (this.disposed || request !== this.workspacesRequest) return undefined
+      this.workspaces = workspaces
+      this.errors.delete('workspaces')
+      this.publish()
+      return workspaces
+    } catch (error) {
+      if (!this.disposed && request === this.workspacesRequest) {
+        this.errors.set('workspaces', messageOf(error))
         this.publish()
       }
       return undefined
@@ -159,6 +232,8 @@ export class MemoryClientStore {
     await Promise.all([
       ...[...this.trackedSessions].map(sessionId => this.loadSession(sessionId)),
       ...[...this.trackedScopes.values()].map(scope => this.loadIndex(scope)),
+      ...(this.trackSettings ? [this.loadSettings()] : []),
+      ...(this.trackWorkspaces ? [this.loadWorkspaces()] : []),
     ])
   }
 

@@ -110,6 +110,45 @@ describe('MemoryContextService', () => {
     expect(agent.session.id).toBe(resumedAgent.session.id)
   })
 
+  it('applies a changed token budget only to newly created snapshots', async () => {
+    const { store, agent } = await setup()
+    let snapshotTokenBudget = 10_000
+    const context = new MemoryContextService(store, {
+      now: () => new Date('2026-10-26T00:00:00.000Z'),
+      getSnapshotTokenBudget: () => snapshotTokenBudget,
+    })
+    for (const summary of ['First retained summary', 'Second retained summary']) {
+      await store.upsert({
+        scope: { kind: 'global' },
+        category: 'preference',
+        summary,
+        detail: summary,
+        sourceRefs: [],
+        lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+      })
+    }
+    await context.enable(agent, 'global')
+    const original = context.getSessionState('session-1').layers.global.desired[0]?.snapshot
+
+    snapshotTokenBudget = 100
+    await store.upsert({
+      scope: { kind: 'global' },
+      category: 'preference',
+      summary: 'Third retained summary',
+      detail: 'Third retained summary',
+      sourceRefs: [],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    await context.refresh(agent, 'global')
+
+    const desired = context.getSessionState('session-1').layers.global.desired
+    expect(desired).toHaveLength(2)
+    expect(desired[0]?.snapshot).toBe(original)
+    expect(desired[0]?.snapshot).toContain('First retained summary')
+    expect(desired[1]?.snapshot).not.toContain('First retained summary')
+    expect(desired[1]?.snapshot).toContain('因注入预算省略')
+  })
+
   it('refuses workspace injection for an ungrouped session and refresh before enable', async () => {
     const { context, agent } = await setup()
 

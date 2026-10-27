@@ -34,6 +34,41 @@ function session(value: unknown, optional = false) {
   return string(value, 'sessionId', 128, optional)
 }
 
+function settings(input: Record<string, unknown>) {
+  if (typeof input.reviewEveryUserTurns !== 'number'
+    || !Number.isSafeInteger(input.reviewEveryUserTurns) || input.reviewEveryUserTurns < 1) {
+    throw new MemoryApiError('invalid-request', 'Invalid reviewEveryUserTurns.')
+  }
+  if (typeof input.idleDelayMinutes !== 'number'
+    || !Number.isFinite(input.idleDelayMinutes) || input.idleDelayMinutes < 0) {
+    throw new MemoryApiError('invalid-request', 'Invalid idleDelayMinutes.')
+  }
+  if (typeof input.consolidationCooldownHours !== 'number'
+    || !Number.isFinite(input.consolidationCooldownHours) || input.consolidationCooldownHours < 0) {
+    throw new MemoryApiError('invalid-request', 'Invalid consolidationCooldownHours.')
+  }
+  if (typeof input.snapshotTokenBudget !== 'number'
+    || !Number.isSafeInteger(input.snapshotTokenBudget) || input.snapshotTokenBudget < 1) {
+    throw new MemoryApiError('invalid-request', 'Invalid snapshotTokenBudget.')
+  }
+  const retention = record(input.retentionDays)
+  const retentionDays = {} as Record<MemoryCategory, number>
+  for (const category of CATEGORIES) {
+    const days = retention[category]
+    if (typeof days !== 'number' || !Number.isFinite(days) || days < 0) {
+      throw new MemoryApiError('invalid-request', `Invalid retentionDays.${category}.`)
+    }
+    retentionDays[category] = days
+  }
+  return {
+    reviewEveryUserTurns: input.reviewEveryUserTurns,
+    idleDelayMinutes: input.idleDelayMinutes,
+    consolidationCooldownHours: input.consolidationCooldownHours,
+    snapshotTokenBudget: input.snapshotTokenBudget,
+    retentionDays,
+  }
+}
+
 function write(input: Record<string, unknown>) {
   return {
     scope: scope(input.scope), category: category(input.category),
@@ -45,7 +80,6 @@ function write(input: Record<string, unknown>) {
 export function validatePayload(method: RpcMethod, payload: unknown): RpcPayload {
   const input = record(payload)
   switch (method) {
-    case 'status': return {}
     case 'getSessionState': return { sessionId: session(input.sessionId)! }
     case 'enable':
     case 'refresh': {
@@ -57,5 +91,9 @@ export function validatePayload(method: RpcMethod, payload: unknown): RpcPayload
     case 'remove': return { scope: scope(input.scope), id: memoryId(string(input.id, 'id')!) }
     case 'remember': return write(input)
     case 'correct': return { ...write(input), id: memoryId(string(input.id, 'id')!) }
+    case 'status':
+    case 'getSettings':
+    case 'listWorkspaces': return {}
+    case 'updateSettings': return settings(input)
   }
 }

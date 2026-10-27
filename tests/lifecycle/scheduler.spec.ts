@@ -54,11 +54,51 @@ describe('LifecycleScheduler', () => {
     expect(vi.getTimerCount()).toBeLessThanOrEqual(1)
   })
 
+  it('reschedules an existing idle intent when the delay changes', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      idleDelayMinutes: 15,
+      run: async kind => { runs.push(kind) },
+    })
+    await scheduler.start()
+    await scheduler.requestIdle('session-1')
+
+    scheduler.updateIdleDelayMinutes(5)
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1)
+    expect(runs).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(runs).toEqual(['idle:session-1'])
+    await scheduler.dispose()
+  })
+
+  it('reschedules dirty consolidation when its delay changes', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 20,
+      run: async kind => { runs.push(kind) },
+    })
+    await scheduler.start()
+    await scheduler.markDirty()
+    expect(store.getMeta().nextConsolidationAt).toBe('2026-10-26T20:00:00.000Z')
+
+    await scheduler.updateConsolidationCooldownHours(2)
+    expect(store.getMeta().nextConsolidationAt).toBe('2026-10-26T02:00:00.000Z')
+    await vi.advanceTimersByTimeAsync(2 * 3_600_000 - 1)
+    expect(runs).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    await scheduler.drain()
+    expect(runs).toEqual(['consolidate'])
+    await scheduler.dispose()
+  })
+
   it('persists consolidation schedule and retry state across restart', async () => {
     const store = await openStore()
     let failures = 1
     const runs: string[] = []
     const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 6,
       run: async kind => {
         runs.push(kind)
         if (failures-- > 0) throw new Error('model unavailable')

@@ -1,6 +1,6 @@
 import type {
-  CorrectRequest, LayerRequest, MemoryStatus, ReadRequest, RpcMethod, RpcResult, ScopeRequest,
-  SessionRequest, SessionStateView, WriteRequest,
+  CorrectRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, RpcMethod, RpcResult, ScopeRequest,
+  SessionRequest, SessionStateView, WorkspaceView, WriteRequest,
 } from '../../src/contract.js'
 import type { MemoryEntry, MemoryIndex } from '../../src/store/types.js'
 
@@ -20,6 +20,9 @@ export interface RpcRequestMap {
   readonly remember: WriteRequest
   readonly correct: CorrectRequest
   readonly status: Record<string, never>
+  readonly getSettings: Record<string, never>
+  readonly updateSettings: MemorySettings
+  readonly listWorkspaces: Record<string, never>
 }
 
 export interface RpcResponseMap {
@@ -32,6 +35,9 @@ export interface RpcResponseMap {
   readonly remember: MemoryEntry
   readonly correct: MemoryEntry
   readonly status: MemoryStatus
+  readonly getSettings: MemorySettings
+  readonly updateSettings: MemorySettings
+  readonly listWorkspaces: WorkspaceView[]
 }
 
 export interface MemoryRpc {

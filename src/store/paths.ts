@@ -5,6 +5,7 @@ export class StorePaths {
   readonly legacyState: string
   readonly audit: string
   readonly lock: string
+  readonly settings: string
   readonly detailData: string
   readonly projectionPending: string
   readonly details: string
@@ -16,6 +17,7 @@ export class StorePaths {
     this.legacyState = join(root, 'state.v1.json')
     this.audit = join(root, 'audit.v1.jsonl')
     this.lock = join(root, 'lock.json')
+    this.settings = join(root, 'settings.v1.json')
     this.detailData = join(root, 'detail-data')
     this.projectionPending = join(root, 'projection-pending.v1.json')
     this.details = join(root, 'details')

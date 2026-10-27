@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { MemoryEntry, MemoryIndexEntry, MemoryScope } from '../../src/store/types.js'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import type { MemoryEntry, MemoryIndexEntry, MemoryScope, WorkspaceId } from '../../src/store/types.js'
 import type { MemoryCopyKey, MemoryTranslator } from './locale.js'
 import type { MemoryClientStore } from './store.js'
 
 const GLOBAL_SCOPE: MemoryScope = { kind: 'global' }
+type MemoryTab = 'global' | 'workspaces' | 'settings'
 
 interface MemoryPageProps {
   readonly sessionId?: string | undefined
@@ -27,9 +28,14 @@ const CATEGORY_COPY = {
   'long-term-decision': 'longTermDecision',
 } as const satisfies Record<MemoryEntry['category'], MemoryCopyKey>
 
+const RETENTION_CATEGORIES = [
+  'environment-fact', 'project-convention', 'troubleshooting', 'preference', 'long-term-decision',
+] as const satisfies readonly MemoryEntry['category'][]
+
 export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const [tab, setTab] = useState<'global' | 'workspace'>('global')
+  const [tab, setTab] = useState<MemoryTab>('global')
+  const [workspaceSelection, setWorkspaceSelection] = useState<{ id: WorkspaceId; manual: boolean } | null>(null)
   const [detail, setDetail] = useState<DetailState | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -37,13 +43,20 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const detailRequest = useRef(0)
   const mounted = useRef(true)
   const state = sessionId === undefined ? undefined : store.getSession(sessionId)
-  const workspaceScope = useMemo<MemoryScope | undefined>(() => state?.workspaceId === undefined
+  const workspaces = store.getWorkspaces()
+  const selectedWorkspaceId = workspaceSelection !== null && workspaces?.some(item => item.id === workspaceSelection.id)
+    ? workspaceSelection.id
+    : !workspaceSelection?.manual && state?.workspaceId !== undefined && workspaces?.some(item => item.id === state.workspaceId)
+      ? state.workspaceId
+      : workspaces?.[0]?.id
+  const workspaceScope: MemoryScope | undefined = selectedWorkspaceId === undefined
     ? undefined
-    : { kind: 'workspace', workspaceId: state.workspaceId }, [state?.workspaceId])
-  const scope = tab === 'global' ? GLOBAL_SCOPE : workspaceScope
+    : { kind: 'workspace', workspaceId: selectedWorkspaceId }
+  const scope = tab === 'global' ? GLOBAL_SCOPE : tab === 'workspaces' ? workspaceScope : undefined
   const index = scope === undefined ? undefined : store.getIndex(scope)
   const indexError = scope === undefined ? undefined : store.getIndexError(scope)
   const sessionError = sessionId === undefined ? undefined : store.getSessionError(sessionId)
+  const workspacesError = store.getWorkspacesError()
 
   useEffect(() => {
     mounted.current = true
@@ -60,10 +73,16 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     if (sessionId !== undefined) void store.loadSession(sessionId)
   }, [sessionId, store])
   useEffect(() => {
-    if (workspaceScope !== undefined) void store.loadIndex(workspaceScope)
-  }, [store, workspaceScope])
+    if (tab === 'workspaces') void store.loadWorkspaces()
+    if (tab === 'settings') void store.loadSettings()
+  }, [store, tab])
+  useEffect(() => {
+    if (tab === 'workspaces' && selectedWorkspaceId !== undefined) {
+      void store.loadIndex({ kind: 'workspace', workspaceId: selectedWorkspaceId })
+    }
+  }, [store, tab, selectedWorkspaceId])
 
-  const selectTab = (next: 'global' | 'workspace'): void => {
+  const selectTab = (next: MemoryTab): void => {
     detailRequest.current += 1
     setDetail(null)
     setConfirming(false)
@@ -134,16 +153,38 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
       </header>
       <div className="snail-memory-tabs" role="tablist" aria-label={t('title')}>
         <button type="button" role="tab" id="snail-memory-global-tab" aria-selected={tab === 'global'} aria-controls="snail-memory-panel" onClick={() => selectTab('global')}>{t('globalTab')}</button>
-        <button type="button" role="tab" id="snail-memory-workspace-tab" aria-selected={tab === 'workspace'} aria-controls="snail-memory-panel" onClick={() => selectTab('workspace')}>{t('workspaceTab')}</button>
+        <button type="button" role="tab" id="snail-memory-workspaces-tab" aria-selected={tab === 'workspaces'} aria-controls="snail-memory-panel" onClick={() => selectTab('workspaces')}>{t('workspaceTab')}</button>
+        <button type="button" role="tab" id="snail-memory-settings-tab" aria-selected={tab === 'settings'} aria-controls="snail-memory-panel" onClick={() => selectTab('settings')}>{t('settingsTab')}</button>
       </div>
       {notice !== null && <p role={notice === t('deleteSuccess') ? 'status' : 'alert'}>{notice}</p>}
       {sessionError !== undefined && <p className="snail-memory-error" role="alert">{sessionError}</p>}
       <div
         role="tabpanel"
         id="snail-memory-panel"
-        aria-labelledby={tab === 'global' ? 'snail-memory-global-tab' : 'snail-memory-workspace-tab'}
+        aria-labelledby={tab === 'global' ? 'snail-memory-global-tab' : tab === 'workspaces' ? 'snail-memory-workspaces-tab' : 'snail-memory-settings-tab'}
       >
-        {scope === undefined ? <p>{t('noWorkspace')}</p> : <>
+        {tab === 'settings' ? <SettingsPanel store={store} t={t} /> : <>
+          {tab === 'workspaces' && <div className="snail-memory-workspace-picker">
+            <label htmlFor="snail-memory-workspace-select">{t('workspaceSelect')}</label>
+            <select
+              id="snail-memory-workspace-select"
+              value={selectedWorkspaceId ?? ''}
+              disabled={workspaces === undefined || workspaces.length === 0}
+              onChange={event => {
+                detailRequest.current += 1
+                setDetail(null)
+                setConfirming(false)
+                setNotice(null)
+                setWorkspaceSelection({ id: event.target.value as WorkspaceId, manual: true })
+              }}
+            >
+              {selectedWorkspaceId === undefined && <option value="" />}
+              {workspaces?.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.title}</option>)}
+            </select>
+          </div>}
+          {tab === 'workspaces' && workspacesError !== undefined && <div role="alert">{workspacesError} <button type="button" onClick={() => { void store.loadWorkspaces() }}>{t('retry')}</button></div>}
+          {tab === 'workspaces' && workspaces === undefined && workspacesError === undefined && <p role="status">{t('loading')}</p>}
+          {tab === 'workspaces' && workspaces?.length === 0 ? <p>{t('noWorkspaces')}</p> : scope !== undefined && <>
           {indexError !== undefined && <div role="alert">{indexError} <button type="button" onClick={() => { void store.loadIndex(scope) }}>{t('retry')}</button></div>}
           {index === undefined && indexError === undefined && <p role="status">{t('loading')}</p>}
           {index !== undefined && entries.length === 0 && <p>{t(tab === 'global' ? 'emptyGlobal' : 'emptyWorkspace')}</p>}
@@ -174,6 +215,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               </ul>
             </section>
           )}
+          </>}
         </>}
       </div>
       {detail !== null && (
@@ -199,5 +241,162 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
         </div>
       )}
     </section>
+  )
+}
+
+function SettingsPanel({ store, t }: { readonly store: MemoryClientStore; readonly t: MemoryTranslator }) {
+  const settings = store.getSettings()
+  const error = store.getSettingsError()
+  const [draft, setDraft] = useState({
+    reviewEveryUserTurns: '15',
+    idleDelayMinutes: '60',
+    consolidationCooldownHours: '20',
+    snapshotTokenBudget: '1200',
+    retentionDays: {
+      'environment-fact': '30',
+      'project-convention': '180',
+      troubleshooting: '180',
+      preference: '0',
+      'long-term-decision': '0',
+    },
+  })
+  const [saving, setSaving] = useState(false)
+  const [feedback, setFeedback] = useState<{ kind: 'status' | 'alert'; text: string } | null>(null)
+
+  useEffect(() => {
+    if (settings !== undefined) {
+      setDraft({
+        reviewEveryUserTurns: String(settings.reviewEveryUserTurns),
+        idleDelayMinutes: String(settings.idleDelayMinutes),
+        consolidationCooldownHours: String(settings.consolidationCooldownHours),
+        snapshotTokenBudget: String(settings.snapshotTokenBudget),
+        retentionDays: {
+          'environment-fact': String(settings.retentionDays['environment-fact']),
+          'project-convention': String(settings.retentionDays['project-convention']),
+          troubleshooting: String(settings.retentionDays.troubleshooting),
+          preference: String(settings.retentionDays.preference),
+          'long-term-decision': String(settings.retentionDays['long-term-decision']),
+        },
+      })
+    }
+  }, [settings])
+
+  const save = async (): Promise<void> => {
+    if (saving) return
+    setSaving(true)
+    setFeedback(null)
+    try {
+      await store.updateSettings({
+        reviewEveryUserTurns: Number(draft.reviewEveryUserTurns),
+        idleDelayMinutes: Number(draft.idleDelayMinutes),
+        consolidationCooldownHours: Number(draft.consolidationCooldownHours),
+        snapshotTokenBudget: Number(draft.snapshotTokenBudget),
+        retentionDays: {
+          'environment-fact': Number(draft.retentionDays['environment-fact']),
+          'project-convention': Number(draft.retentionDays['project-convention']),
+          troubleshooting: Number(draft.retentionDays.troubleshooting),
+          preference: Number(draft.retentionDays.preference),
+          'long-term-decision': Number(draft.retentionDays['long-term-decision']),
+        },
+      })
+      setFeedback({ kind: 'status', text: t('settingsSaved') })
+    } catch (reason) {
+      setFeedback({ kind: 'alert', text: reason instanceof Error ? reason.message : String(reason) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (settings === undefined) {
+    return <>
+      {error !== undefined && <div role="alert">{error} <button type="button" onClick={() => { void store.loadSettings() }}>{t('retry')}</button></div>}
+      {error === undefined && <p role="status">{t('loading')}</p>}
+    </>
+  }
+
+  return (
+    <form className="snail-memory-settings" onSubmit={event => { event.preventDefault(); void save() }}>
+      <div className="snail-memory-setting">
+        <label htmlFor="snail-memory-review-turns">{t('reviewEveryUserTurns')}</label>
+        <input
+          id="snail-memory-review-turns"
+          type="number"
+          min={1}
+          step={1}
+          required
+          disabled={saving}
+          value={draft.reviewEveryUserTurns}
+          onChange={event => setDraft(current => ({ ...current, reviewEveryUserTurns: event.target.value }))}
+        />
+        <p>{t('reviewEveryUserTurnsHelp')}</p>
+      </div>
+      <div className="snail-memory-setting">
+        <label htmlFor="snail-memory-idle-delay">{t('idleDelayMinutes')}</label>
+        <input
+          id="snail-memory-idle-delay"
+          type="number"
+          min={0}
+          step="any"
+          required
+          disabled={saving}
+          value={draft.idleDelayMinutes}
+          onChange={event => setDraft(current => ({ ...current, idleDelayMinutes: event.target.value }))}
+        />
+        <p>{t('idleDelayMinutesHelp')}</p>
+      </div>
+      <div className="snail-memory-setting">
+        <label htmlFor="snail-memory-consolidation-delay">{t('consolidationCooldownHours')}</label>
+        <input
+          id="snail-memory-consolidation-delay"
+          type="number"
+          min={0}
+          step="any"
+          required
+          disabled={saving}
+          value={draft.consolidationCooldownHours}
+          onChange={event => setDraft(current => ({ ...current, consolidationCooldownHours: event.target.value }))}
+        />
+        <p>{t('consolidationCooldownHoursHelp')}</p>
+      </div>
+      <div className="snail-memory-setting">
+        <label htmlFor="snail-memory-snapshot-token-budget">{t('snapshotTokenBudget')}</label>
+        <input
+          id="snail-memory-snapshot-token-budget"
+          type="number"
+          min={1}
+          step={1}
+          required
+          disabled={saving}
+          value={draft.snapshotTokenBudget}
+          onChange={event => setDraft(current => ({ ...current, snapshotTokenBudget: event.target.value }))}
+        />
+        <p>{t('snapshotTokenBudgetHelp')}</p>
+      </div>
+      <fieldset className="snail-memory-retention">
+        <legend>{t('retentionSettings')}</legend>
+        <p>{t('retentionDaysHelp')}</p>
+        {RETENTION_CATEGORIES.map(category => (
+          <div className="snail-memory-setting" key={category}>
+            <label htmlFor={`snail-memory-retention-${category}`}>{t(CATEGORY_COPY[category])} {t('retentionDays')}</label>
+            <input
+              id={`snail-memory-retention-${category}`}
+              type="number"
+              min={0}
+              step="any"
+              required
+              disabled={saving}
+              value={draft.retentionDays[category]}
+              onChange={event => setDraft(current => ({
+                ...current,
+                retentionDays: { ...current.retentionDays, [category]: event.target.value },
+              }))}
+            />
+          </div>
+        ))}
+      </fieldset>
+      {error !== undefined && <p role="alert">{error}</p>}
+      {feedback !== null && <p role={feedback.kind}>{feedback.text}</p>}
+      <button type="submit" disabled={saving}>{saving ? t('savingSettings') : t('saveSettings')}</button>
+    </form>
   )
 }

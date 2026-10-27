@@ -3,8 +3,11 @@ import { consolidateMemories } from './consolidate.js'
 import { distillSession } from './distill.js'
 import type { AuxiliaryModel } from './llm.js'
 import { LifecycleScheduler, lifecycleErrorMessage } from './scheduler.js'
+import { DEFAULT_MEMORY_SETTINGS } from './settings.js'
+import type { MemorySettingsStore } from './settings.js'
 import { retentionSweep } from './retention.js'
 import { scanSecrets } from '../safety/scanner.js'
+import type { MemorySettings } from '../contract.js'
 import type { MemoryStore } from '../store/store.js'
 import type { MemoryEntry, MemoryId, MemoryScope, UpsertMemoryInput } from '../store/types.js'
 
@@ -34,6 +37,7 @@ export interface MemoryLifecycleOptions {
   readonly idleDelayMinutes?: number | undefined
   readonly consolidationCooldownHours?: number | undefined
   readonly retentionSweepHours?: number | undefined
+  readonly settings?: MemorySettingsStore
   readonly transcript?: (sessionId: string) => string | Promise<string>
   readonly onChange?: (change: { kind: string; scope: MemoryScope; ids?: readonly MemoryId[] }) => void | Promise<void>
 }
@@ -48,10 +52,11 @@ export class MemoryLifecycleService {
   constructor(readonly store: MemoryStore, options: MemoryLifecycleOptions = {}) {
     this.options = options
     this.now = options.now ?? (() => new Date())
-    this.counter = new CompletedTurnCounter(options.reviewEveryUserTurns ?? 10)
+    const settings = this.getSettings()
+    this.counter = new CompletedTurnCounter(settings.reviewEveryUserTurns)
     this.scheduler = new LifecycleScheduler(store, {
-      ...(options.idleDelayMinutes === undefined ? {} : { idleDelayMinutes: options.idleDelayMinutes }),
-      ...(options.consolidationCooldownHours === undefined ? {} : { consolidationCooldownHours: options.consolidationCooldownHours }),
+      idleDelayMinutes: settings.idleDelayMinutes,
+      consolidationCooldownHours: settings.consolidationCooldownHours,
       ...(options.retentionSweepHours === undefined ? {} : { retentionSweepHours: options.retentionSweepHours }),
       now: this.now,
       run: async kind => { await this.runIntent(kind) },
@@ -60,6 +65,25 @@ export class MemoryLifecycleService {
 
   get reviewCount(): number {
     return this.reviewed
+  }
+
+  getSettings(): MemorySettings {
+    return this.options.settings?.get() ?? {
+      reviewEveryUserTurns: this.options.reviewEveryUserTurns ?? DEFAULT_MEMORY_SETTINGS.reviewEveryUserTurns,
+      idleDelayMinutes: this.options.idleDelayMinutes ?? DEFAULT_MEMORY_SETTINGS.idleDelayMinutes,
+      consolidationCooldownHours: this.options.consolidationCooldownHours ?? DEFAULT_MEMORY_SETTINGS.consolidationCooldownHours,
+      snapshotTokenBudget: DEFAULT_MEMORY_SETTINGS.snapshotTokenBudget,
+      retentionDays: { ...DEFAULT_MEMORY_SETTINGS.retentionDays },
+    }
+  }
+
+  async updateSettings(input: MemorySettings): Promise<MemorySettings> {
+    if (!this.options.settings) throw new Error('Lifecycle settings persistence is unavailable')
+    const settings = await this.options.settings.update(input)
+    this.counter.updateReviewEveryUserTurns(settings.reviewEveryUserTurns)
+    this.scheduler.updateIdleDelayMinutes(settings.idleDelayMinutes)
+    await this.scheduler.updateConsolidationCooldownHours(settings.consolidationCooldownHours)
+    return settings
   }
 
   start(): Promise<void> {
@@ -133,7 +157,7 @@ export class MemoryLifecycleService {
       await this.store.updateMeta(meta => {
         meta.dirty = true
         meta.lastError = lifecycleErrorMessage(kind)
-        meta.nextConsolidationAt = new Date(this.now().getTime() + (this.options.consolidationCooldownHours ?? 6) * 3_600_000).toISOString()
+        meta.nextConsolidationAt = new Date(this.now().getTime() + this.getSettings().consolidationCooldownHours * 3_600_000).toISOString()
       })
       throw error
     }
@@ -170,8 +194,11 @@ export class MemoryLifecycleService {
   }
 
   private sweepRetention(): Promise<MemoryId[]> {
+    const settings = this.getSettings()
     return retentionSweep(this.store, {
       now: this.now,
+      retentionDays: settings.retentionDays,
+      consolidationCooldownHours: settings.consolidationCooldownHours,
       onChange: async (scope, ids) => { await this.options.onChange?.({ kind: 'retention', scope, ids }) },
     })
   }

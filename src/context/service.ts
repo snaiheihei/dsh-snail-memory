@@ -25,6 +25,7 @@ export interface SessionEventLike {
 export interface MemoryContextOptions {
   readonly now?: () => Date
   readonly maxSnapshotTokens?: number
+  readonly getSnapshotTokenBudget?: () => number
 }
 
 export interface MemoryOperationResult {
@@ -34,12 +35,13 @@ export interface MemoryOperationResult {
 
 export class MemoryContextService {
   private readonly now: () => Date
-  private readonly maxSnapshotTokens: number
+  private readonly getSnapshotTokenBudget: () => number
   private readonly queued = new Set<string>()
 
   constructor(readonly store: MemoryStore, options: MemoryContextOptions) {
     this.now = options.now ?? (() => new Date())
-    this.maxSnapshotTokens = options.maxSnapshotTokens ?? 1_200
+    const fallback = options.maxSnapshotTokens ?? 1_200
+    this.getSnapshotTokenBudget = options.getSnapshotTokenBudget ?? (() => fallback)
   }
 
   getSessionState(sessionId: string): SessionMemoryState {
@@ -153,7 +155,7 @@ export class MemoryContextService {
       index: this.store.list(scope),
       automatic,
       now: this.now(),
-      maxTokens: this.maxSnapshotTokens,
+      maxTokens: this.getSnapshotTokenBudget(),
     })
     const desired = {
       injectionId,

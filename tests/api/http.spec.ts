@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { createRpcHandler, type RpcDispatcher, type RpcRequest, type RpcResponse } from '../../src/api/http.js'
 import type { RpcMethod, RpcPayload } from '../../src/contract.js'
 
-function setup(call: (method: RpcMethod, payload: RpcPayload) => Promise<unknown> = async () => ({ entries: [] })) {
-  const handler = createRpcHandler({ call } as unknown as RpcDispatcher, { maxBodyBytes: 128 })
+function setup(
+  call: (method: RpcMethod, payload: RpcPayload) => Promise<unknown> = async () => ({ entries: [] }),
+  maxBodyBytes = 128,
+) {
+  const handler = createRpcHandler({ call } as unknown as RpcDispatcher, { maxBodyBytes })
   return { handler, call }
 }
 
@@ -82,5 +85,51 @@ describe('Snail Memory HTTP RPC', () => {
     expect(failure.status).toBe(500)
     expect(JSON.stringify(failure.body)).not.toContain('private')
     expect(JSON.stringify(failure.body)).not.toContain('exploded')
+  })
+
+  it('rejects invalid lifecycle settings before dispatch', async () => {
+    let calls = 0
+    const { handler } = setup(async () => { calls += 1; return {} }, 512)
+
+    const retentionDays = {
+      'environment-fact': 30,
+      'project-convention': 180,
+      troubleshooting: 180,
+      preference: 0,
+      'long-term-decision': 0,
+    }
+    const response = await request(handler, {
+      url: '/snail-memory/rpc/updateSettings',
+      body: JSON.stringify({ reviewEveryUserTurns: 15, idleDelayMinutes: 60, consolidationCooldownHours: -2, snapshotTokenBudget: 1_200, retentionDays }),
+    })
+    expect(response.status).toBe(400)
+    expect(response.body).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+
+    const invalidRetention = await request(handler, {
+      url: '/snail-memory/rpc/updateSettings',
+      body: JSON.stringify({
+        reviewEveryUserTurns: 15,
+        idleDelayMinutes: 60,
+        consolidationCooldownHours: 20,
+        snapshotTokenBudget: 1_200,
+        retentionDays: { ...retentionDays, 'environment-fact': -1 },
+      }),
+    })
+    expect(invalidRetention.status).toBe(400)
+    expect(invalidRetention.body).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+
+    const invalidSnapshotBudget = await request(handler, {
+      url: '/snail-memory/rpc/updateSettings',
+      body: JSON.stringify({
+        reviewEveryUserTurns: 15,
+        idleDelayMinutes: 60,
+        consolidationCooldownHours: 20,
+        snapshotTokenBudget: 0,
+        retentionDays,
+      }),
+    })
+    expect(invalidSnapshotBudget.status).toBe(400)
+    expect(invalidSnapshotBudget.body).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(calls).toBe(0)
   })
 })

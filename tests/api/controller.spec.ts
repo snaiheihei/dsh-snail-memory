@@ -5,11 +5,19 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { MemoryContextService } from '../../src/context/service.js'
 import { MemoryController } from '../../src/api/controller.js'
+import { MemorySettingsStore } from '../../src/lifecycle/settings.js'
 import { MemoryStore } from '../../src/store/store.js'
 import { memoryId, workspaceId } from '../../src/store/types.js'
 
 const roots: string[] = []
 const stores: MemoryStore[] = []
+const DEFAULT_RETENTION_DAYS = {
+  'environment-fact': 30,
+  'project-convention': 180,
+  troubleshooting: 180,
+  preference: 0,
+  'long-term-decision': 0,
+}
 
 async function open(root: string) {
   const store = await MemoryStore.open({ root, heartbeatMs: 60_000, now: () => new Date('2026-10-26T00:00:00.000Z') })
@@ -130,18 +138,65 @@ describe('MemoryController', () => {
     expect(calls).toEqual(['remember', 'correct', 'forget'])
   })
 
+  it('lists every registered workspace and reads and updates lifecycle settings', async () => {
+    const { store, context } = await setup()
+    const settings = await MemorySettingsStore.open(store)
+    const controller = new MemoryController(store, context, {
+      resolveSession: () => undefined,
+      settings: { getSettings: () => settings.get(), updateSettings: input => settings.update(input) },
+      listWorkspaces: () => [
+        { id: workspaceId('workspace-1'), title: 'First project' },
+        { id: workspaceId('workspace-2'), title: 'No memories yet' },
+      ],
+    })
+
+    await expect(controller.call('listWorkspaces', {})).resolves.toEqual([
+      { id: 'workspace-1', title: 'First project' },
+      { id: 'workspace-2', title: 'No memories yet' },
+    ])
+    await expect(controller.call('getSettings', {})).resolves.toEqual({
+      reviewEveryUserTurns: 15,
+      idleDelayMinutes: 60,
+      consolidationCooldownHours: 20,
+      snapshotTokenBudget: 1_200,
+      retentionDays: DEFAULT_RETENTION_DAYS,
+    })
+    await expect(controller.call('updateSettings', {
+      reviewEveryUserTurns: 4,
+      idleDelayMinutes: 2,
+      consolidationCooldownHours: 8,
+      snapshotTokenBudget: 800,
+      retentionDays: { ...DEFAULT_RETENTION_DAYS, 'project-convention': 90 },
+    })).resolves.toEqual({
+      reviewEveryUserTurns: 4,
+      idleDelayMinutes: 2,
+      consolidationCooldownHours: 8,
+      snapshotTokenBudget: 800,
+      retentionDays: { ...DEFAULT_RETENTION_DAYS, 'project-convention': 90 },
+    })
+  })
+
   it('keeps reads available on a secondary read-only host but rejects writes', async () => {
     const { root, store } = await setup()
     await store.upsert({ scope: { kind: 'global' }, category: 'preference', summary: 'Readable', detail: 'Still available.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
     const secondary = await open(root)
+    const settings = await MemorySettingsStore.open(secondary)
     const controller = new MemoryController(secondary, new MemoryContextService(secondary, {}), {
       resolveSession: () => undefined,
       isWorkspace: () => true,
+      settings: { getSettings: () => settings.get(), updateSettings: input => settings.update(input) },
     })
 
     await expect(controller.call('list', { scope: { kind: 'global' } })).resolves.toMatchObject({ entries: [{ summary: 'Readable' }] })
     await expect(controller.call('remember', {
       scope: { kind: 'global' }, category: 'preference', summary: 'No write', detail: 'Rejected.',
+    })).rejects.toMatchObject({ code: 'read-only' })
+    await expect(controller.call('updateSettings', {
+      reviewEveryUserTurns: 2,
+      idleDelayMinutes: 1,
+      consolidationCooldownHours: 3,
+      snapshotTokenBudget: 600,
+      retentionDays: DEFAULT_RETENTION_DAYS,
     })).rejects.toMatchObject({ code: 'read-only' })
     expect((await controller.call('status', {})).writable).toBe(false)
   })

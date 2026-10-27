@@ -11,10 +11,15 @@ export class CompletedTurnCounter {
   private readonly counted = new Map<string, Set<string>>()
   private readonly counts = new Map<string, number>()
 
-  constructor(readonly reviewEveryUserTurns = 10) {
-    if (!Number.isSafeInteger(reviewEveryUserTurns) || reviewEveryUserTurns < 1) {
+  constructor(private reviewEveryUserTurns = 15) {
+    this.updateReviewEveryUserTurns(reviewEveryUserTurns)
+  }
+
+  updateReviewEveryUserTurns(value: number): void {
+    if (!Number.isSafeInteger(value) || value < 1) {
       throw new Error('reviewEveryUserTurns must be a positive integer')
     }
+    this.reviewEveryUserTurns = value
   }
 
   handleEvent(sessionId: string, event: LifecycleSessionEvent): boolean {

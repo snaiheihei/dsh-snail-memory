@@ -28,8 +28,8 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
 ```text
 真实用户 Session
       │
-      ├─ 有效轮计数 ── 每 10 个完成轮 ──→ Review
-      ├─ 活动停止 15 分钟 ──────────────→ Idle 蒸馏
+      ├─ 有效轮计数 ── 每 15 个完成轮 ──→ Review
+      ├─ 活动停止 60 分钟 ──────────────→ Idle 蒸馏
       └─ archive / stop ────────────────→ Stop 蒸馏
                                              │
                                   来源准入、扫描与脱敏
@@ -42,7 +42,7 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
                                              │
                                       dirty + 整合计划
                                              │
-                         至多 6 小时后：scope 内语义整合
+                         至多 20 小时后：scope 内语义整合
                          每 24 小时：保留期与显式过期清理
                                              │
                        父索引 JSON + 版本化详情 JSON + Markdown 投影
@@ -73,7 +73,7 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 | `troubleshooting` | 已验证排障经验 | 180 天 |
 | `long-term-decision` | 重要长期决策 | 不自动过期 |
 
-任何类别都可由有效 `expiresAt` 提前过期。保留期从 `lastVerifiedAt` 计算，而不是从创建时间计算，体现“最近重新验证过的事实可以延续”。
+任何类别都可由有效 `expiresAt` 提前过期。保留期从 `lastVerifiedAt` 计算，而不是从创建时间计算，体现“最近重新验证过的事实可以延续”。Settings 中的五类 `retentionDays` 可以覆盖这些默认值，单位为天；`0` 表示关闭该类别的自动过期，但不屏蔽显式 `expiresAt`。修改后的策略从下一次每日清理开始生效。
 
 ### 3.3 父记忆是唯一实体
 
@@ -92,7 +92,7 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 3. 所在 turn 最终以 `completed` 结束；aborted/error 不触发。
 4. 同一 turn 的重复或乱序事件不重复计数。
 
-计数器先关联用户消息与 turn，再处理“消息先于完成”和“完成先于消息”两种乱序。每完成 10 个有效用户轮安排一次 Review。
+计数器先关联用户消息与 turn，再处理“消息先于完成”和“完成先于消息”两种乱序。每完成 15 个有效用户轮安排一次 Review。
 
 这个设计防止插件自己的记忆注入触发新一轮蒸馏，形成“注入 → 再总结 → 再注入”的自我强化循环。
 
@@ -100,11 +100,13 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 | 入口 | 默认时机 | 转录输入预算 | 目的 |
 |---|---|---:|---|
-| Review | 每 10 个有效完成轮 | 24,000 字符 | 会话进行中的轻量提炼 |
-| Idle | 最近活动后空闲 15 分钟 | 48,000 字符 | 对话暂停后的较完整提炼 |
+| Review | 每 15 个有效完成轮 | 24,000 字符 | 会话进行中的轻量提炼 |
+| Idle | 最近活动后空闲 60 分钟 | 48,000 字符 | 对话暂停后的较完整提炼 |
 | Stop | archive、session/agent stop | 48,000 字符 | 结束边界提炼 |
 
 活动事件会刷新 idle intent 的创建时间，形成 debounce。三类入口最终复用同一个 `distillSession`，区别主要是输入预算和调度原因。
+
+管理页的 Settings 可以调整 `reviewEveryUserTurns`、`idleDelayMinutes`、`consolidationCooldownHours`、`snapshotTokenBudget` 和五类 `retentionDays`。频率默认分别为 15 轮、60 分钟和 20 小时，快照预算默认为 1,200 估算 token，保留期默认值见 3.2。所有值持久化到 `$DSH_HOME/snail_memory/settings.v1.json`，启动配置只作为文件缺失时的默认值；旧文件缺少新增字段时补用对应默认值，已显式保存的其他值保持不变。写入复用 MemoryStore 的单写者边界并采用原子替换，只读 Host 可读取但拒绝更新。保存成功后立即更新运行中的计数器和调度器：已有有效轮计数保留，已有 idle intent 按新延迟重新计算到期时间，已有 dirty/consolidation 计划也按新的小时间隔从当前时间重排；保留期策略则由下一次每日清理读取。快照预算在后续 Enable/Refresh 创建新快照时读取，不改写已经生成的 desired 或已注入 Session 的历史快照。
 
 蒸馏读取的是 `renderSessionTranscript()` 生成的投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情的能力不变。
 
@@ -122,10 +124,10 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 调度器只保留一个必要 timer，所有任务串行执行。`meta.pending` 持久化 Review、Idle、Stop、Consolidate 和 Retention 意图；重启后根据时间恢复到期任务。
 
-- 有实际写入时设置 `dirty`，通常将整合安排在 6 小时后。
+- 有实际写入时设置 `dirty`，通常将整合安排在 20 小时后。
 - 整合只在 dirty 且到期时运行。
 - 保留期清理默认每 24 小时运行。
-- Review/Stop 失败后降级为 Idle 意图，空闲类任务按 15 分钟重试。
+- Review/Stop 失败后降级为 Idle 意图，空闲类任务按 60 分钟重试。
 - 整合和保留期失败分别按各自周期重试。
 - 卸载停止新 timer，但等待已经进入队列的工作 drain。
 - 错误状态只保存稳定类别，不保存可能包含路径、提示词或秘密的异常正文。
@@ -185,7 +187,7 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 
 ```text
 若 expiresAt 有效且 expiresAt <= now：过期
-否则若类别无默认保留期：不过期
+否则若该类别的 retentionDays = 0：不过期
 否则若 lastVerifiedAt 无效：过期
 否则若 lastVerifiedAt + retentionDays <= now：过期
 ```
@@ -216,7 +218,7 @@ Token 使用启发式估算：
 estimatedTokens(text) = ceil(text.length / 4) + 8
 ```
 
-默认摘要条目预算为 1,200 估算 token。超限后停止加入后续条目，并提示还有条目可按 ID 读取。该估算不是 provider 的精确计费值；固定头、workspace 引用和尾部说明也不属于当前条目循环的硬上限。
+默认摘要条目预算为 1,200 估算 token，可通过 Settings 的 `snapshotTokenBudget` 调整并持久化。Context 在每次 Enable/Refresh 创建新快照时读取当前值；已有 desired 和已注入 Session 的历史快照保持不变。超限后停止加入后续条目，并提示还有条目可按 ID 读取。该估算不是 provider 的精确计费值；固定头、workspace 引用和尾部说明也不属于当前条目循环的硬上限。
 
 ### 8.3 两层单向 enable
 

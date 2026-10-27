@@ -2,7 +2,7 @@
 
 ## Objective
 
-实现显式记忆操作和自动记忆生命周期：每 10 个有效用户轮轻量 Review、15 分钟空闲或结束蒸馏、dirty 时最多每 6 小时全局整合、每 24 小时遗忘清理。
+实现显式记忆操作和自动记忆生命周期：每 15 个有效用户轮轻量 Review、60 分钟空闲或结束蒸馏、dirty 时最多每 20 小时 scope 内整合、每 24 小时遗忘清理。
 
 ## Tech Stack
 
@@ -22,6 +22,7 @@ npm run lint
 ```text
 src/lifecycle/counters.ts   → 有效用户轮与 completed turn 关联
 src/lifecycle/scheduler.ts  → nextRunAt、dirty、单 timer、重启恢复
+src/lifecycle/settings.ts   → UI 设置校验、原子持久化与只读边界
 src/lifecycle/llm.ts        → 一次性辅助模型调用与 JSON 解析
 src/lifecycle/distill.ts    → 会话候选蒸馏与幂等提交
 src/lifecycle/consolidate.ts→ 去重、合并、冲突修正、摘要更新
@@ -32,15 +33,17 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 
 ## Configuration Defaults
 
-- `reviewEveryUserTurns = 10`；仅真实 `source.kind === 'user'`，且所在 turn `completed` 后触发。
-- `idleDelayMinutes = 15`；新活动取消旧 idle timer，dispose 不再启动 maintenance。
-- `consolidationCooldownHours = 6`；dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
+- `reviewEveryUserTurns = 15`；仅真实 `source.kind === 'user'`，且所在 turn `completed` 后触发。
+- `idleDelayMinutes = 60`；新活动取消旧 idle timer，dispose 不再启动 maintenance。
+- `consolidationCooldownHours = 20`；dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
+- Settings 页可调整上述三项、`snapshotTokenBudget` 和五类 `retentionDays`；`settings.v1.json` 原子持久化并优先于启动默认值，旧文件缺少新增字段时补用对应默认值。保存后保留轮计数、重排已有 idle intent 和 dirty/consolidation 计划，只读 Host 拒绝更新。
+- Workspaces 页从完整 WorkspaceRegistry 选择任意已注册 workspace 并读取其索引，不以当前 Session 或已有记忆引用为限。
 - `retentionSweepHours = 24`。
 - 首次加载只恢复已有记忆、调度和注入状态，不自动遍历并蒸馏全部历史 Session；历史回填不是默认生命周期任务。
-- 保留期：环境事实 30 天、项目约定/排障经验 180 天、用户偏好/长期决策不自动过期；过期结论先从未验证时间判定。
+- 默认保留期：环境事实 30 天、项目约定/排障经验 180 天、用户偏好/长期决策 0 天（不自动过期）；五类均可配置，修改从下一次每日清理生效，显式 `expiresAt` 始终优先。过期结论先从最近验证时间判定。
 - Review 输入最多 24,000 字符，蒸馏最多 48,000 字符，整合最多 64,000 字符；详情单条最多 16,000 字符。
 - Review/蒸馏的转录投影仅保留真实用户消息、助手消息和普通工具结果；通过 `tool/call.callId` 排除 `snail_memory_read` 的 `tool/result`，不按结果正文过滤，也不修改原始 Session。
-- 注入索引上限 1,200 估算 token，核心摘要上限 800 估算 token；超出时保留最新高置信条目并报告截断。
+- 注入索引默认上限 1,200 估算 token，可在 Settings 调整 `snapshotTokenBudget`；新值仅用于后续 Enable/Refresh 新快照，不改写历史快照。核心摘要上限 800 估算 token；超出时保留最新高置信条目并报告截断。
 
 ## Code Style
 
@@ -55,9 +58,11 @@ pending?.count += 1
 ## Testing Strategy
 
 - 注入、schedule、runtime-context 不计有效轮；aborted/error 不触发 Review。
-- 第 9/10/11 轮边界、重启恢复、重复事件和乱序通知。
+- 第 14/15/16 轮边界、重启恢复、重复事件和乱序通知。
 - idle debounce、非 idle maintenance 竞态、dispose、archive/stop。
-- 6 小时冷却、dirty gate、每日清理、单 timer 和卸载 drain。
+- 20 小时默认冷却、dirty 设置热更新与计划重排、dirty gate、每日清理、单 timer 和卸载 drain。
+- 五类保留期默认值、持久化与 RPC 校验；`0` 天关闭类别过期，自定义策略在下一次清理生效，显式过期时间优先。
+- 快照预算默认值、旧配置兼容、RPC/UI 保存，以及预算变更只影响后续新快照。
 - LLM 空输出、非 JSON、部分有效候选、秘密输出、超时和重试。
 - `snail_memory_read` 结果不进入蒸馏输入，普通工具结果继续保留。
 - 验证整合不跨 scope 自动晋升，不修改 Session。

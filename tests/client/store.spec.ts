@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { MemoryClientStore } from '../../client/src/store.js'
+import type { MemorySettings } from '../../src/contract.js'
 import { deferred, FakeRpc, GLOBAL_SCOPE, memoryIndex, sessionState } from './fixtures.js'
+
+const DEFAULT_RETENTION_DAYS = {
+  'environment-fact': 30,
+  'project-convention': 180,
+  troubleshooting: 180,
+  preference: 0,
+  'long-term-decision': 0,
+}
 
 describe('MemoryClientStore', () => {
   it('restores enabled state from the Host with no local persistence', async () => {
@@ -72,6 +81,34 @@ describe('MemoryClientStore', () => {
     expect(rpc.count('getSessionState')).toBe(before + 1)
     expect(add).toHaveBeenCalledWith('focus', expect.any(Function))
     expect(remove).toHaveBeenCalledWith('focus', expect.any(Function))
+  })
+
+  it('does not let an older settings read overwrite a successful save', async () => {
+    const pending = deferred<MemorySettings>()
+    const updated = {
+      reviewEveryUserTurns: 4,
+      idleDelayMinutes: 2,
+      consolidationCooldownHours: 8,
+      snapshotTokenBudget: 800,
+      retentionDays: { ...DEFAULT_RETENTION_DAYS, troubleshooting: 90 },
+    }
+    const rpc = new FakeRpc()
+      .on('getSettings', () => pending.promise)
+      .on('updateSettings', () => updated)
+    const store = new MemoryClientStore(rpc)
+    const loading = store.loadSettings()
+
+    await store.updateSettings(updated)
+    pending.resolve({
+      reviewEveryUserTurns: 15,
+      idleDelayMinutes: 60,
+      consolidationCooldownHours: 20,
+      snapshotTokenBudget: 1_200,
+      retentionDays: DEFAULT_RETENTION_DAYS,
+    })
+    await loading
+
+    expect(store.getSettings()).toEqual(updated)
   })
 
   it('does not publish late responses after disposal', async () => {
