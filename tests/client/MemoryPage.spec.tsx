@@ -39,7 +39,7 @@ function readyRpc() {
 }
 
 describe('MemoryPage', () => {
-  it('shows three tabs, Host counts, references, latest snapshot, and estimated session tokens', async () => {
+  it('shows three tabs, Host counts, references, latest committed snapshot, and estimated session tokens', async () => {
     const rpc = readyRpc()
     const store = new MemoryClientStore(rpc)
     render(<MemoryPage sessionId="session-1" store={store} t={t} />)
@@ -49,7 +49,7 @@ describe('MemoryPage', () => {
     expect(screen.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('false')
     expect(await screen.findByText('1 active memory')).toBeTruthy()
     expect(screen.getByText('Estimated injected tokens: 20')).toBeTruthy()
-    expect(screen.getByText('Latest snapshot: revision 2')).toBeTruthy()
+    expect(screen.getByText('Latest snapshot: revision 1')).toBeTruthy()
     expect(screen.getByText('Use pnpm workspaces')).toBeTruthy()
     expect(screen.getByText('Project convention')).toBeTruthy()
     expect(screen.getByText('Sources: session-1 (events 3, 4)')).toBeTruthy()

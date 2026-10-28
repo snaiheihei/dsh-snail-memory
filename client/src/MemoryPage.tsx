@@ -170,7 +170,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     }
   }
 
-  const revisions = state === undefined ? [] : [state.layers.global.desiredRevision, state.layers.workspace.desiredRevision]
+  const revisions = state === undefined ? [] : [state.layers.global.committedRevision, state.layers.workspace.committedRevision]
     .filter((revision): revision is number => revision !== null)
   const latestRevision = revisions.length === 0 ? null : Math.max(...revisions)
   const tokens = (state?.layers.global.committedTokens ?? 0) + (state?.layers.workspace.committedTokens ?? 0)
