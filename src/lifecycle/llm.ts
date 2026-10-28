@@ -1,4 +1,4 @@
-import type { MemoryCategory, MemoryId, MemorySourceRef } from '../store/types.js'
+import type { MemoryCategory, MemoryId } from '../store/types.js'
 import { memoryId } from '../store/types.js'
 import { scanSecrets } from '../safety/scanner.js'
 
@@ -39,7 +39,6 @@ export interface ParsedCandidates {
     readonly category: MemoryCategory
     readonly summary: string
     readonly detail: string
-    readonly sourceRefs?: readonly MemorySourceRef[]
     readonly supersedes?: readonly MemoryId[]
   }[]
   readonly rejected: number
@@ -66,6 +65,15 @@ function decodeJson(text: string): unknown {
       throw wrapped
     }
   }
+}
+
+function candidateStrings(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.flatMap(candidateStrings)
+  if (value && typeof value === 'object') {
+    return Object.entries(value).flatMap(([key, item]) => [key, ...candidateStrings(item)])
+  }
+  return []
 }
 
 export function parseCandidateResponse(text: string, maxDetailChars = 16_000): ParsedCandidates {
@@ -98,19 +106,17 @@ export function parseCandidateResponse(text: string, maxDetailChars = 16_000): P
       rejected += 1
       continue
     }
-    if (scanSecrets(`${candidate.summary}\n${candidate.detail}`).findings.length > 0) {
+    const scanText = [JSON.stringify(candidate), ...candidateStrings(candidate)].join('\n')
+    if (scanSecrets(scanText).findings.length > 0) {
       rejected += 1
       continue
     }
-    const sourceRefs = candidate.sourceRefs?.filter(ref => ref && typeof ref === 'object'
-      && typeof (ref as { sessionId?: unknown }).sessionId === 'string') as MemorySourceRef[] | undefined
     const supersedes = candidate.supersedes?.filter(id => typeof id === 'string' && id.length > 0) as MemoryId[] | undefined
     candidates.push({
       category: candidate.category as MemoryCategory,
       summary: candidate.summary,
       detail: candidate.detail,
       ...(candidate.id === undefined ? {} : { id: memoryId(candidate.id) }),
-      ...(sourceRefs === undefined ? {} : { sourceRefs }),
       ...(supersedes === undefined ? {} : { supersedes }),
     })
   }

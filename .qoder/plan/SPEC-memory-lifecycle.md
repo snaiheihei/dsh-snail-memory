@@ -1,5 +1,7 @@
 # Spec: memory-lifecycle
 
+> 2026-10-28 数据与调度修订：整合来源由程序按输入快照汇集，模型 `id/supersedes` 仅可引用本次输入条目，完整候选回扫；生命周期 pending intent 增加持久 ID，旧任务不得清理或改写新代 intent。
+>
 > 2026-10-28 独立 Global 修订：Review/Idle/Stop 和 retention 仍只处理 workspace；Global 由人工 Promote 建立，使用独立 `globalDirty`、默认 7 天 consolidation 和独立持久 intent，不继承 workspace 的 20 小时计时。
 >
 > 2026-10-27 长历史覆盖修订：Review/Idle/Stop 共享按 Session 持久化的事件游标，顺序处理后续批次，不再重复截取转录开头。
@@ -61,14 +63,16 @@ const pending = this.pendingTurns.get(sessionId)
 pending?.count += 1
 ```
 
-任务以 kind 为 key 的持久 intent 串行执行，通过稳定记忆 ID、内容比较和 sourceRefs 合并提供至少一次处理下的幂等去重；不存在独立的 intent idempotency key 字段。post-commit 事件只负责观察，不承担写事务。LLM 失败保留可重试状态，不伪造成功。
+任务以 kind 为 pending key、以持久 `{ id, kind, createdAt }` 为运行代际串行执行。每次新 intent、失败重试和 consolidation 设置重排都生成新 ID；旧任务仅能在当前 pending ID 仍等于运行快照时清理或改写它。Review/Stop 失败转为 Idle 时必须保留目标 key 上已有的新 Idle。该 ID 是调度代际，不是候选业务幂等键；至少一次处理仍通过稳定记忆 ID、内容比较和 sourceRefs 合并去重。post-commit 事件只负责观察，不承担写事务。LLM 失败保留可重试状态，不伪造成功。
 
 ## Concurrency Boundaries
 
 - 整合候选关联模型调用前的条目快照，写前重新读取并核对条目 revision；模型等待期间已删除或已纠正的条目不得接受旧候选。
-- 整合和 Scheduler 的 consolidation 成功收尾会核对调用前的 next consolidation 时间；运行期间新 Promote/Delete 建立的 dirty 与重排计划不得被旧任务清除。
-- 上述防护尚未形成完整条件写事务：`store.read()` 与 `store.upsert()` 之间仍存在小的删除/纠正交错窗口，`supersedes` 的 `read()` → `remove()` 也没有核对旧条目 revision，可能删除模型等待期间新纠正的版本。后续应在 Store 同一写事务内校验 expected revision，或提供等价原子条件写/条件删除，不能宣称该竞态已完全关闭。
-- Scheduler 当前以 kind 为 pending key，旧任务成功或失败收尾尚未比较 intent 代际；运行期间同 key 新 intent 仍可能被旧任务清理或改写。后续需要持久 intent ID/代际，并仅在当前记录仍等于本次运行快照时收尾。
+- 模型返回的 `sourceRefs` 不进入解析后的候选。候选 `id` 和 `supersedes` 只能引用经 64,000 字符预算截断后、实际发送给模型的输入快照中的真实条目；未知、被预算排除、跨快照或指向目标自身的 supersedes 不生效。最终来源由程序从现有目标与有效 supersedes 条目的真实 `sourceRefs` 汇集并按 JSON 精确值去重。
+- 完整候选在结构校验后回扫：同时扫描原始 JSON 与递归收集的所有字符串键/值，覆盖 summary/detail、id/supersedes、sourceRefs 和未消费额外字段；任何 finding 都拒绝该候选，模型提供的元数据不能绕开安全扫描。
+- 整合成功以及 Scheduler 的 consolidation 成功/失败收尾会核对调用前的 next consolidation 时间；运行期间新 Promote/Delete 或设置热更新建立的 dirty 与重排计划不得被旧任务清除或覆盖。
+- 上述防护尚未形成完整条件写事务：`store.read()` 与 `store.upsert()` 之间仍存在小的删除/纠正交错窗口，`supersedes` 的 `read()` → `remove()` 也没有核对旧条目 revision，可能删除模型等待期间新纠正的版本。expected-revision 原子条件写/条件删除记入后续 Plan，不能宣称该竞态已完全关闭。
+- Scheduler 的 pending key 仍是 kind，但每个值有独立持久 ID。成功清理、失败重试、deferred 快照提交和设置热重排均按 ID 保护新代记录；旧任务运行期间到达的同 key 新 intent 必须保留。旧持久记录缺少 ID 时，读取阶段按 key 和 createdAt 补稳定兼容 ID。
 
 ## Testing Strategy
 
@@ -86,6 +90,8 @@ pending?.count += 1
 - 验证整合不跨 scope 自动晋升，不修改 Session。
 - Global 默认 7 天冷却、独立 dirty/intent/成功/失败/重试和热更新，以及与 workspace 20 小时计划的隔离。
 - 慢模型期间删除或纠正后旧候选不写回；旧整合及 Scheduler 任务不清除运行期间新 Promote/Delete 建立的 Global dirty 和重排计划。
+- 模型伪造 sourceRefs 不落盘，sourceRefs/supersedes 元数据中的秘密导致完整候选拒绝；合并结果只汇集实际模型输入内目标与被取代条目的真实来源，快照外及被 64,000 字符预算截断的 id/supersedes 不写回、不删除条目、不贡献来源。
+- 旧 Review 成功时保留同 key 新 Review，旧 Review 失败时不覆盖新 Idle；重试、deferred 提交、热重排和旧 pending 无 ID 数据均保持代际与兼容语义。
 
 ## Boundaries
 

@@ -3,6 +3,7 @@ import { SafetyError } from './types.js'
 
 const DEFAULT_MAX_CHARS = 1_000_000
 const MAX_PRIVATE_KEY_BLOCK_CHARS = DEFAULT_MAX_CHARS
+const MAX_ASSIGNMENT_VALUE_CHARS = 512
 
 interface PatternRule {
   readonly kind: SecretKind
@@ -14,7 +15,7 @@ const API_KEY_PATTERN = /(?<![A-Za-z0-9_-])(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,256}
 const PRIVATE_KEY_PATTERN = /(?:^|\r?\n)-----BEGIN ([A-Z0-9 ]{0,32}PRIVATE KEY)-----/g
 const URL_PASSWORD_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:([^\s/@]{1,1024})@/gi
 const AUTHORIZATION_PATTERN = /\bAuthorization[ \t]*:[ \t]*([^\r\n]{1,4096})/gi
-const ASSIGNMENT_PATTERN = /(?:^|[\s,;{])(?<key>api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)\s*(?:=|:)\s*(?:(?<quote>['"`])(?<quoted>[^'"`\r\n]{4,512})\k<quote>|(?<bare>[A-Za-z0-9_./+~!#$%^&*?=-]{8,512})(?![A-Za-z0-9_./+~!#$%^&*?=-])(?!\s*\())/gi
+const ASSIGNMENT_PATTERN = /(?:^|[\s,;{])(?<key>api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)\s*(?:=|:)\s*(?:(?<quote>['"`])(?<quoted>[^'"`\r\n]{4,})\k<quote>|(?<bare>[A-Za-z0-9_./+~!#$%^&*?=-]{8,})(?![A-Za-z0-9_./+~!#$%^&*?=-])(?!\s*\())/gi
 const RULES: readonly PatternRule[] = [
   { kind: 'jwt', pattern: JWT_PATTERN },
   { kind: 'api-key', pattern: API_KEY_PATTERN },
@@ -33,14 +34,13 @@ function privateKeyFindings(input: string): RedactionFinding[] {
     const contentStart = matchIndex + match[0].length
     const endMarker = `-----END ${keyType}-----`
     const endMarkerIndex = input.indexOf(endMarker, contentStart)
-    if (endMarkerIndex >= 0 && endMarkerIndex - contentStart <= MAX_PRIVATE_KEY_BLOCK_CHARS) {
-      findings.push({
-        kind: 'private-key',
-        start: matchIndex + (match[0].startsWith('\r\n') ? 2 : match[0].startsWith('\n') ? 1 : 0),
-        end: endMarkerIndex + endMarker.length,
-        action: 'reject',
-      })
-    }
+    const complete = endMarkerIndex >= 0 && endMarkerIndex - contentStart <= MAX_PRIVATE_KEY_BLOCK_CHARS
+    findings.push({
+      kind: 'private-key',
+      start: matchIndex + (match[0].startsWith('\r\n') ? 2 : match[0].startsWith('\n') ? 1 : 0),
+      end: complete ? endMarkerIndex + endMarker.length : input.length,
+      action: 'reject',
+    })
   }
   return findings
 }
@@ -75,7 +75,7 @@ function assignmentFindings(input: string): RedactionFinding[] {
       kind: groups?.key?.toLowerCase().includes('api') ? 'api-key' : 'token',
       start,
       end: start + value.length,
-      action: 'redact',
+      action: value.length > MAX_ASSIGNMENT_VALUE_CHARS ? 'reject' : 'redact',
     })
   }
   return findings
@@ -103,9 +103,15 @@ export function scanSecrets(input: string, options: ScanOptions = {}): ScanResul
 
   const findings: RedactionFinding[] = []
   for (const candidate of candidates) {
-    if (!findings.some((finding) => overlaps(finding, candidate))) {
-      findings.push(candidate)
+    if (candidate.action === 'reject') {
+      let previous = findings[findings.length - 1]
+      while (previous && previous.action !== 'reject' && overlaps(previous, candidate)) {
+        findings.pop()
+        previous = findings[findings.length - 1]
+      }
     }
+    const previous = findings[findings.length - 1]
+    if (!previous || !overlaps(previous, candidate)) findings.push(candidate)
   }
   return { findings }
 }

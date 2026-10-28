@@ -17,7 +17,7 @@
 7. Ungrouped 会话不创建隐式 workspace 写入归属，也不会因召回选择自动获得 owner；可显式使用 Global，或选择任意已注册 workspace 做召回，不自动蒸馏到全局层。
 8. UI token 数使用 dsh token-meter 的启发式估算并明确标注，不宣称等于 provider 计费值。
 9. 删除和忘记只修改 snail memory；不删除、替换或压缩原始 Session。已经注入的记忆快照仍是该会话历史，不做追溯撤回。
-10. 同一存储根同时只允许一个写 Host；其他进程只读并显式显示状态，不静默并发写。
+10. 当前定案为单一 dsh Client、单 Host。既有写锁、只读与接管逻辑保留为意外重复启动防护，不静默并发写，但不把多 Host 共同访问同一存储根列为当前受支持场景。
 
 ## 能力地图
 
@@ -45,7 +45,7 @@
 - `state.v2.json` 只保存父索引、Session 与运行状态；`detail-data/<id>/<revision>.json` 保存当前父索引指向的不可变详情。启动、list、enable 和 refresh 不加载详情正文，store.read 按 id/revision 异步读取目标记录。
 - v1 仅在可写启动时迁移：详情记录与详情投影完整就绪后发布 v2，成功后才删除 v1；只读 Host 对未迁移 v1 使用兼容读取。新详情和投影先于父状态切换，旧详情世代在发布后清理。
 - 投影事务通过只含父 id 的持久 pending intent 恢复：提交前失败回到当前父状态对应投影，提交后失败保留 committed 结果并在重启或后续事务重试；writer 本地读取与写入串行。只读 Host 的详情 `read()` 前刷新父状态；当前同步 `list()` 只读内存，管理列表的新鲜度是独立后续改进项。
-- workspace 与 Global 各自在 scope 内整合去重、合并和修正冲突；跨 scope 晋升只能由用户显式 Promote，副本后续不自动同步。
+- workspace 与 Global 各自在 scope 内整合去重、合并和修正冲突；跨 scope 晋升只能由用户显式 Promote，副本后续不自动同步。模型返回的 sourceRefs 不直接采用，id/supersedes 只能引用经输入预算截断后实际发送给模型的快照条目；合并后来源由程序从目标和有效被取代条目汇集，防止丢失记忆出处或操作被截断条目。
 
 ### 生命周期
 
@@ -53,7 +53,7 @@
 - 默认每第 15 个有效用户轮对应的 turn 以 `completed` 结束后安排轻量 Review；aborted/error turn 不触发。有效轮计数当前仅在进程内，重启后重新累计，但已持久 intent 和游标会恢复。
 - dsh 没有统一 session-end：使用真正 idle 的 debounce、`runMaintenance()`、dispose 和 workspace stop 信号组合触发；不得把 `session/event` 的 fire-and-forget 通知当作异步事务提交。
 - 会话蒸馏只写 Session owner workspace。workspace dirty 默认 20 小时后逐项目整合，Global dirty 默认 7 天后独立整合；每日 retention 只清理 workspace。
-- 调度状态持久化以 kind 为 key 的 `pending = { kind, createdAt }`、workspace/Global dirty、各自 next/last consolidation、next/last retention 和最近稳定错误类别；每 Session 的蒸馏游标单独持久化。全插件只保留一个必要 timer，重启后恢复到期任务，不持久化独立 running intent 或统一 nextRunAt 字段。
+- 调度状态持久化以 kind 为 key 的 `pending = { id, kind, createdAt }`、workspace/Global dirty、各自 next/last consolidation、next/last retention 和最近稳定错误类别；每 Session 的蒸馏游标单独持久化。新 intent、重试和设置重排生成新 ID，旧任务只在当前 ID 匹配时收尾，不能删除或覆盖运行期间到达的新代 intent。全插件只保留一个必要 timer，重启后恢复到期任务，不持久化独立 running intent 或统一 nextRunAt 字段。
 - Review、Idle、Stop 共享每 Session 的 `lastEventSeq + offset` 蒸馏游标。完整 turn 优先按边界入批，超大 turn/消息按确定性片内位置续批；Review 一次一批，Idle/Stop 一次最多两批，首次加载不自动 backfill。
 - 候选安全处理、写入/去重完成后才推进游标；模型/解析/存储失败不推进。记忆已写而游标未写时允许同批重试，以稳定 ID、内容去重、sourceRefs 合并和整合降低重复；重试输出变化时仍可能产生语义重复。
 - 显式记住/纠正立即进入串行写链；忘记立即从父索引删除目标条目，并在同一写队列清理其权威详情和 Markdown 投影，不写 tombstone，不触碰 Session 或蒸馏游标。删除单条/全部记忆不会重置进度、重新蒸馏旧范围或恢复条目。
@@ -70,8 +70,8 @@
 ### 安全与读取
 
 - 自动蒸馏默认只读取获准的 Session 内容，不遍历私密文件；显式记住也不能绕过扫描。
-- 扫描发生在候选记忆首次持久化之前，也发生在任何内容发送给辅助蒸馏模型之前；模型输出落盘前再次扫描。
-- 高置信密钥和私钥材料不进入记忆、错误日志或审计正文；无法安全判定的候选跳过并报告脱敏原因。
+- 扫描发生在候选记忆首次持久化之前，也发生在任何内容发送给辅助蒸馏模型之前；模型输出落盘前再次扫描。候选回扫覆盖完整原始 JSON 及所有字符串键/值，包含未消费的元数据和额外字段，不允许把秘密藏进 sourceRefs 等字段绕过检查。
+- 高置信密钥和私钥材料不进入记忆、错误日志或审计正文；无法安全判定的候选跳过并报告脱敏原因。超过 512 字符的赋值凭据、未闭合或超大 PEM 保守拒绝；finding 排序后的去重仅比较最后一个已接受项，避免随 finding 数平方增长，且重叠 reject 优先于 redact，不会被去重吞掉。
 - 旧记忆注入时附加：“这是若干天前的时点观察，不是实时状态；涉及代码行为、文件位置或系统状态时必须重新验证。”天数按来源最近验证时间计算。
 - 记忆内容标记为不可信参考数据，不授予其覆盖当前用户指令、系统指令或安全策略的能力。
 - 大于 8,000 字符的父详情确定性拆为每片至多 4,000 字符；主索引只保留父摘要。模型默认读取分片清单，指定 `chunk_id` 才读取单片，所有分片拼接必须无损还原正文。分片只控制单次模型可见量，不修改 Session 持久化或注入 revision 语义。

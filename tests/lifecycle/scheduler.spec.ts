@@ -56,6 +56,63 @@ describe('LifecycleScheduler', () => {
     expect(vi.getTimerCount()).toBeLessThanOrEqual(1)
   })
 
+  it('keeps a newer same-kind intent when an older run succeeds', async () => {
+    const store = await openStore()
+    let releaseRun!: () => void
+    let markRunStarted!: () => void
+    const runStarted = new Promise<void>(resolve => { markRunStarted = resolve })
+    const runGate = new Promise<void>(resolve => { releaseRun = resolve })
+    const scheduler = new LifecycleScheduler(store, {
+      run: async () => {
+        markRunStarted()
+        await runGate
+      },
+    })
+    await scheduler.start()
+    await scheduler.requestReview('session-1')
+    const advancing = vi.advanceTimersByTimeAsync(0)
+    await runStarted
+
+    await scheduler.requestReview('session-1')
+    const stopping = scheduler.stop()
+    releaseRun()
+    await advancing
+    await stopping
+
+    expect(store.getMeta().pending['review:session-1']).toBeDefined()
+    await scheduler.dispose()
+  })
+
+  it('does not let a failed review overwrite a newer idle intent', async () => {
+    const store = await openStore()
+    let releaseRun!: () => void
+    let markRunStarted!: () => void
+    const runStarted = new Promise<void>(resolve => { markRunStarted = resolve })
+    const runGate = new Promise<void>(resolve => { releaseRun = resolve })
+    const scheduler = new LifecycleScheduler(store, {
+      run: async () => {
+        markRunStarted()
+        await runGate
+        throw new Error('model unavailable')
+      },
+    })
+    await scheduler.start()
+    await scheduler.requestReview('session-1')
+    const advancing = vi.advanceTimersByTimeAsync(0)
+    await runStarted
+
+    await scheduler.requestIdle('session-1')
+    const idle = store.getMeta().pending['idle:session-1']
+    const stopping = scheduler.stop()
+    releaseRun()
+    await advancing
+    await stopping
+
+    expect(store.getMeta().pending['review:session-1']).toBeUndefined()
+    expect(store.getMeta().pending['idle:session-1']).toEqual(idle)
+    await scheduler.dispose()
+  })
+
   it('pauses during a read-only transition and resumes persisted work after promotion', async () => {
     const store = await openStore()
     const runs: string[] = []

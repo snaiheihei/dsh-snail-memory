@@ -260,6 +260,74 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     })
   })
 
+  it('derives consolidated source refs and ignores supersedes outside the input snapshot', async () => {
+    const scope: MemoryScope = { kind: 'global' }
+    let releaseModel!: () => void
+    let markModelStarted!: () => void
+    const modelStarted = new Promise<void>(resolve => { markModelStarted = resolve })
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve })
+    const { service, store, responses } = await setup([], undefined, async () => {
+      markModelStarted()
+      await modelGate
+    })
+    const target = await store.upsert({
+      scope, category: 'project-convention', summary: 'Old convention', detail: 'Old target detail.',
+      sourceRefs: [{ sessionId: 'session-target', eventSeqs: [3] }], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    const merged = await store.upsert({
+      scope, category: 'project-convention', summary: 'Merged convention', detail: 'Old merged detail.',
+      sourceRefs: [{ sessionId: 'session-merged', eventSeqs: [8, 9] }], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    const running = service.runIntent('global-consolidate')
+    await modelStarted
+    const late = await store.upsert({
+      scope, category: 'preference', summary: 'Created during consolidation', detail: 'Must survive the old candidate.',
+      sourceRefs: [{ sessionId: 'session-late' }], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    responses.push(JSON.stringify({ candidates: [{
+      id: target.id, category: 'project-convention', summary: 'Consolidated convention', detail: 'New consolidated detail.',
+      sourceRefs: [{ sessionId: 'model-forged-session' }], supersedes: [merged.id, late.id],
+    }] }))
+    releaseModel()
+
+    await expect(running).resolves.toEqual({ written: 1 })
+    expect((await store.read(scope, target.id))?.sourceRefs).toEqual([
+      { sessionId: 'session-target', eventSeqs: [3] },
+      { sessionId: 'session-merged', eventSeqs: [8, 9] },
+    ])
+    expect(await store.read(scope, merged.id)).toBeNull()
+    expect((await store.read(scope, late.id))?.summary).toBe('Created during consolidation')
+  })
+
+  it('limits candidate ids, supersedes, and source refs to the truncated model input', async () => {
+    const scope: MemoryScope = { kind: 'global' }
+    const { service, store, responses } = await setup()
+    const excluded = await store.upsert({
+      scope, category: 'project-convention', summary: 'Excluded convention', detail: 'x'.repeat(64_000),
+      sourceRefs: [{ sessionId: 'session-excluded' }], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    vi.setSystemTime(new Date('2026-10-26T00:01:00.000Z'))
+    const target = await store.upsert({
+      scope, category: 'project-convention', summary: 'Included convention', detail: 'Included detail.',
+      sourceRefs: [{ sessionId: 'session-target' }], lastVerifiedAt: '2026-10-26T00:01:00.000Z',
+    })
+    responses.push(JSON.stringify({ candidates: [
+      {
+        id: target.id, category: 'project-convention', summary: 'Consolidated convention',
+        detail: 'New consolidated detail.', supersedes: [excluded.id],
+      },
+      {
+        id: excluded.id, category: 'project-convention', summary: 'Overwritten excluded convention',
+        detail: 'Must not be written.',
+      },
+    ] }))
+
+    await expect(service.runIntent('global-consolidate')).resolves.toEqual({ written: 1 })
+    expect((await store.read(scope, target.id))?.sourceRefs).toEqual([{ sessionId: 'session-target' }])
+    expect((await store.read(scope, excluded.id))?.summary).toBe('Excluded convention')
+  })
+
   it('does not recreate a Global memory deleted while consolidation is waiting for the model', async () => {
     const globalScope: MemoryScope = { kind: 'global' }
     let releaseModel!: () => void

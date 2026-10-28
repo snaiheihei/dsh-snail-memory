@@ -39,7 +39,7 @@ export function sanitizeBeforeUse(input: string): SanitizedText {
 }
 ```
 
-扫描器返回结构化 finding，不返回被检测秘密原文。正则必须限制长度，避免对长会话产生灾难性回溯。
+扫描器返回结构化 finding，不返回被检测秘密原文。扫描先执行总字符预算，正则必须避免灾难性回溯；局部脱敏长度上限不得成为绕扫手段。赋值凭据超过 512 字符、PEM 未闭合或超过块预算时生成 `reject` finding 并保守失败，拒绝异常使用实际 finding 类型且不保留秘密正文。候选 finding 按起点和长度排序后，只与最后一个已接受 finding 比较，去重过程为 O(F)；重叠的 `reject` 会取代已接受的 `redact`，拒绝语义不得被去重吞掉。
 
 ## Testing Strategy
 
@@ -47,6 +47,9 @@ export function sanitizeBeforeUse(input: string): SanitizedText {
 - 覆盖普通密码学词汇、项目路径和正常代码，避免明显误报。
 - 验证原文不出现在 finding、异常、审计和拒绝原因中。
 - 验证多行、重复秘密、Unicode、长输入与扫描预算。
+- 验证超过 512 字符的赋值凭据和未闭合 PEM 都保守拒绝，异常不包含秘密正文，reject 类型不被硬编码改写。
+- 验证完整候选的原始 JSON、嵌套元数据、字符串键和额外字段均参与模型输出回扫，同时保留正文原始文本的检测能力。
+- 验证排序后的 finding 去重只检查最后一个已接受项，重叠私钥/凭据不会重复脱敏；Authorization 等较宽 redact 与超长凭据 reject 重叠时仍必须保守拒绝。
 - 验证任何 LLM 输入和持久化入口都调用同一安全策略。
 
 ## Boundaries
@@ -57,7 +60,7 @@ export function sanitizeBeforeUse(input: string): SanitizedText {
 
 ## Success Criteria
 
-- 高置信秘密以 `[REDACTED:<kind>]` 替代，私钥块等不可安全局部处理的内容被拒绝。
+- 高置信秘密以 `[REDACTED:<kind>]` 替代；私钥块、超限赋值凭据等不可安全局部处理的内容被拒绝，不因长度或未闭合边界而漏扫。
 - 自动蒸馏仅接受 Session 来源，显式记住也不能绕过扫描。
 - 注入文本包含不可信参考数据和按天数计算的时效提醒。
 - 测试不将样例秘密写入真实 snail_memory。

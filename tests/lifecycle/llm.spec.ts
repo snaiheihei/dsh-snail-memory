@@ -80,6 +80,24 @@ describe('auxiliary LLM calls and candidate parsing', () => {
     })).rejects.toThrow(/timeout/i)
   })
 
+  it('ignores model-provided source references and scans the complete candidate', () => {
+    const parsed = parseCandidateResponse(JSON.stringify({ candidates: [
+      {
+        category: 'project-convention', summary: 'Use pnpm', detail: 'Use pnpm for all packages.',
+        sourceRefs: [{ sessionId: 'model-forged-session', eventSeqs: [1, 2] }],
+      },
+      {
+        category: 'project-convention', summary: 'Normal summary', detail: 'Normal detail.',
+        sourceRefs: [{ sessionId: 'token = abcdefghijkl' }],
+      },
+    ] }))
+
+    expect(parsed.candidates).toEqual([
+      { category: 'project-convention', summary: 'Use pnpm', detail: 'Use pnpm for all packages.' },
+    ])
+    expect(parsed.rejected).toBe(1)
+  })
+
   it('enforces output budgets and validates candidate detail length', () => {
     expect(() => parseCandidateResponse('not json', 100)).toThrow(/json/i)
     const parsed = parseCandidateResponse(JSON.stringify({ candidates: [

@@ -69,15 +69,20 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
     const changed: MemoryEntry[] = []
     for (const candidate of parsed.candidates) {
       const snapshot = candidate.id
-        ? entries.find(entry => entry.id === candidate.id)
-        : entries.find(entry => entry.category === candidate.category
+        ? included.find(entry => entry.id === candidate.id)
+        : included.find(entry => entry.category === candidate.category
           && entry.summary.toLowerCase() === candidate.summary.toLowerCase())
-      // An id absent from this scope may belong to another scope; never move it.
+      // An id absent from the model input may belong to another scope or a truncated entry.
       if (candidate.id && !snapshot) continue
       const existing = snapshot ? await store.read(scope, snapshot.id) : undefined
       if (snapshot && (!existing || existing.revision !== snapshot.revision)) continue
       const id = existing?.id ?? generatedId(scope, candidate.category, candidate.summary.trim())
-      const refs = memoryRefs([...(existing?.sourceRefs ?? []), ...(candidate.sourceRefs ?? [])])
+      const supersedes = [...new Set(candidate.supersedes ?? [])].filter(oldId => oldId !== id
+        && included.some(entry => entry.id === oldId))
+      const refs = memoryRefs([
+        ...(existing?.sourceRefs ?? []),
+        ...supersedes.flatMap(oldId => included.find(entry => entry.id === oldId)?.sourceRefs ?? []),
+      ])
       if (existing && existing.summary === candidate.summary.trim() && existing.detail === candidate.detail.trim()
         && JSON.stringify(existing.sourceRefs) === JSON.stringify(refs)) {
         continue
@@ -88,14 +93,14 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
         category: candidate.category,
         summary: candidate.summary.trim(),
         detail: candidate.detail.trim(),
-        sourceRefs: refs.length ? refs : existing?.sourceRefs ?? [],
+        sourceRefs: refs,
         lastVerifiedAt: now.toISOString(),
-        ...(candidate.supersedes === undefined ? {} : { supersedes: candidate.supersedes }),
+        ...(candidate.supersedes === undefined ? {} : { supersedes }),
       })
       changed.push(saved)
       written += 1
-      for (const oldId of candidate.supersedes ?? []) {
-        if (oldId !== saved.id && await store.read(scope, oldId)) await store.remove(scope, oldId)
+      for (const oldId of supersedes) {
+        if (await store.read(scope, oldId)) await store.remove(scope, oldId)
       }
     }
     if (changed.length) await options.onChange?.(scope, changed)

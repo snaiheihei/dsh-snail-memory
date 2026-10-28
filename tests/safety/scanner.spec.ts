@@ -139,6 +139,39 @@ describe('secret scanner', () => {
     expect(scanSecrets(input).findings[0]).toMatchObject({ kind: 'private-key', action: 'reject' })
   })
 
+  it('rejects overlong credential assignments instead of silently missing them', () => {
+    const secret = 'a'.repeat(513)
+    const input = `refresh_token = ${secret}`
+
+    expect(scanSecrets(input).findings).toEqual([
+      expect.objectContaining({ kind: 'token', action: 'reject' }),
+    ])
+    expect(() => sanitizeBeforeUse(input)).toThrow(SafetyError)
+    expect(JSON.stringify(scanSecrets(input))).not.toContain(secret)
+  })
+
+  it('rejects unterminated private-key blocks without exposing their contents', () => {
+    const secretBody = 'unterminated-secret-key-body'
+    const input = `-----BEGIN PRIVATE KEY-----\n${secretBody}`
+
+    expect(scanSecrets(input).findings).toEqual([
+      expect.objectContaining({ kind: 'private-key', action: 'reject' }),
+    ])
+    expect(() => sanitizeBeforeUse(input)).toThrow(SafetyError)
+    expect(JSON.stringify(scanSecrets(input))).not.toContain(secretBody)
+  })
+
+  it('does not let an overlapping redaction hide a rejected credential', () => {
+    const secret = 'a'.repeat(513)
+    const input = `Authorization: refresh_token=${secret}`
+
+    expect(scanSecrets(input).findings).toEqual([
+      expect.objectContaining({ kind: 'token', action: 'reject' }),
+    ])
+    expect(() => sanitizeBeforeUse(input)).toThrow(SafetyError)
+    expect(JSON.stringify(scanSecrets(input))).not.toContain(secret)
+  })
+
   it('handles long benign input within the default budget', () => {
     const result = scanSecrets('数据'.repeat(100_000))
     expect(result.findings).toEqual([])

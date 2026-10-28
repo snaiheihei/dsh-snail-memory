@@ -1,5 +1,7 @@
 # Spec: memory-store
 
+> 2026-10-28 运行范围修订：当前定案为单一 dsh Client、单 Host。既有写锁、只读与接管逻辑保留为意外重复启动防护，但不据此宣称支持多 Host 共同写入；完整跨 Host 事务 fencing 暂缓。
+>
 > 2026-10-28 独立 Global 修订：Global 从动态只读聚合改为独立权威 scope。workspace 详情可 Promote 深复制到 Global，副本以新 ID、独立详情和 `promotedFrom` 维护；重复 Promote 幂等，来源与副本更新/删除互不影响。以 `SPEC-global-aggregate-memory.md` 的当前独立 Global 契约为准。
 >
 > 2026-10-28 修订：修复快速重启留下的新鲜旧锁使新 Host 永久只读的问题。只读 Host 必须持续重试，在锁释放或 stale 后完成状态恢复并自动晋升；活跃 writer 仍受单写者保护。
@@ -60,6 +62,7 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - Session `workspaceId` 是自动蒸馏与显式写入的 owner；可选 `selectedWorkspaceId` 是独立的 workspace 召回选择，只用于快照、refresh 和详情读取。enable 其他已注册项目不得改写 owner，Ungrouped 也不会因召回选择获得隐式写入归属。
 - workspace desired/committed 可保存 `workspaceId`，用于按召回项目分别进行 revision 对账和公共状态展示；global 及旧版 workspace 记录可缺省该字段，按兼容路径处理。不同 workspace 的 revision 不得跨项目取最大值。
 - 游标更新复用 `updateSessionState` 和主串行 transaction，因此同样经过 writer queue、`lock.assertOwner()`、原子状态发布和故障恢复。游标-only 更新不推进 scope revision、不设置 dirty、不创建 desired injection 或快照。
+- 生命周期 `meta.pending` 以 kind 为 key，值为 `LifecycleIntent = { id, kind, createdAt }`。ID 标识调度代际，供 Scheduler 条件收尾；旧 v2 状态缺少 ID 时，读取阶段补 `legacy:<key>:<createdAt>` 稳定兼容 ID，不要求用户手工迁移或删除状态。
 - MemoryEntry 删除与 Session 蒸馏游标是正交事实。单条/全部删除不得修改、重置或推进游标，不得使旧范围重新蒸馏，也不得恢复已删条目；只有宿主真实 Session 生命周期清理才可另议游标垃圾回收。
 - 普通更新不改 Session；格式迁移创建新 successor。显式隐私删除允许清理本插件旧数据世代，但不允许删除 Session 世代。
 
@@ -110,6 +113,7 @@ async write(entry: MemoryEntry): Promise<void> {
 - 验证 v1 迁移内容无损、迁移失败保留 v1、只读 Host 可兼容读取未迁移 v1，详情记录或投影写失败不推进父 revision，纠正后旧版本及删除后的权威详情被清理。
 - 注入父状态、详情记录、分片和索引写失败，验证提交前恢复旧投影、提交后返回 committed 结果、pending 在重开后恢复，以及本地 read/remove 串行和第二 Host 纠正/删除可见性。
 - 验证保留期清理只消费父索引，不读取 `detail-data`。
+- 验证旧 pending 记录恢复后获得稳定 intent ID，后续 Scheduler 可按 ID 区分新旧代际。
 
 ## Boundaries
 

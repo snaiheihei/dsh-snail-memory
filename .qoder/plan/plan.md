@@ -90,3 +90,11 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 - 写事务使用只含父 id 的 `projection-pending.v1.json` 协调多文件发布：提交前失败恢复旧投影，提交后派生失败返回 committed 结果并留待重启或后续事务恢复；小详情和 INDEX/MEMORY 采用原子文本写入。
 - writer 本地 read 与写入串行；第二 Host 在 read 前刷新父状态并在记录 ENOENT 时重试。补充父状态失败、索引失败重开恢复、只读 v1、跨 Host 纠正/删除和 read/remove 竞争回归测试。
 - 已实际通过 28 个测试文件、124 项测试，以及 typecheck、lint、build 和 `git diff --check`。本轮未向真实 Host 安装新构建，也未重新执行真实 UI/模型 E2E；懒加载及恢复结论来自自动化与故障注入验证。
+
+## 后续修改 Plan（2026-10-28）
+
+当前运行定案为单一 dsh Client、单 Host。以下事项明确后置，不属于本轮来源汇集、模型输出边界、安全扫描和 Scheduler intent 代际修复：
+
+1. **Store expected-revision 条件写**：未来在 consolidate、distill、retention 和 correct 需要的写路径中，把 revision 校验与 upsert/remove 纳入同一原子事务，进一步关闭慢模型期间的旧快照写回窗口。
+2. **Store 未显式修改元数据的保留**：未来让更新路径保留调用方未显式修改的附加元数据，并覆盖 consolidate、distill、retention 和 correct 的回归测试；本轮不改变现有元数据更新语义。
+3. **完整跨 Host writer 代际 fencing**：仅在将来决定支持多个 Host 共同访问同一存储根时实施，包括进行中事务的代际验权与原子条件发布；当前单 Host 方案不把它作为验收前提。

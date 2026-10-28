@@ -83,6 +83,10 @@ function normalizeState<T extends StoreState | LegacyStoreState>(state: T): T {
       globalDirty: state.meta.globalDirty ?? false,
       nextGlobalConsolidationAt: state.meta.nextGlobalConsolidationAt ?? null,
       lastGlobalConsolidationAt: state.meta.lastGlobalConsolidationAt ?? null,
+      pending: Object.fromEntries(Object.entries(state.meta.pending).map(([key, intent]) => [key, {
+        ...intent,
+        id: intent.id ?? `legacy:${key}:${intent.createdAt}`,
+      }])),
     },
   }
 }

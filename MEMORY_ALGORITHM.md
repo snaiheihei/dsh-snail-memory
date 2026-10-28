@@ -19,7 +19,7 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
 3. 摘要优先、详情按需，大详情再按片读取，控制单次模型可见量。
 4. 所有模型可见内容都有普通 Session 消息或工具结果作为证据。
 5. 删除只影响目标 scope 的记忆，不删除、替换或压缩对话历史，也不影响来源或副本。
-6. 重启可恢复，多 Host 不静默并发写，秘密不进入长期记忆和审计正文。
+6. 重启可恢复，当前仅支持单一 dsh Client、单 Host；写锁用于意外重复启动防护，秘密不进入长期记忆和审计正文。
 
 当前明确不采用向量数据库、embedding 召回或查询相关性排序，也不自动批量迁移、晋升或同步 workspace 记忆。Global 不是完整知识图谱或实时事实系统；旧记忆只是带来源时间的参考数据。
 
@@ -142,6 +142,8 @@ updatedAt：游标提交时间
 
 调度器只保留一个必要 timer，所有任务串行执行。`meta.pending` 持久化 Review、Idle、Stop、workspace `consolidate`、独立 `global-consolidate` 和 Retention 意图；重启后根据各自时间恢复到期任务。
 
+pending key 仍是 kind，但每个值包含 `{ id, kind, createdAt }`。新 intent、失败重试和整合设置热重排都会生成新 ID；旧任务只有在当前 pending ID 仍等于本次运行快照时才能清理或改写记录。这样即使任务串行，旧 Review 运行期间新对话写入的同 key Review 或目标 Idle 也不会被旧任务收尾误删。Review/Stop 失败转 Idle 时保留已有新 Idle；deferred 快照只按 ID 清理已提交项。旧状态没有 ID 时按 key 和 createdAt 补稳定兼容 ID。
+
 - workspace 有实际写入时设置 `dirty`，默认将整合安排在 20 小时后；Global 新建、修改或删除只设置 `globalDirty`，默认独立安排在 7 天后。
 - 两类整合都只在各自 dirty 且到期时运行，成功清理、失败重试和设置热更新不互相清除或重排对方状态。
 - 保留期清理默认每 24 小时运行，只枚举 workspace scope。
@@ -160,7 +162,7 @@ updatedAt：游标提交时间
   → 扫描并脱敏；拒绝不可接受内容
   → 要求辅助模型只返回 JSON candidates
   → 校验类别、summary、detail 和 16,000 字符详情上限
-  → 回扫模型输出，剔除不安全候选
+  → 回扫完整候选 JSON 与所有字符串键/值，剔除不安全候选
   → 在当前 workspace 内匹配旧记忆
   → upsert/去重、合并 sourceRefs 和 lastVerifiedAt
   → 有写入则标记 dirty
@@ -199,9 +201,9 @@ Promote 只接受已注册 workspace 的来源条目。Store 在同一串行写�
 
 1. 按 `updatedAt` 从新到旧排列完整条目。
 2. 逐条装入最多 64,000 字符的模型输入；达到预算后停止加入更老条目。
-3. 要求模型在当前 scope 内合并重复、修正冲突、淘汰旧结论，返回 candidates 和可选 `supersedes`。
-4. 确定性代码只接受当前 scope 已存在的候选 ID；未知 ID 不用于跨 scope 移动。
-5. 合并并按 JSON 精确值去重 `sourceRefs`，写回新 revision，再删除同 scope 中被取代的旧 ID；Global 写回保留 `promotedFrom`。
+3. 要求模型在当前 scope 内合并重复、修正冲突、淘汰旧结论，返回 candidates 和可选 `id/supersedes`。
+4. 确定性代码只接受经 64,000 字符预算截断后、实际发送给模型的输入快照中真实存在的候选 ID；`supersedes` 也去重并限制在同一输入快照，未知、被预算排除、快照外或指向目标自身的 ID 不生效，更不能用于跨 scope 移动或删除。
+5. 不采用模型返回的 `sourceRefs`。程序从现有目标与有效被取代条目的真实来源汇集并按 JSON 精确值去重，再写回新 revision、删除同 scope 中被取代的旧 ID；Global 写回保留 `promotedFrom`。
 6. 全部成功后只清理目标类的 dirty、pending 和下次整合时间，并记录对应的最近整合时间。
 
 因此，“语义上是否重复、哪个结论更新”是模型判断；“是否允许写、能否跨 scope、如何持久化和删除”是程序判断。这个分工让语义能力可演进，同时把数据安全边界留在确定性代码中。
@@ -327,10 +329,10 @@ Web 管理页仍读取父完整详情供人查看；分片限制只针对模型�
 ### 10.1 三次把关
 
 1. **输入前**：自动来源必须是获准 Session；发送给辅助模型前扫描和脱敏。
-2. **输出后**：模型候选进行结构校验和秘密回扫，不安全候选被剔除。
+2. **输出后**：模型候选进行结构校验和秘密回扫，不安全候选被剔除。回扫同时覆盖原始候选 JSON 与递归收集的所有字符串键/值，包括 summary/detail、id/supersedes、sourceRefs 和额外字段；既防止元数据绕扫，也避免 JSON 引号改变正则上下文后漏掉正文秘密。
 3. **展示与注入时**：记忆被标记为不可信、带时效的参考数据，不获得指令权限。
 
-显式记住和纠正也不能绕过扫描。普通高置信凭据可替换为 `[REDACTED:<kind>]`；完整私钥块等不可接受内容直接拒绝。扫描预算默认 1,000,000 字符，超预算不会静默截断后假装完成扫描。
+显式记住和纠正也不能绕过扫描。普通高置信凭据可替换为 `[REDACTED:<kind>]`；完整私钥块等不可接受内容直接拒绝。超过 512 字符的赋值凭据不再因局部长度上限而消失，而是生成实际类型的 reject finding；未闭合或超过块预算的 PEM 同样保守拒绝。扫描预算默认 1,000,000 字符，超预算不会静默截断后假装完成扫描。finding 先按起点和长度排序，去重时只与最后一个已接受项比较，使去重过程为 O(F)，不随 finding 数平方增长；若较宽的 redact 与 reject 重叠，后者会取代前者，拒绝语义不会因去重丢失。
 
 ### 10.2 日志与审计最小化
 
@@ -362,7 +364,7 @@ Host 启动只读取 `state.v2.json` 到 `MemoryStore`。`list()`、`enable()` �
 - 每次事务先持久化只含受影响父 id 的 `projection-pending.v1.json`。提交前失败按当前父状态尝试恢复旧投影，恢复本身失败时保留 intent；崩溃或提交后派生失败同样保留 intent，由下次可写启动或后续事务按父状态重建详情和索引、清理未引用记录，再删除 intent。
 - 父状态发布后立即更新内存，再写 INDEX/MEMORY 投影和清理旧详情世代。派生失败不能把内存回退到旧权威状态，也不能把已提交操作误报为未提交。
 - 权威 JSON、小详情和 INDEX/MEMORY 均原子替换；读取时校验记录 id、revision 和 `detailChars`，损坏或缺失不错误回退到其他正文。
-- 同一 root 使用独占锁、heartbeat、stale 判定和 writer fencing；第二 Host 初始明确只读，但持续监控锁释放或 stale，完成权威状态重载与投影恢复后可自动晋升为唯一 writer。stale 回收先把观察到的旧锁移入唯一 quarantine 并逐字核对，误移新锁时用硬链接恢复；锁缺失时可恢复崩溃遗留的 quarantine，主锁已存在时则清理过期 quarantine，避免反复移走当前锁形成获锁活锁。writer 通过本代 FileHandle 续心跳，旧 writer 不能沿路径覆盖继任锁。活跃 writer 心跳有效时不允许接管。只读 Host 在详情读取前刷新 v2 父状态，记录 ENOENT 时再刷新重试，以观察另一 Host 已提交的纠正和删除。
+- 作为意外重复启动防护，同一 root 使用独占锁、heartbeat、stale 判定和 writer fencing；第二 Host 初始明确只读，但持续监控锁释放或 stale，完成权威状态重载与投影恢复后可自动晋升为唯一 writer。当前产品定案仍是单 Host，这些防护不等于支持多 Host 共同使用。stale 回收先把观察到的旧锁移入唯一 quarantine 并逐字核对，误移新锁时用硬链接恢复；锁缺失时可恢复崩溃遗留的 quarantine，主锁已存在时则清理过期 quarantine，避免反复移走当前锁形成获锁活锁。writer 通过本代 FileHandle 续心跳，旧 writer 不能沿路径覆盖继任锁。活跃 writer 心跳有效时不允许接管。只读 Host 在详情读取前刷新 v2 父状态，记录 ENOENT 时再刷新重试，以观察另一 Host 已提交的纠正和删除。
 - writable 变化会通知 Host 运行时：失去所有权时暂停 lifecycle，晋升后恢复当前 agents 状态并重启 lifecycle；首次和后续准备或启动失败都在当前可写期间自动重试。锁晋升与 heartbeat 解耦，初始化、迁移和投影恢复在各共享写入阶段续租并验权。Store 事务把可识别的所有权/fencing 异常统一归为只读错误，scheduler 因此能暂存验权竞争期间收到的新 intent；普通 I/O 和编程错误不按只读吞没。scheduler 的 stop 只暂停且保留持久 intent，暂停或只读期间收到的新 intent 也会暂存并在可写启动后落盘；start 提交固定快照，只清理本次已持久化且未更新的条目，不能用 clear 误删提交期间新增的 intent。dispose 才永久终止。卸载会停止锁监控、重试并清理 timer。
 - 当前实现限制：上述锁协议尚未闭合为完整事务 fencing。Store transaction 只在开始时执行 `assertWritable()`，进行中的事务在锁所有权变化后仍可能发布旧 draft，覆盖继任 writer 已提交的父状态。因而现阶段不能把“下一次写入会被拒绝”扩大解释为“旧 writer 的所有进行中写入都绝对不能提交”；后续需要 writer 代际、原子条件发布和对应交错测试。
 - Windows 原子 rename 的短暂 EPERM 使用有限退避，不无上限重试。
@@ -517,6 +519,17 @@ Global 新增独立 `globalDirty`、`nextGlobalConsolidationAt`、`lastGlobalCon
 
 该增量全量自动化结果为 31 个测试文件、205 条测试，并通过 typecheck、lint、build 和 `git diff --check`。整合的 `store.read()` → `store.upsert()` 尚未形成同事务 expected-revision 条件写，极小交错窗口仍作为已知边界保留，不能宣称复核发现已全部关闭。本轮未重新执行真实 Host/UI/模型验收，也未安装到真实 Host、重启用户进程或创建 git commit。
 
+### 阶段十三：单 Host 下的数据完整性、安全失败关闭与调度代际
+
+在明确只支持单一 dsh Client、单 Host 后，本轮收敛到四个不依赖多 Host 也会发生的问题：
+
+1. **来源汇集与模型权限收敛**：整合不再采用模型填写的 sourceRefs，而是由程序从实际发送给模型的输入快照中的目标与有效 supersedes 条目汇集真实来源。候选 id/supersedes 也只能引用这份经 64,000 字符预算截断后的快照，避免合并后来源丢失、伪造引用或写回、删除、引用被截断条目。
+2. **完整候选回扫**：模型输出的原始 JSON 与所有字符串键/值一起扫描，sourceRefs、嵌套元数据和额外字段都不能成为秘密绕扫通道；同时保留对正文原始文本的扫描，避免 JSON 转义改变检测上下文。
+3. **扫描器保守失败**：超过 512 字符的赋值凭据和未闭合/超大 PEM 不再静默漏扫，而是按实际类型拒绝；finding 排序后的去重改为只检查最后一个已接受项，去重过程降为 O(F)，重叠 reject 会取代 redact，不能被较宽 finding 吞掉。
+4. **Scheduler intent 代际**：pending 值增加持久 ID，成功清理、失败重试、deferred 提交和设置热重排均保护新代记录。旧 Review 成功不会删除运行期间新写入的同 key Review，失败也不会覆盖新 Idle；旧持久记录自动补稳定兼容 ID。
+
+本轮没有实现 Store expected-revision 条件写，也没有改变未显式修改元数据的现有保留语义；两者与完整跨 Host writer fencing 均列入后续 Plan。新增回归覆盖来源完整性、快照外及预算截断的 id/supersedes、元数据秘密、超限凭据、未闭合 PEM、重叠 reject 优先级、同 key 新旧 intent 交错及旧状态兼容。全量自动化结果为 31 个测试文件、217 条测试，并通过 typecheck、lint、build 和 `git diff --check`；未重新执行真实 Host/UI/模型验收，也未安装到真实 Host 或重启用户进程。
+
 ## 14. 当前边界与后续演进方向
 
 以下是当前限制或候选方向，不是已经实现的能力：
@@ -530,7 +543,9 @@ Global 新增独立 `globalDirty`、`nextGlobalConsolidationAt`、`lastGlobalCon
 7. **时间元数据健壮性**：无效 `lastVerifiedAt` 的展示和验证策略可进一步统一，避免快照出现无效年龄。
 8. **模型调用韧性**：辅助模型已支持 AbortSignal 和可选 timeout，但蒸馏与整合调用方尚未设置统一默认超时，可补充明确超时和重试预算。
 9. **安全入口收敛**：可把安全策略进一步下沉为所有生产写入都必须经过的用例层，减少未来新增入口绕过扫描的可能。
-10. **完整写事务 fencing 与整合原子条件写**：当前 Store 只在事务开始验权，进行中的事务在锁所有权变化后仍可能发布旧 draft，需要以 writer 代际和条件发布关闭。整合已用调用前快照、写前 revision 复核和调度时间代际判断缩小竞态，但 `store.read()` → `store.upsert()` 以及 `supersedes` 的 `read()` → `remove()` 仍不是同一 expected-revision 条件事务。后续应在 Store 同一写事务内提供原子条件写和条件删除；在此之前不能承诺多 Host 或慢模型期间的所有并发写回都已隔离。
+10. **完整跨 Host 写事务 fencing（暂缓）**：当前只支持单一 dsh Client、单 Host，既有锁与接管逻辑是意外重复启动防护。Store 仍只在事务开始验权；若未来支持多个 Host 共同访问同一存储根，必须增加 writer 代际、进行中事务验权和原子条件发布，不能把现有锁协议当作完整跨 Host 隔离。
+11. **整合 expected-revision 原子条件写（后续 Plan）**：整合已用调用前快照、写前 revision 复核和调度时间代际判断缩小竞态，但 `store.read()` → `store.upsert()` 以及 `supersedes` 的 `read()` → `remove()` 仍不是同一条件事务。后续应在 Store 同一写事务内提供原子条件写和条件删除，并接入 consolidate、distill、retention 和 correct 需要的写路径。
+12. **Store 未显式修改元数据的保留（后续 Plan）**：未来更新路径应保留调用方未显式修改的附加元数据，并用 consolidate、distill、retention 和 correct 回归测试固定语义；本轮没有改变现有行为。
 
 这些演进都应继续保持：父记忆单一事实源、scope 隔离、append-only Session、model-visible means logged、秘密最小化和可恢复写入。
 

@@ -131,6 +131,12 @@ export interface SessionMemoryState {
   readonly layers: Record<MemoryLayer, LayerMemoryState>
 }
 
+export interface LifecycleIntent {
+  readonly id: string
+  readonly kind: string
+  readonly createdAt: string
+}
+
 export interface MemoryMeta {
   dirty: boolean
   nextConsolidationAt: string | null
@@ -141,7 +147,7 @@ export interface MemoryMeta {
   nextRetentionAt: string | null
   lastRetentionAt: string | null
   lastError: string | null
-  pending: Record<string, { readonly kind: string; readonly createdAt: string }>
+  pending: Record<string, LifecycleIntent>
 }
 
 export interface StoreState {

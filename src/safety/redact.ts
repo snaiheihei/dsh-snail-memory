@@ -4,8 +4,9 @@ import { SafetyError } from './types.js'
 
 export function redactDetectedCredentials(input: string, options: ScanOptions = {}): SanitizedText {
   const { findings } = scanSecrets(input, options)
-  if (findings.some((finding) => finding.action === 'reject')) {
-    throw new SafetyError('Unsafe content was rejected without retaining secret material', 'unsafe-content', findings, 'private-key')
+  const rejected = findings.find(finding => finding.action === 'reject')
+  if (rejected) {
+    throw new SafetyError('Unsafe content was rejected without retaining secret material', 'unsafe-content', findings, rejected.kind)
   }
 
   let cursor = 0

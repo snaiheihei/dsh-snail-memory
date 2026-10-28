@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import { MemoryStoreReadonlyError, type MemoryStore } from '../store/store.js'
+import type { LifecycleIntent } from '../store/types.js'
 
 export interface LifecycleSchedulerOptions {
   readonly idleDelayMinutes?: number
@@ -26,7 +28,7 @@ export class LifecycleScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined
   private disposed = false
   private started = false
-  private readonly deferredIntents = new Map<string, string>()
+  private readonly deferredIntents = new Map<string, LifecycleIntent>()
   private readonly now: () => Date
 
   constructor(
@@ -50,7 +52,7 @@ export class LifecycleScheduler {
       await this.store.updateMeta(meta => {
         if (meta.dirty) meta.nextConsolidationAt = nextRunAt
         if (meta.pending.consolidate) {
-          meta.pending.consolidate = { ...meta.pending.consolidate, createdAt: nextRunAt }
+          meta.pending.consolidate = { ...meta.pending.consolidate, id: randomUUID(), createdAt: nextRunAt }
         }
       })
     }
@@ -66,7 +68,7 @@ export class LifecycleScheduler {
       await this.store.updateMeta(meta => {
         if (meta.globalDirty) meta.nextGlobalConsolidationAt = nextRunAt
         if (meta.pending['global-consolidate']) {
-          meta.pending['global-consolidate'] = { ...meta.pending['global-consolidate'], createdAt: nextRunAt }
+          meta.pending['global-consolidate'] = { ...meta.pending['global-consolidate'], id: randomUUID(), createdAt: nextRunAt }
         }
       })
     }
@@ -89,12 +91,12 @@ export class LifecycleScheduler {
         if (meta.globalDirty && meta.nextGlobalConsolidationAt === null) {
           meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.globalConsolidationDelayMs).toISOString()
         }
-        for (const [kind, createdAt] of deferred) {
-          meta.pending[kind] = { kind, createdAt }
+        for (const [kind, intent] of deferred) {
+          meta.pending[kind] = intent
         }
       })
-      for (const [kind, createdAt] of deferred) {
-        if (this.deferredIntents.get(kind) === createdAt) this.deferredIntents.delete(kind)
+      for (const [kind, intent] of deferred) {
+        if (this.deferredIntents.get(kind)?.id === intent.id) this.deferredIntents.delete(kind)
       }
     } catch (error) {
       this.started = false
@@ -149,16 +151,17 @@ export class LifecycleScheduler {
 
   private async putIntent(kind: string, createdAt: string): Promise<void> {
     if (this.disposed) return
+    const intent: LifecycleIntent = { id: randomUUID(), kind, createdAt }
     if (!this.store.writable) {
-      this.deferredIntents.set(kind, createdAt)
+      this.deferredIntents.set(kind, intent)
       return
     }
     try {
-      await this.store.updateMeta(meta => { meta.pending[kind] = { kind, createdAt } })
-      this.deferredIntents.delete(kind)
+      await this.store.updateMeta(meta => { meta.pending[kind] = intent })
+      if (this.deferredIntents.get(kind)?.id === intent.id) this.deferredIntents.delete(kind)
     } catch (error) {
       if (!(error instanceof MemoryStoreReadonlyError)) throw error
-      this.deferredIntents.set(kind, createdAt)
+      this.deferredIntents.set(kind, intent)
       return
     }
     this.schedule()
@@ -184,24 +187,28 @@ export class LifecycleScheduler {
       if (!due && !consolidationDue && !globalConsolidationDue && !retentionDue) break
 
       const key = due?.[0] ?? (consolidationDue ? 'consolidate' : globalConsolidationDue ? 'global-consolidate' : 'retention')
-      const value = due?.[1] ?? { kind: key, createdAt: this.now().toISOString() }
-      const consolidationSchedule = value.kind === 'global-consolidate'
+      const value = due?.[1] ?? { id: randomUUID(), kind: key, createdAt: this.now().toISOString() }
+      const scheduleSnapshot = value.kind === 'global-consolidate'
         ? meta.nextGlobalConsolidationAt
-        : meta.nextConsolidationAt
+        : value.kind === 'consolidate'
+          ? meta.nextConsolidationAt
+          : value.kind === 'retention'
+            ? meta.nextRetentionAt
+            : null
       if (!due) await this.store.updateMeta(current => { current.pending[key] = value })
       try {
         await this.options.run(value.kind)
         await this.store.updateMeta(current => {
-          delete current.pending[key]
+          if (current.pending[key]?.id === value.id) delete current.pending[key]
           current.lastError = null
-          if (value.kind === 'consolidate' && current.nextConsolidationAt === consolidationSchedule) {
+          if (value.kind === 'consolidate' && current.nextConsolidationAt === scheduleSnapshot) {
             current.dirty = false
             current.nextConsolidationAt = null
-          } else if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === consolidationSchedule) {
+          } else if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === scheduleSnapshot) {
             current.globalDirty = false
             current.nextGlobalConsolidationAt = null
             current.lastGlobalConsolidationAt = this.now().toISOString()
-          } else if (value.kind === 'retention') {
+          } else if (value.kind === 'retention' && current.nextRetentionAt === scheduleSnapshot) {
             current.lastRetentionAt = this.now().toISOString()
             current.nextRetentionAt = new Date(this.now().getTime() + this.retentionDelayMs).toISOString()
           }
@@ -220,15 +227,24 @@ export class LifecycleScheduler {
           : this.now().toISOString()
         await this.store.updateMeta(current => {
           current.lastError = lifecycleErrorMessage(value.kind)
-          current.pending[key] = {
-            kind: value.kind.startsWith('review:') || value.kind.startsWith('stop:')
+          if (current.pending[key]?.id === value.id) {
+            delete current.pending[key]
+            const retryKind = value.kind.startsWith('review:') || value.kind.startsWith('stop:')
               ? `idle:${value.kind.slice(value.kind.indexOf(':') + 1)}`
-              : value.kind,
-            createdAt: retryCreatedAt,
+              : value.kind
+            if (retryKind === key || current.pending[retryKind] === undefined) {
+              current.pending[retryKind] = { id: randomUUID(), kind: retryKind, createdAt: retryCreatedAt }
+            }
           }
-          if (value.kind === 'consolidate') current.nextConsolidationAt = retryAt
-          if (value.kind === 'global-consolidate') current.nextGlobalConsolidationAt = retryAt
-          if (value.kind === 'retention') current.nextRetentionAt = retryAt
+          if (value.kind === 'consolidate' && current.nextConsolidationAt === scheduleSnapshot) {
+            current.nextConsolidationAt = retryAt
+          }
+          if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === scheduleSnapshot) {
+            current.nextGlobalConsolidationAt = retryAt
+          }
+          if (value.kind === 'retention' && current.nextRetentionAt === scheduleSnapshot) {
+            current.nextRetentionAt = retryAt
+          }
         })
       }
     }
