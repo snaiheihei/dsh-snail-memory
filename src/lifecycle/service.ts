@@ -9,7 +9,7 @@ import { retentionSweep } from './retention.js'
 import { scanSecrets } from '../safety/scanner.js'
 import type { MemorySettings } from '../contract.js'
 import type { MemoryStore } from '../store/store.js'
-import type { MemoryEntry, MemoryId, MemoryScope, PromoteMemoryResult, UpsertMemoryInput } from '../store/types.js'
+import type { MemoryEntry, MemoryId, MemoryScope, PromoteMemoryResult, UpsertMemoryInput, WorkspaceId } from '../store/types.js'
 import type { TranscriptEvent } from '../runtime.js'
 
 export interface MaintenanceHost {
@@ -41,6 +41,7 @@ export interface MemoryLifecycleOptions {
   readonly retentionSweepHours?: number | undefined
   readonly settings?: MemorySettingsStore
   readonly transcriptEvents?: (sessionId: string) => readonly TranscriptEvent[] | Promise<readonly TranscriptEvent[]>
+  readonly resolveWorkspaceId?: (sessionId: string) => WorkspaceId | undefined
   readonly onChange?: (change: { kind: string; scope: MemoryScope; ids?: readonly MemoryId[] }) => void | Promise<void>
 }
 
@@ -144,7 +145,15 @@ export class MemoryLifecycleService {
       if (operation !== 'review' && operation !== 'idle' && operation !== 'stop') {
         throw new Error(`Unknown memory lifecycle intent: ${kind}`)
       }
-      const state = this.store.getSessionState(sessionId)
+      let state = this.store.getSessionState(sessionId)
+      if (state.workspaceId === undefined) {
+        const workspaceId = this.options.resolveWorkspaceId?.(sessionId)
+        if (workspaceId !== undefined) {
+          state = await this.store.updateSessionState(sessionId, current => {
+            current.workspaceId ??= workspaceId
+          })
+        }
+      }
       const events = await this.options.transcriptEvents?.(sessionId) ?? []
       let written = 0
       const maxBatches = operation === 'review' ? 1 : 2

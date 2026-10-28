@@ -71,6 +71,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     settings,
     model: new DshAuxiliaryModel(ctx.llm),
     route: () => selectModelRoute(ctx.agents.list(), configuredRoute),
+    resolveWorkspaceId: sessionId => resolveSessionWorkspace(ctx.workspaceRegistry.list(), sessionId),
     ...(config.reviewEveryUserTurns === undefined ? {} : { reviewEveryUserTurns: config.reviewEveryUserTurns }),
     ...(config.idleDelayMinutes === undefined ? {} : { idleDelayMinutes: config.idleDelayMinutes }),
     ...(config.consolidationCooldownHours === undefined ? {} : { consolidationCooldownHours: config.consolidationCooldownHours }),

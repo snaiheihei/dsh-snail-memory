@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryLifecycleService } from '../../src/lifecycle/service.js'
 import { MemoryStore } from '../../src/store/store.js'
 import type { TranscriptEvent } from '../../src/runtime.js'
-import type { MemoryScope } from '../../src/store/types.js'
+import type { MemoryScope, WorkspaceId } from '../../src/store/types.js'
 import { workspaceId } from '../../src/store/types.js'
 
 const roots: string[] = []
@@ -16,6 +16,7 @@ async function setup(
   responses: Array<string | Error> = [],
   maintenance?: { runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> },
   beforeResponse?: () => Promise<void>,
+  resolveWorkspaceId?: (sessionId: string) => WorkspaceId | undefined,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'snail-memory-lifecycle-'))
   roots.push(root)
@@ -48,6 +49,7 @@ async function setup(
     provider: 'test',
     modelName: 'aux',
     transcriptEvents: async () => events,
+    ...(resolveWorkspaceId === undefined ? {} : { resolveWorkspaceId }),
     onChange: change => { changes.push(change) },
   })
   services.push(service)
@@ -158,6 +160,48 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getMeta().globalDirty).toBe(false)
     expect(store.getMeta().nextGlobalConsolidationAt).toBeNull()
     expect(changes.map(change => change.kind)).toEqual(['distill'])
+  })
+
+  it('resolves and persists a workspace attached after agent creation before distilling', async () => {
+    const owner = workspaceId('workspace-late')
+    const { service, store } = await setup([
+      '{"candidates":[{"category":"project-convention","summary":"Run focused tests","detail":"Run focused tests first."}]}',
+    ], undefined, undefined, () => owner)
+
+    await expect(service.runIntent('idle:session-1')).resolves.toEqual({ written: 1 })
+
+    expect(store.getSessionState('session-1').workspaceId).toBe(owner)
+    expect(store.list({ kind: 'workspace', workspaceId: owner }).entries).toHaveLength(1)
+  })
+
+  it('does not replace an existing workspace owner during late resolution', async () => {
+    const original = workspaceId('workspace-original')
+    const successor = workspaceId('workspace-successor')
+    let resolutions = 0
+    const { service, store } = await setup([
+      '{"candidates":[{"category":"project-convention","summary":"Run focused tests","detail":"Run focused tests first."}]}',
+    ], undefined, undefined, () => { resolutions += 1; return successor })
+    await store.updateSessionState('session-1', state => { state.workspaceId = original })
+
+    await expect(service.runIntent('review:session-1')).resolves.toEqual({ written: 1 })
+
+    expect(resolutions).toBe(0)
+    expect(store.getSessionState('session-1').workspaceId).toBe(original)
+    expect(store.list({ kind: 'workspace', workspaceId: original }).entries).toHaveLength(1)
+    expect(store.list({ kind: 'workspace', workspaceId: successor }).entries).toEqual([])
+  })
+
+  it('keeps an unowned session a clean no-op when late resolution finds no workspace', async () => {
+    const { service, store, responses } = await setup([
+      '{"candidates":[{"category":"project-convention","summary":"Run focused tests","detail":"Run focused tests first."}]}',
+    ], undefined, undefined, () => undefined)
+
+    await expect(service.runIntent('idle:session-1')).resolves.toEqual({ written: 0 })
+
+    expect(responses).toHaveLength(1)
+    expect(store.getSessionState('session-1').workspaceId).toBeUndefined()
+    expect(store.getSessionState('session-1').distillationCursor).toBeUndefined()
+    expect(store.getMeta().lastError).toBeNull()
   })
 
   it('rejects secret candidates and preserves dirty retry state on model failure', async () => {
