@@ -343,7 +343,8 @@ Host 启动只读取 `state.v2.json` 到 `MemoryStore`。`list()`、`enable()` �
 - 每次事务先持久化只含受影响父 id 的 `projection-pending.v1.json`。提交前失败按当前父状态尝试恢复旧投影，恢复本身失败时保留 intent；崩溃或提交后派生失败同样保留 intent，由下次可写启动或后续事务按父状态重建详情和索引、清理未引用记录，再删除 intent。
 - 父状态发布后立即更新内存，再写 INDEX/MEMORY 投影和清理旧详情世代。派生失败不能把内存回退到旧权威状态，也不能把已提交操作误报为未提交。
 - 权威 JSON、小详情和 INDEX/MEMORY 均原子替换；读取时校验记录 id、revision 和 `detailChars`，损坏或缺失不错误回退到其他正文。
-- 同一 root 使用独占锁、heartbeat、stale 判定和 writer fencing；第二 Host 明确只读。只读 Host 在详情读取前刷新 v2 父状态，记录 ENOENT 时再刷新重试，以观察另一 Host 已提交的纠正和删除。
+- 同一 root 使用独占锁、heartbeat、stale 判定和 writer fencing；第二 Host 初始明确只读，但持续监控锁释放或 stale，完成权威状态重载与投影恢复后可自动晋升为唯一 writer。stale 回收先把观察到的旧锁移入唯一 quarantine 并逐字核对，误移新锁时用硬链接恢复；锁缺失时可恢复崩溃遗留的 quarantine，主锁已存在时则清理过期 quarantine，避免反复移走当前锁形成获锁活锁。writer 通过本代 FileHandle 续心跳，旧 writer 不能沿路径覆盖继任锁。活跃 writer 心跳有效时不允许接管。只读 Host 在详情读取前刷新 v2 父状态，记录 ENOENT 时再刷新重试，以观察另一 Host 已提交的纠正和删除。
+- writable 变化会通知 Host 运行时：失去所有权时暂停 lifecycle，晋升后恢复当前 agents 状态并重启 lifecycle；首次和后续准备或启动失败都在当前可写期间自动重试。锁晋升与 heartbeat 解耦，初始化、迁移和投影恢复在各共享写入阶段续租并验权。Store 事务把可识别的所有权/fencing 异常统一归为只读错误，scheduler 因此能暂存验权竞争期间收到的新 intent；普通 I/O 和编程错误不按只读吞没。scheduler 的 stop 只暂停且保留持久 intent，暂停或只读期间收到的新 intent 也会暂存并在可写启动后落盘；start 提交固定快照，只清理本次已持久化且未更新的条目，不能用 clear 误删提交期间新增的 intent。dispose 才永久终止。卸载会停止锁监控、重试并清理 timer。
 - Windows 原子 rename 的短暂 EPERM 使用有限退避，不无上限重试。
 - 大详情先在同级临时目录写完整套分片，再切换目标目录；失败恢复旧目录，后续投影清理临时/备份残留。
 - 纠正导致缩片、大小形态切换或删除时清理旧投影；纠正发布后清理旧权威详情世代。
@@ -453,6 +454,18 @@ Session 从两个独立 enable latch 演进为“关闭 / 当前 workspace / 全
 Review/Idle/Stop 不再分别截取转录开头，而是共享每 Session 的 eventSeq/片内 offset。完整 turn 优先整批处理，超大 turn 和消息可确定性地跨批续接；Review 每次一批，Idle/Stop 每次最多两批。游标在候选可靠处理后由主 Store writer 提交，重启恢复与至少一次重复窗口均有自动化契约覆盖。
 
 该增量的自动化验证覆盖顺序推进、三入口去重、空候选、安全拒绝、失败不推进、重启、崩溃重复、长会话尾部、大 turn/消息、scope 隔离、sourceRefs 合并，以及删除单条/全部后的游标正交性。未安装到真实 Host，也未调用真实模型；真实 Session 事件形态、维护调度和模型时延仍需隔离环境验收。
+
+### 阶段九：快速重启后的只读锁自动恢复（Issue 2026-10-28）
+
+真机快速重启 dsh 后，点击 Enable 报 `Snail Memory is read-only on this host.`。现场时间线显示旧锁最后心跳早于新 Host 启动约 10 秒：新 Host 启动时旧锁尚未超过 30 秒 stale 阈值，因此按单写者规则进入只读；旧锁随后过期，但旧实现只在启动时检查一次，运行期间没有重取锁机制，导致永久只读。该问题与全局动态聚合无关，也不能通过允许多 writer 或盲目删锁解决。
+
+修复后，同一个锁监控周期在 writer 身份下续心跳，在只读身份下重试获取。锁释放或 stale 后，候选 Host 先重载最新权威状态、执行 v1 兼容迁移或 pending 投影恢复，再发布 writable 并通知运行时启动 lifecycle；失去所有权则暂停 lifecycle。scheduler 区分可恢复的 stop 与最终 dispose，暂停或只读期间收到的新 intent 不再直接丢弃，首次及后续 Host 准备 agents 或启动 lifecycle 的瞬时失败也会在当前可写期间重试。
+
+并发复核进一步固定了三个容易在 happy path 中漏掉的边界：两个 Host 同时回收同一 stale 锁时，只有移出内容仍与此前观察逐字一致的回收者才能继续，误移新锁必须恢复；writer 心跳写入本代 FileHandle，不能覆盖继任锁；晋升恢复与锁监控解耦，恢复期间仍持续 heartbeat，且各共享写入阶段重新验权。崩溃遗留的 quarantine 在锁缺失时通过硬链接恢复，不需要人工删锁。
+
+追加复核又覆盖了四种交错：主锁与遗留 quarantine 同时存在时，主锁是当前事实，旧 quarantine 必须清理，不能反复恢复并移走主锁；writable 检查后的 fencing 失败由 Store 事务统一归类为只读，scheduler 暂存 intent 并在重新晋升后补持久化，其他异常不吞没；首次 lifecycle 启动与后续晋升共用 WriterLifecycleRuntime，因此首次瞬时失败也不会使插件直接卸载或失去重试；start 提交 deferred 快照期间新增的 intent 不参与本次清理，只有快照中已持久化且未更新的条目才能删除。
+
+回归测试覆盖快速重启、活跃 writer 保护、并发 stale 接管、quarantine 崩溃恢复与并存清理、旧 heartbeat 隔离、晋升期间持续心跳、正常释放后的状态重载、lifecycle 暂停/恢复、首次及后续启动失败重试、只读和 fencing 竞争事件补持久化，以及启动提交期间的 deferred intent 保留。最终自动化结果为 31 个测试文件、179 条测试，并通过 typecheck、lint 和 build；真实定时器的隔离 Temp 目录冒烟同时验证了 stale 晋升与正常释放后的第二次接管。未通过重新安装或重启用户真实 Host 做验收。
 
 ## 14. 当前边界与后续演进方向
 

@@ -1,4 +1,4 @@
-import type { MemoryStore } from '../store/store.js'
+import { MemoryStoreReadonlyError, type MemoryStore } from '../store/store.js'
 
 export interface LifecycleSchedulerOptions {
   readonly idleDelayMinutes?: number
@@ -24,6 +24,7 @@ export class LifecycleScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined
   private disposed = false
   private started = false
+  private readonly deferredIntents = new Map<string, string>()
   private readonly now: () => Date
 
   constructor(
@@ -58,15 +59,34 @@ export class LifecycleScheduler {
   async start(): Promise<void> {
     if (this.started || this.disposed) return
     this.started = true
-    await this.store.updateMeta(meta => {
-      if (meta.nextRetentionAt === null) {
-        meta.nextRetentionAt = new Date(this.now().getTime() + this.retentionDelayMs).toISOString()
+    const deferred = new Map(this.deferredIntents)
+    try {
+      await this.store.updateMeta(meta => {
+        if (meta.nextRetentionAt === null) {
+          meta.nextRetentionAt = new Date(this.now().getTime() + this.retentionDelayMs).toISOString()
+        }
+        if (meta.dirty && meta.nextConsolidationAt === null) {
+          meta.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+        }
+        for (const [kind, createdAt] of deferred) {
+          meta.pending[kind] = { kind, createdAt }
+        }
+      })
+      for (const [kind, createdAt] of deferred) {
+        if (this.deferredIntents.get(kind) === createdAt) this.deferredIntents.delete(kind)
       }
-      if (meta.dirty && meta.nextConsolidationAt === null) {
-        meta.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
-      }
-    })
+    } catch (error) {
+      this.started = false
+      throw error
+    }
     this.schedule()
+  }
+
+  async stop(): Promise<void> {
+    this.started = false
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+    await this.queue
   }
 
   async requestIdle(sessionId: string): Promise<void> {
@@ -95,13 +115,23 @@ export class LifecycleScheduler {
 
   async dispose(): Promise<void> {
     this.disposed = true
-    if (this.timer) clearTimeout(this.timer)
-    this.timer = undefined
-    await this.queue
+    await this.stop()
   }
 
   private async putIntent(kind: string, createdAt: string): Promise<void> {
-    await this.store.updateMeta(meta => { meta.pending[kind] = { kind, createdAt } })
+    if (this.disposed) return
+    if (!this.store.writable) {
+      this.deferredIntents.set(kind, createdAt)
+      return
+    }
+    try {
+      await this.store.updateMeta(meta => { meta.pending[kind] = { kind, createdAt } })
+      this.deferredIntents.delete(kind)
+    } catch (error) {
+      if (!(error instanceof MemoryStoreReadonlyError)) throw error
+      this.deferredIntents.set(kind, createdAt)
+      return
+    }
     this.schedule()
   }
 
@@ -113,6 +143,7 @@ export class LifecycleScheduler {
   private async flush(): Promise<void> {
     // dispose() clears future timers but deliberately drains an already queued flush.
     for (;;) {
+      if (!this.started) return
       const meta = this.store.getMeta()
       const now = this.now().getTime()
       const due = Object.entries(meta.pending).find(([, value]) => this.dueAt(value.kind, value.createdAt) <= now)
@@ -198,5 +229,84 @@ export class LifecycleScheduler {
       this.timer = undefined
       this.enqueue()
     }, delay)
+  }
+}
+
+export interface WriterLifecycleRuntimeOptions {
+  readonly initiallyActive?: boolean
+  readonly retryMs?: number
+  readonly prepare: () => Promise<void>
+  readonly start: () => Promise<void>
+  readonly stop: () => Promise<void>
+  readonly onError: () => void
+}
+
+/** Serializes writer transitions and retries transient activation failures while writable. */
+export class WriterLifecycleRuntime {
+  private writable = false
+  private active: boolean
+  private disposed = false
+  private retry: ReturnType<typeof setTimeout> | undefined
+  private transition: Promise<void> = Promise.resolve()
+
+  constructor(private readonly options: WriterLifecycleRuntimeOptions) {
+    this.active = options.initiallyActive ?? false
+  }
+
+  setWritable(writable: boolean): void {
+    this.writable = writable
+    if (!writable) this.clearRetry()
+    this.enqueue()
+  }
+
+  drain(): Promise<void> {
+    return this.transition
+  }
+
+  async dispose(): Promise<void> {
+    this.disposed = true
+    this.clearRetry()
+    await this.transition
+  }
+
+  private enqueue(): void {
+    this.transition = this.transition.then(() => this.apply()).catch(() => {
+      this.options.onError()
+    })
+  }
+
+  private async apply(): Promise<void> {
+    if (this.disposed) return
+    if (!this.writable) {
+      if (this.active) {
+        await this.options.stop()
+        this.active = false
+      }
+      return
+    }
+    if (this.active) return
+    try {
+      await this.options.prepare()
+      if (!this.writable || this.disposed) return
+      await this.options.start()
+      this.active = true
+    } catch {
+      this.options.onError()
+      this.scheduleRetry()
+    }
+  }
+
+  private scheduleRetry(): void {
+    if (this.retry || !this.writable || this.disposed) return
+    this.retry = setTimeout(() => {
+      this.retry = undefined
+      this.enqueue()
+    }, this.options.retryMs ?? 5_000)
+    this.retry.unref()
+  }
+
+  private clearRetry(): void {
+    if (this.retry) clearTimeout(this.retry)
+    this.retry = undefined
   }
 }

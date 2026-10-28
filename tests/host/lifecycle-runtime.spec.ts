@@ -1,7 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { apply } from '../../src/index.js'
 import { MemoryLifecycleService } from '../../src/lifecycle/service.js'
 import type { AuxiliaryModelCallConfig } from '../../src/lifecycle/llm.js'
 import { MemoryStore } from '../../src/store/store.js'
@@ -9,7 +11,11 @@ import { workspaceId } from '../../src/store/types.js'
 
 const roots: string[] = []
 const stores: MemoryStore[] = []
+const effects: Array<() => void | Promise<void>> = []
 afterEach(async () => {
+  vi.restoreAllMocks()
+  await Promise.all(effects.splice(0).map(effect => effect()))
+  vi.useRealTimers()
   await Promise.all(stores.splice(0).map(store => store.close()))
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
@@ -42,5 +48,35 @@ describe('lifecycle dsh runtime composition', () => {
     expect(routes[0]).toMatchObject({ provider: 'late-provider', model: 'late-model' })
     expect(maintenance).toEqual(['session-1'])
     await lifecycle.dispose()
+  })
+
+  it('retries the initial lifecycle start without unloading the plugin', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-host-start-'))
+    roots.push(root)
+    vi.useFakeTimers()
+    const start = MemoryLifecycleService.prototype.start
+    let starts = 0
+    vi.spyOn(MemoryLifecycleService.prototype, 'start').mockImplementation(async function (this: MemoryLifecycleService) {
+      starts += 1
+      if (starts === 1) throw new Error('state temporarily unavailable')
+      await start.call(this)
+    })
+    const ctx = {
+      agents: { list: () => [], get: () => undefined },
+      commands: { register: () => () => {} },
+      llm: {},
+      tools: { register: () => () => {} },
+      webServer: { register: () => () => {} },
+      workspaceRegistry: { list: () => [] },
+      logger: { warn: () => {} },
+      on: () => () => {},
+      effect: (effect: () => () => void | Promise<void>) => { effects.push(effect()) },
+    } as unknown as Context
+
+    await expect(apply(ctx, { dshHome: root })).resolves.toBeUndefined()
+    expect(starts).toBe(1)
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    expect(starts).toBe(2)
   })
 })

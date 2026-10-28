@@ -14,6 +14,7 @@ import { registerMemoryApi } from './api/index.js'
 import { MemoryContextService } from './context/service.js'
 import { registerMemoryReadTool } from './context/tool.js'
 import { MemoryLifecycleService } from './lifecycle/service.js'
+import { WriterLifecycleRuntime } from './lifecycle/scheduler.js'
 import { DEFAULT_MEMORY_SETTINGS, MemorySettingsStore } from './lifecycle/settings.js'
 import { MemoryStore } from './store/store.js'
 import { workspaceId } from './store/types.js'
@@ -130,11 +131,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     })
   })
   for (const agent of ctx.agents.list()) await prepareAgent(agent)
-  if (store.writable) await lifecycle.start()
+  const writerRuntime = new WriterLifecycleRuntime({
+    prepare: async () => {
+      for (const agent of ctx.agents.list()) await prepareAgent(agent)
+    },
+    start: () => lifecycle.start(),
+    stop: () => lifecycle.stop(),
+    onError: () => {
+      ctx.logger.warn('[snail-memory] Could not apply writer lock transition')
+    },
+  })
+  const disposeWritable = store.onWritableChange(writable => { writerRuntime.setWritable(writable) })
+  writerRuntime.setWritable(store.writable)
+  await writerRuntime.drain()
 
   ctx.effect(() => async () => {
+    disposeWritable()
     disposeApi()
     disposeTool()
+    await writerRuntime.dispose()
     await lifecycle.dispose()
     await store.close()
   })

@@ -91,6 +91,10 @@ export class MemoryLifecycleService {
     return this.scheduler.start()
   }
 
+  stop(): Promise<void> {
+    return this.scheduler.stop()
+  }
+
   async dispose(): Promise<void> {
     await this.scheduler.dispose()
   }

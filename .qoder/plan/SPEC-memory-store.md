@@ -1,6 +1,8 @@
 # Spec: memory-store
 
 > 2026-10-27 修订：独立 global 条目和双层独立开关已废止；global 改为所有 workspace 的动态只读聚合，旧 global 数据仅兼容保留。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余存储与故障恢复规则继续有效。
+>
+> 2026-10-28 修订：修复快速重启留下的新鲜旧锁使新 Host 永久只读的问题。只读 Host 必须持续重试，在锁释放或 stale 后完成状态恢复并自动晋升；活跃 writer 仍受单写者保护。
 
 ## Objective
 
@@ -48,6 +50,7 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - 每次事务在改动投影前持久化 `projection-pending.v1.json`，其中只含受影响父 id，不含正文。提交前失败按当前父状态尝试恢复原详情投影，恢复本身失败时同样保留 intent；进程崩溃或提交后派生失败保留该 intent，由下次可写启动或后续事务重建详情、INDEX/MEMORY 并清理未引用记录。权威父状态已提交后，派生失败不得向调用方误报为未提交。
 - Markdown 是可重建投影，不是第二份权威数据。正常启动只重建 INDEX/MEMORY 索引投影，不为了重建所有详情投影而 eager-read 全部权威详情；详情投影在迁移、对应条目写入或 pending 恢复时更新。
 - 小详情、INDEX 和 MEMORY 使用临时文件原子替换；大详情继续使用临时目录整套切换。writer 的详情读取与写入进入同一串行队列；只读 Host 读取前刷新 v2 父状态，详情记录 ENOENT 时再刷新并重试，以观察其他 Host 已提交的纠正和删除。
+- WriterLock 在持有锁时通过本代 FileHandle 续心跳，在未持有锁时按同一周期间隔重试。stale 回收必须核对 quarantine 中移出的原始锁内容，误移新锁时用硬链接恢复；锁缺失时恢复崩溃遗留的 quarantine，主锁仍存在时则把遗留 quarantine 作为过期残留清理，不得反复移走当前主锁。启动时仍新鲜、随后才 stale 的旧锁与启动时已 stale 的锁都必须可恢复；锁被正常释放后同样允许接管。晋升与 heartbeat 解耦，晋升前重新读取最新 v2（或兼容迁移 v1）、恢复 pending 投影，并在各共享写入阶段续租验权，完成后才发布 writable；活跃 writer 心跳有效时不得抢锁。Store 事务边界把可识别的所有权/fencing 异常统一转换为 `MemoryStoreReadonlyError`，普通 I/O 和编程错误仍按原类别抛出。writable 变化通知 Host 启停 lifecycle，首次及后续准备或启动失败都在当前可写期间自动重试；暂停、只读或验权竞争期间收到的新 intent 在可写启动后补持久化。`start()` 必须提交 deferred 快照，并且只清理该快照中已经持久化且当前值未变化的条目；提交期间新增或更新的 intent 必须保留到后续启动。卸载停止监控、重试并清理 timer。
 - `audit.v1.jsonl` 只记录操作、id、revision、时间和脱敏结果，不记录记忆正文、秘密或完整提示词。
 - `global/INDEX.md` 包含全局条目与所有 workspace 的 id、条目数、revision、更新时间引用；不复制 workspace 详情。
 - 每会话独立保存两个层的 `enabled`、`desiredInjections`、已提交 injection id/revision 和估算 token，以及可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。
@@ -92,7 +95,8 @@ async write(entry: MemoryEntry): Promise<void> {
 - 测试忘记只删除目标条目，不影响其他条目、Session、注入历史或蒸馏游标；删除全部条目同样不触发旧范围重蒸馏。
 - 验证游标重启恢复、writer/只读边界，以及游标-only 更新不改变 scope revision、dirty 和 desired injections。
 - 模拟锁占用、stale lock、写失败、损坏 JSON、截断审计尾和崩溃残留 tmp。
-- 验证同 root 第二写者只读，旧 fencing token 不能提交。
+- 验证同 root 第二写者初始只读，旧 fencing token 不能提交；覆盖快速重启时旧锁先新鲜后 stale 的自动晋升、锁正常释放后的状态重载、活跃 heartbeat 不被抢占、失去所有权通知和 lifecycle 暂停/恢复。
+- 确定性交错两个 Host 的 stale 回收，验证误移新锁会恢复且只有一个获取者；覆盖 quarantine 崩溃恢复、主锁与遗留 quarantine 并存时清理残留且不活锁、旧 FileHandle heartbeat 不覆盖继任锁、晋升期间持续 heartbeat、首次及后续 Host 准备/启动失败重试、暂停/只读/fencing 验权竞争期间的 intent 补持久化，以及启动提交 deferred 快照期间新增 intent 不被清理。
 - 验证 Markdown 注入转义、Unicode、CRLF/LF 与确定性输出。
 - 验证 8,000/8,001 阈值、4,000 硬上限、语义边界与无空白长正文、分片拼接逐字符还原。
 - 验证分片目录投影、父索引单项链接、纠正缩片/取消分片及删除后的陈旧文件清理。
@@ -109,7 +113,7 @@ async write(entry: MemoryEntry): Promise<void> {
 
 ## Success Criteria
 
-- 所有 CRUD 和会话状态在重启后一致。
+- 所有 CRUD 和会话状态在重启后一致；快速重启遇到尚未 stale 的旧锁时无需二次重启，锁过期或释放后可自动恢复写入和 lifecycle。
 - 全局与 workspace 索引不串层，Ungrouped 不会生成 workspace 目录。
 - 任意写失败不破坏最后一个已提交状态。
 - 忘记后 list/read 均不可取得条目，详情文件和分片目录被移除，审计无正文。

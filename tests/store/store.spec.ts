@@ -354,6 +354,114 @@ describe('MemoryStore', () => {
     expect(store.writable).toBe(true)
   })
 
+  it('acquires a previously fresh lock after it becomes stale following a fast restart', async () => {
+    vi.useFakeTimers()
+    try {
+      const root = await tempRoot()
+      let now = new Date('2026-10-28T01:41:10.000Z')
+      await writeFile(join(root, 'lock.json'), JSON.stringify({
+        writerId: 'previous-host',
+        heartbeatAt: now.toISOString(),
+      }))
+      const store = await MemoryStore.open({
+        root,
+        heartbeatMs: 5_000,
+        lockStaleMs: 30_000,
+        now: () => now,
+      })
+      stores.push(store)
+      const transitions: boolean[] = []
+      store.onWritableChange(writable => { transitions.push(writable) })
+      expect(store.writable).toBe(false)
+
+      now = new Date(now.getTime() + 31_000)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.waitFor(() => expect(store.writable).toBe(true))
+
+      expect(store.writable).toBe(true)
+      expect(transitions).toEqual([true])
+      await expect(store.updateSessionState('session-1', state => {
+        state.layers.workspace.enabled = true
+      })).resolves.toMatchObject({ sessionId: 'session-1' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not steal an actively heartbeating writer lock while retrying', async () => {
+    vi.useFakeTimers()
+    try {
+      const root = await tempRoot()
+      let now = new Date('2026-10-28T01:41:10.000Z')
+      const options = { heartbeatMs: 5_000, lockStaleMs: 30_000, now: () => now }
+      const writer = await MemoryStore.open({ root, ...options })
+      const reader = await MemoryStore.open({ root, ...options })
+      stores.push(writer, reader)
+      expect(reader.writable).toBe(false)
+
+      for (let count = 0; count < 7; count += 1) {
+        now = new Date(now.getTime() + 5_000)
+        await vi.advanceTimersByTimeAsync(5_000)
+      }
+
+      expect(writer.writable).toBe(true)
+      expect(reader.writable).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reloads committed state when taking over an explicitly released lock', async () => {
+    vi.useFakeTimers()
+    try {
+      const root = await tempRoot()
+      const writer = await open(root)
+      const reader = await open(root)
+      const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+      const entry = await writer.upsert(input(scope, 'Committed before handoff'))
+      expect(reader.list(scope).entries).toEqual([])
+
+      await writer.close()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await vi.waitFor(() => expect(reader.writable).toBe(true))
+
+      expect(reader.list(scope).entries.map(candidate => candidate.id)).toEqual([entry.id])
+      await expect(reader.read(scope, entry.id)).resolves.toMatchObject({ detail: entry.detail })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('demotes a stale writer and notifies the runtime when ownership is lost', async () => {
+    vi.useFakeTimers()
+    try {
+      const root = await tempRoot()
+      let now = new Date('2026-10-28T01:41:10.000Z')
+      const store = await MemoryStore.open({
+        root,
+        heartbeatMs: 5_000,
+        lockStaleMs: 30_000,
+        now: () => now,
+      })
+      stores.push(store)
+      const transitions: boolean[] = []
+      store.onWritableChange(writable => { transitions.push(writable) })
+      await writeFile(join(root, 'lock.json'), JSON.stringify({
+        writerId: 'replacement-host',
+        heartbeatAt: now.toISOString(),
+      }))
+
+      now = new Date(now.getTime() + 5_000)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.waitFor(() => expect(store.writable).toBe(false))
+
+      expect(transitions).toEqual([false])
+      await expect(store.updateSessionState('session-1', () => {})).rejects.toBeInstanceOf(MemoryStoreReadonlyError)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('fails loudly on a corrupt authoritative snapshot', async () => {
     const root = await tempRoot()
     await writeFile(join(root, 'state.v1.json'), '{not json')

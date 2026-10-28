@@ -1,7 +1,7 @@
 import { appendFile, readFile, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { entriesForScope, revisionForScope, workspaceIndexRefs } from './aggregate.js'
-import { WriterLock } from './lock.js'
+import { WriterLock, WriterLockOwnershipError } from './lock.js'
 import { emptyState, readLegacyState, readState, writeJsonAtomic, type LegacyStoreState } from './json.js'
 import { StorePaths } from './paths.js'
 import { removeDetailProjection, writeDetailProjection, writeIndexProjections } from './projections.js'
@@ -92,7 +92,9 @@ export class MemoryStore {
   private state: StoreState
   private queue: Promise<unknown> = Promise.resolve()
   private closed = false
+  private writerReady = false
   private legacyEntries: ReadonlyMap<string, MemoryEntry> | undefined
+  private readonly writableListeners = new Set<(writable: boolean) => void>()
 
   private constructor(
     options: Required<MemoryStoreOptions>,
@@ -123,14 +125,11 @@ export class MemoryStore {
       const state = current ?? (legacy ? migrateState(legacy) : emptyState())
       const store = new MemoryStore(resolved, lock, state, legacy && !lock.writable ? legacy.entries : undefined)
       if (lock.writable) {
-        if (legacy) await store.migrateLegacy(legacy.entries)
-        else {
-          await store.recoverPendingProjections()
-          await writeIndexProjections(store.paths, state)
-          await removeUnreferencedDetailRecords(store.paths, state)
-          await rm(store.paths.legacyState, { force: true })
-        }
+        await store.initializeWriter(legacy)
+        await lock.assertOwner()
+        store.writerReady = true
       }
+      lock.monitor(owned => store.handleOwnershipChange(owned))
       return store
     } catch (error) {
       await lock.close()
@@ -139,7 +138,63 @@ export class MemoryStore {
   }
 
   get writable(): boolean {
-    return this.lock.writable && !this.closed
+    return this.lock.writable && this.writerReady && !this.closed
+  }
+
+  onWritableChange(listener: (writable: boolean) => void): () => void {
+    this.writableListeners.add(listener)
+    return () => { this.writableListeners.delete(listener) }
+  }
+
+  private async handleOwnershipChange(owned: boolean): Promise<void> {
+    if (!owned) {
+      this.writerReady = false
+      this.emitWritableChange()
+      return
+    }
+    if (this.closed) throw new Error('Cannot promote a closed memory store')
+    const run = this.queue.then(async () => {
+      const current = await readState(this.paths.state)
+      const legacy = current ? null : await readLegacyState(this.paths.legacyState)
+      if (current) {
+        this.state = current
+        this.legacyEntries = undefined
+      } else if (legacy) {
+        this.state = migrateState(legacy)
+        this.legacyEntries = new Map(legacy.entries.map(entry => [entry.id as string, entry]))
+      }
+      await this.initializeWriter(legacy)
+      await this.lock.assertOwner()
+      if (this.closed) throw new Error('Cannot promote a closed memory store')
+      this.writerReady = true
+    })
+    this.queue = run.catch(() => {})
+    try {
+      await run
+    } catch (error) {
+      this.writerReady = false
+      throw error
+    }
+    this.emitWritableChange()
+  }
+
+  private emitWritableChange(): void {
+    for (const listener of this.writableListeners) listener(this.writable)
+  }
+
+  private async initializeWriter(legacy: Awaited<ReturnType<typeof readLegacyState>>): Promise<void> {
+    await this.lock.heartbeat()
+    if (legacy) await this.migrateLegacy(legacy.entries)
+    else {
+      await this.recoverPendingProjections()
+      await this.lock.heartbeat()
+      await writeIndexProjections(this.paths, this.state)
+      await this.lock.heartbeat()
+      await removeUnreferencedDetailRecords(this.paths, this.state)
+      await this.lock.heartbeat()
+      await rm(this.paths.legacyState, { force: true })
+    }
+    this.legacyEntries = undefined
   }
 
   list(scope: MemoryScope): MemoryIndex {
@@ -259,8 +314,10 @@ export class MemoryStore {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.writerReady = false
     await this.queue.catch(() => {})
     await this.lock.close()
+    this.writableListeners.clear()
   }
 
   private nextScopeRevision(draft: StoreState, scope: MemoryScope): number {
@@ -273,15 +330,25 @@ export class MemoryStore {
   }
 
   private async migrateLegacy(entries: readonly MemoryEntry[]): Promise<void> {
-    for (const entry of entries) await writeDetailRecord(this.paths, entry)
+    for (const entry of entries) {
+      await this.lock.heartbeat()
+      await writeDetailRecord(this.paths, entry)
+    }
+    await this.lock.heartbeat()
     await writeJsonAtomic(this.paths.projectionPending, {
       formatVersion: 1,
       ids: entries.map(entry => entry.id),
     } satisfies ProjectionPending)
-    for (const entry of entries) await writeDetailProjection(this.paths, entry)
+    for (const entry of entries) {
+      await this.lock.heartbeat()
+      await writeDetailProjection(this.paths, entry)
+    }
+    await this.lock.heartbeat()
     await writeJsonAtomic(this.paths.state, this.state)
     await this.recoverPendingProjections()
+    await this.lock.heartbeat()
     await removeUnreferencedDetailRecords(this.paths, this.state)
+    await this.lock.heartbeat()
     await rm(this.paths.legacyState, { force: true })
   }
 
@@ -305,13 +372,29 @@ export class MemoryStore {
     const pending = await this.readPendingProjections()
     if (!pending) return
     for (const id of pending.ids) {
+      await this.lock.heartbeat()
       const index = this.state.entries.find(entry => entry.id === id)
       if (index) await writeDetailProjection(this.paths, await readDetailRecord(this.paths, index))
       else await removeDetailProjection(this.paths, id)
     }
+    await this.lock.heartbeat()
     await writeIndexProjections(this.paths, this.state)
+    await this.lock.heartbeat()
     await removeUnreferencedDetailRecords(this.paths, this.state)
+    await this.lock.heartbeat()
     await rm(this.paths.projectionPending, { force: true })
+  }
+
+  private async assertWritable(): Promise<void> {
+    if (!this.writable) throw new MemoryStoreReadonlyError('This Snail Memory host is read-only')
+    try {
+      await this.lock.assertOwner()
+    } catch (error) {
+      if (error instanceof WriterLockOwnershipError) {
+        throw new MemoryStoreReadonlyError('This Snail Memory host lost writer ownership')
+      }
+      throw error
+    }
   }
 
   private transaction<T>(
@@ -321,8 +404,7 @@ export class MemoryStore {
     prepare?: (result: T, draft: StoreState) => Promise<void>,
   ): Promise<T> {
     const run = this.queue.then(async () => {
-      if (!this.writable) throw new MemoryStoreReadonlyError('This Snail Memory host is read-only')
-      await this.lock.assertOwner()
+      await this.assertWritable()
       await this.recoverPendingProjections()
       const draft = structuredClone(this.state)
       const result = update(draft)
@@ -346,6 +428,11 @@ export class MemoryStore {
         // The authoritative state is committed. Keep the intent for a later retry.
       }
       return result
+    }).catch(error => {
+      if (error instanceof WriterLockOwnershipError) {
+        throw new MemoryStoreReadonlyError('This Snail Memory host lost writer ownership')
+      }
+      throw error
     })
     this.queue = run.catch(() => {})
     return run
