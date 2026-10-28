@@ -12,20 +12,20 @@
    - 检查点：CRUD、重启、忘记、锁和脱敏测试通过。
 
 2. **memory-context**
-   - 实现两个 enable latch、快照、agent.inject、commit 对账、refresh 和详情工具。
-   - 检查点：append-only、重启恢复、同 revision no-op、token 统计测试通过。
+   - 实现关闭/workspace/global 三态单选、单 active desired、快照、agent.inject、commit 对账、跨 workspace enable/refresh 和详情工具。
+   - 检查点：append-only、重启恢复、同 revision no-op、disable 撤回和 token 统计测试通过。
 
 3. **memory-lifecycle**
-   - 实现有效轮计数、idle 蒸馏、辅助 LLM、6 小时 dirty 整合和每日清理。
-   - 检查点：触发边界、冷却、失败重试、无 Ungrouped 自动写入测试通过。
+   - 实现有效轮计数、Review/Idle/Stop 顺序蒸馏、辅助 LLM、workspace 默认 20 小时与独立 Global 默认 7 天 dirty 整合，以及仅 workspace 的每日清理。
+   - 检查点：触发边界、持久游标、两类冷却、失败重试、无 Ungrouped 隐式写入测试通过。
 
 4. **memory-api**
    - 实现同源 RPC、输入校验、状态/统计端点和 `/memory` 命令。
    - 检查点：路由白名单、只读错误、删除不影响 Session 的测试通过。
 
 5. **memory-web**
-   - 实现 Composer、sidebar/main、双 tab、详情、统计、删除和中英文文案。
-   - 检查点：Client 交互、 stale response、恢复和 handoff bundle 测试通过。
+   - 实现 Composer 三态控件、sidebar/main、Global/Workspaces/Settings 三 tab、跨项目管理、详情、统计、Promote、删除和中英文文案。
+   - 检查点：Client 交互、stale response、Host 状态恢复和 handoff bundle 测试通过。
 
 6. **独立安装与整体验证**
    - 构建 tarball，在隔离 DSH_HOME/profile 安装并检查 dump-config，不擅自重启用户正在运行的 Host。

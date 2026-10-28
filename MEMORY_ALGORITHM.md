@@ -116,7 +116,7 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 活动事件会刷新 idle intent 的创建时间，形成 debounce。三类入口最终复用同一个 `distillSession` 和同一份 Session 主进度，区别主要是输入预算、每次 intent 的最大批数和调度原因。Review 每次处理下一批；Idle/Stop 每次最多连续处理两批做有界追赶。后续 intent 从持久位置继续，因此长会话的中段和尾部可以最终参与，但单次维护不会退化成无预算全量回填。
 
-管理页的 Settings 可以调整 `reviewEveryUserTurns`、`idleDelayMinutes`、`consolidationCooldownHours`、`globalConsolidationCooldownDays`、`snapshotTokenBudget` 和五类 `retentionDays`。默认值分别为 15 轮、60 分钟、workspace 20 小时和 Global 7 天，快照预算默认为 1,200 估算 token，保留期默认值见 3.2。所有值持久化到 `$DSH_HOME/snail_memory/settings.v1.json`，启动配置只作为文件缺失时的默认值；旧文件缺少新增字段时补用对应默认值，已显式保存的其他值保持不变。写入复用 MemoryStore 的单写者边界并采用原子替换，只读 Host 可读取但拒绝更新。保存成功后立即更新运行中的计数器和调度器：已有有效轮计数保留，已有 idle intent 按新延迟重新计算到期时间，workspace 与 Global 各自已有的 dirty/consolidation 计划分别按新的小时或天间隔从当前时间重排；保留期策略则由下一次每日清理读取。快照预算由两类 scope 共用，在后续 Enable/Refresh 创建新快照时读取，不改写已经生成的 desired 或已注入 Session 的历史快照。
+管理页的 Settings 可以调整 `reviewEveryUserTurns`、`idleDelayMinutes`、`consolidationCooldownHours`、`globalConsolidationCooldownDays`、`snapshotTokenBudget` 和五类 `retentionDays`。默认值分别为 15 轮、60 分钟、workspace 20 小时和 Global 7 天，快照预算默认为 1,200 估算 token，保留期默认值见 3.2。所有值持久化到 `$DSH_HOME/snail_memory/settings.v1.json`，启动配置只作为文件缺失时的默认值；旧文件缺少新增字段时补用对应默认值，已显式保存的其他值保持不变。Settings 当前使用独立的 Promise 写队列和原子文件替换，只在写入开始时检查 `store.writable`，不进入 MemoryStore 主状态事务，也没有在发布前再次执行 writer fencing；因此只读 Host 会拒绝更新，但锁所有权在写入期间变化时仍存在 stale writer 覆盖设置的已知窗口。保存成功后立即更新运行中的计数器和调度器：当前进程内已有有效轮计数保留，已有 idle intent 按新延迟重新计算到期时间，workspace 与 Global 各自已有的 dirty/consolidation 计划分别按新的小时或天间隔从当前时间重排；保留期策略则由下一次每日清理读取。快照预算由两类 scope 共用，在后续 Enable/Refresh 创建新快照时读取，不改写已经生成的 desired 或已注入 Session 的历史快照。
 
 蒸馏读取的是 Session 事件的确定性投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情的能力不变。
 
@@ -206,7 +206,7 @@ Promote 只接受已注册 workspace 的来源条目。Store 在同一串行写�
 
 因此，“语义上是否重复、哪个结论更新”是模型判断；“是否允许写、能否跨 scope、如何持久化和删除”是程序判断。这个分工让语义能力可演进，同时把数据安全边界留在确定性代码中。
 
-为限制模型等待期间的写回竞态，候选会关联调用前的条目快照，写前重新读取并核对条目 revision；已删除或已纠正的条目不再接受旧候选。最终清理也只在对应 next consolidation 时间仍等于调用前计划时执行，避免旧任务清除运行期间新 Promote/Delete 建立的 dirty 和重排计划。这些防护不是完整的条件写事务：`store.read()` 与后续 `store.upsert()` 之间仍存在很小的交错窗口，彻底关闭需要在该 Store 写事务内校验 expected revision 或提供等价条件写。
+为限制模型等待期间的写回竞态，候选会关联调用前的条目快照，写前重新读取并核对条目 revision；已删除或已纠正的条目不再接受旧候选。最终清理也只在对应 next consolidation 时间仍等于调用前计划时执行，避免旧任务清除运行期间新 Promote/Delete 建立的 dirty 和重排计划。这些防护不是完整的条件写事务：`store.read()` 与后续 `store.upsert()` 之间仍存在很小的交错窗口，`supersedes` 目标的 `read()` → `remove()` 也未核对旧条目 revision，旧整合仍可能删除模型等待期间新纠正的版本。彻底关闭需要在该 Store 写事务内校验 expected revision，并提供等价原子条件写和条件删除。
 
 整合同样是预算内批处理，不保证每轮让所有历史条目都参与。首条本身过大时只会截取其 detail 以形成降级输入。
 
@@ -364,6 +364,7 @@ Host 启动只读取 `state.v2.json` 到 `MemoryStore`。`list()`、`enable()` �
 - 权威 JSON、小详情和 INDEX/MEMORY 均原子替换；读取时校验记录 id、revision 和 `detailChars`，损坏或缺失不错误回退到其他正文。
 - 同一 root 使用独占锁、heartbeat、stale 判定和 writer fencing；第二 Host 初始明确只读，但持续监控锁释放或 stale，完成权威状态重载与投影恢复后可自动晋升为唯一 writer。stale 回收先把观察到的旧锁移入唯一 quarantine 并逐字核对，误移新锁时用硬链接恢复；锁缺失时可恢复崩溃遗留的 quarantine，主锁已存在时则清理过期 quarantine，避免反复移走当前锁形成获锁活锁。writer 通过本代 FileHandle 续心跳，旧 writer 不能沿路径覆盖继任锁。活跃 writer 心跳有效时不允许接管。只读 Host 在详情读取前刷新 v2 父状态，记录 ENOENT 时再刷新重试，以观察另一 Host 已提交的纠正和删除。
 - writable 变化会通知 Host 运行时：失去所有权时暂停 lifecycle，晋升后恢复当前 agents 状态并重启 lifecycle；首次和后续准备或启动失败都在当前可写期间自动重试。锁晋升与 heartbeat 解耦，初始化、迁移和投影恢复在各共享写入阶段续租并验权。Store 事务把可识别的所有权/fencing 异常统一归为只读错误，scheduler 因此能暂存验权竞争期间收到的新 intent；普通 I/O 和编程错误不按只读吞没。scheduler 的 stop 只暂停且保留持久 intent，暂停或只读期间收到的新 intent 也会暂存并在可写启动后落盘；start 提交固定快照，只清理本次已持久化且未更新的条目，不能用 clear 误删提交期间新增的 intent。dispose 才永久终止。卸载会停止锁监控、重试并清理 timer。
+- 当前实现限制：上述锁协议尚未闭合为完整事务 fencing。Store transaction 只在开始时执行 `assertWritable()`，进行中的事务在锁所有权变化后仍可能发布旧 draft，覆盖继任 writer 已提交的父状态。因而现阶段不能把“下一次写入会被拒绝”扩大解释为“旧 writer 的所有进行中写入都绝对不能提交”；后续需要 writer 代际、原子条件发布和对应交错测试。
 - Windows 原子 rename 的短暂 EPERM 使用有限退避，不无上限重试。
 - 大详情先在同级临时目录写完整套分片，再切换目标目录；失败恢复旧目录，后续投影清理临时/备份残留。
 - 纠正导致缩片、大小形态切换或删除时清理旧投影；纠正发布后清理旧权威详情世代。
@@ -529,7 +530,7 @@ Global 新增独立 `globalDirty`、`nextGlobalConsolidationAt`、`lastGlobalCon
 7. **时间元数据健壮性**：无效 `lastVerifiedAt` 的展示和验证策略可进一步统一，避免快照出现无效年龄。
 8. **模型调用韧性**：辅助模型已支持 AbortSignal 和可选 timeout，但蒸馏与整合调用方尚未设置统一默认超时，可补充明确超时和重试预算。
 9. **安全入口收敛**：可把安全策略进一步下沉为所有生产写入都必须经过的用例层，减少未来新增入口绕过扫描的可能。
-10. **整合原子条件写**：当前已用调用前快照、写前 revision 复核和调度时间代际判断缩小竞态，但 `store.read()` 与 `store.upsert()` 之间仍可发生删除或纠正交错。后续应在 Store 同一写事务内校验 expected revision，或提供等价条件写；在此之前不能承诺慢模型期间的所有并发写回都已隔离。
+10. **完整写事务 fencing 与整合原子条件写**：当前 Store 只在事务开始验权，进行中的事务在锁所有权变化后仍可能发布旧 draft，需要以 writer 代际和条件发布关闭。整合已用调用前快照、写前 revision 复核和调度时间代际判断缩小竞态，但 `store.read()` → `store.upsert()` 以及 `supersedes` 的 `read()` → `remove()` 仍不是同一 expected-revision 条件事务。后续应在 Store 同一写事务内提供原子条件写和条件删除；在此之前不能承诺多 Host 或慢模型期间的所有并发写回都已隔离。
 
 这些演进都应继续保持：父记忆单一事实源、scope 隔离、append-only Session、model-visible means logged、秘密最小化和可恢复写入。
 

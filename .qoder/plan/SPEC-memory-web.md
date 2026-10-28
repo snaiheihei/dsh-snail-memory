@@ -28,7 +28,7 @@ client/src/entry.tsx          → slots 注册与卸载
 client/src/rpc.ts             → 类型化同源 RPC
 client/src/store.ts           → 查询、focus/change 刷新、stale response 防护
 client/src/ComposerMemory.tsx → 两层 enable/refresh
-client/src/MemoryPage.tsx     → sidebar main、双 tab、统计、详情、删除
+client/src/MemoryPage.tsx     → sidebar main、Global/Workspaces/Settings 三 tab、统计、详情、Promote、删除与设置
 client/src/icons.tsx          → 本地 SVG 图标
 client/src/locale.ts          → 中英文 typed copy
 client/src/styles.ts          → 注入样式
@@ -46,7 +46,7 @@ scripts/build-client.mjs      → 单文件 window.__ModuleLoader__ handoff
 - 页面 tab 为“全局记忆索引”、“Workspaces”和“Settings”；展示有效条目数、最近快照和当前 Session 累计注入估算 token。
 - 条目可查看摘要、分类、更新时间和详情；workspace 详情提供 Promote，Global 与 workspace 均允许删除且需确认。删除成功文案明确“未删除对话历史，已注入快照仍保留”；Promote 成功/已存在反馈不暗示后续自动同步。
 - 全局 tab 只展示独立 Global 条目，不显示来源 workspace 聚合列表；Settings 提供默认 7 天的 Global consolidation delay，与 workspace 20 小时设置分开保存。
-- 无当前 workspace 时 Workspaces tab 显示空状态，Global tab 仍可独立使用。
+- 无当前 Session owner workspace 时，Workspaces tab 仍可从完整注册表选择任意已注册项目并读取索引；只有没有可用注册项目或注册表加载失败时显示相应空态/错误。Ungrouped 不因此获得隐式写入 owner，Global tab 始终可独立使用。
 - token 一律标为“估算”，不得显示为 provider 精确 usage。
 
 ## Code Style
@@ -69,7 +69,7 @@ React 和 dsh 包全部 external；不打包第二份 React。所有异步更新
 - workspace 下拉框可选择非当前项目并传递其 id；A→B 直接切换、Ungrouped 选择和注册表加载失败均有明确行为。
 - refresh 只在 enabled 后可用，同 revision 结果显示“已是最新”。
 - reload 时 RPC 状态覆盖空白本地状态并恢复召回选择；旧 session 响应不得覆盖新 session。
-- 双 tab、条目数、token 文案、workspace 空状态、详情和删除确认。
+- Global/Workspaces/Settings 三 tab、条目数、token 文案、无 owner 时的注册项目选择、详情、Promote、删除确认和设置保存。
 - sidebar/main key 一致，Composer 和页面卸载后清理 listener/timer。
 - handoff 产物检查 external React、插件 id 和无裸 import。
 
@@ -83,7 +83,7 @@ React 和 dsh 包全部 external；不打包第二份 React。所有异步更新
 
 - 安装插件后 Composer 和左侧 Memory icon 均出现，无需手改宿主。
 - 所有指定操作可用且 reload/restart 后开关与召回项目一致；非当前项目和 Ungrouped 选择均可启用。
-- Memory 页两个 tab、统计、详情和删除完整可用。
+- Memory 页 Global/Workspaces/Settings 三 tab、统计、详情、Promote、删除和设置保存完整可用。
 - 390px 移动宽度无页面级横向溢出，按钮具有可访问名称。
 - Client 测试、typecheck 和 handoff build 通过。
 

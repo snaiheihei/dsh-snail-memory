@@ -51,8 +51,9 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - 写入或纠正先完整写入新详情记录和详情 Markdown 投影，再切换父状态；父状态发布后清理旧 revision 和孤儿记录。删除在同事务队列中移除父索引、权威详情和投影，不修改 Session。
 - 每次事务在改动投影前持久化 `projection-pending.v1.json`，其中只含受影响父 id，不含正文。提交前失败按当前父状态尝试恢复原详情投影，恢复本身失败时同样保留 intent；进程崩溃或提交后派生失败保留该 intent，由下次可写启动或后续事务重建详情、INDEX/MEMORY 并清理未引用记录。权威父状态已提交后，派生失败不得向调用方误报为未提交。
 - Markdown 是可重建投影，不是第二份权威数据。正常启动只重建 INDEX/MEMORY 索引投影，不为了重建所有详情投影而 eager-read 全部权威详情；详情投影在迁移、对应条目写入或 pending 恢复时更新。
-- 小详情、INDEX 和 MEMORY 使用临时文件原子替换；大详情继续使用临时目录整套切换。writer 的详情读取与写入进入同一串行队列；只读 Host 读取前刷新 v2 父状态，详情记录 ENOENT 时再刷新并重试，以观察其他 Host 已提交的纠正和删除。
+- 小详情、INDEX 和 MEMORY 使用临时文件原子替换；大详情继续使用临时目录整套切换。writer 的详情读取与写入进入同一串行队列；只读 Host 的详情 `read()` 前刷新 v2 父状态，详情记录 ENOENT 时再刷新并重试，以观察其他 Host 已提交的纠正和删除。当前同步 `list()` 和 `workspaceScopes()` 只读取本进程内存，不主动刷新；第二 Host 的列表可能保持陈旧，直到详情读取、writer 晋升或重启，后续应为管理 RPC 提供异步 fresh-list 路径。
 - WriterLock 在持有锁时通过本代 FileHandle 续心跳，在未持有锁时按同一周期间隔重试。stale 回收必须核对 quarantine 中移出的原始锁内容，误移新锁时用硬链接恢复；锁缺失时恢复崩溃遗留的 quarantine，主锁仍存在时则把遗留 quarantine 作为过期残留清理，不得反复移走当前主锁。启动时仍新鲜、随后才 stale 的旧锁与启动时已 stale 的锁都必须可恢复；锁被正常释放后同样允许接管。晋升与 heartbeat 解耦，晋升前重新读取最新 v2（或兼容迁移 v1）、恢复 pending 投影，并在各共享写入阶段续租验权，完成后才发布 writable；活跃 writer 心跳有效时不得抢锁。Store 事务边界把可识别的所有权/fencing 异常统一转换为 `MemoryStoreReadonlyError`，普通 I/O 和编程错误仍按原类别抛出。writable 变化通知 Host 启停 lifecycle，首次及后续准备或启动失败都在当前可写期间自动重试；暂停、只读或验权竞争期间收到的新 intent 在可写启动后补持久化。`start()` 必须提交 deferred 快照，并且只清理该快照中已经持久化且当前值未变化的条目；提交期间新增或更新的 intent 必须保留到后续启动。卸载停止监控、重试并清理 timer。
+- 当前实现尚未把上述锁协议闭合为完整事务 fencing：Store transaction 只在开始时 `assertWritable()`，进行中的事务在锁所有权变化后仍可能发布旧 draft，覆盖继任 writer 已提交的父状态。后续需要 writer 代际和原子条件发布，并补进行中事务与 stale takeover 的交错测试；在此之前不能宣称旧 fencing token 在所有阶段都绝对不能提交。
 - `audit.v1.jsonl` 只记录操作、id、revision、时间和脱敏结果，不记录记忆正文、秘密或完整提示词。
 - `global/INDEX.md` 只包含独立 Global 条目，不包含 workspace 聚合引用；Promote 通过新 ID、独立版本化详情和 `promotedFrom` 深复制，不共享来源详情或分片所有权。
 - 每会话独立保存两个层的 `enabled`、`desired`、已提交 injection id/revision 和估算 token，以及唯一 `activeDesired` 和可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。

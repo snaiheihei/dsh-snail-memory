@@ -37,11 +37,11 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 
 ## Configuration Defaults
 
-- `reviewEveryUserTurns = 15`；仅真实 `source.kind === 'user'`，且所在 turn `completed` 后触发。
-- `idleDelayMinutes = 60`；新活动取消旧 idle timer，dispose 不再启动 maintenance。
+- `reviewEveryUserTurns = 15`；仅真实 `source.kind === 'user'`，且所在 turn `completed` 后触发。有效轮计数、pending/completed turn 关联和事件去重当前只保存在进程内，重启后重新累计；已持久化的生命周期 intent 和蒸馏游标不受此重置影响。
+- `idleDelayMinutes = 60`；新活动刷新同 Session idle intent 的创建时间并重排唯一 timer，形成 debounce；dispose 不再启动新 maintenance，但会 drain 已进入队列的工作。
 - `consolidationCooldownHours = 20`；workspace dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
 - `globalConsolidationCooldownDays = 7`；独立 Global dirty、intent、成功、失败与重试不清理或重排 workspace 状态。
-- Settings 页可调整上述四项、`snapshotTokenBudget` 和五类 `retentionDays`；`settings.v1.json` 原子持久化并优先于启动默认值，旧文件缺少新增字段时补用对应默认值。保存后保留轮计数，分别重排已有 idle intent、workspace 与 Global dirty/consolidation 计划，只读 Host 拒绝更新。
+- Settings 页可调整上述四项、`snapshotTokenBudget` 和五类 `retentionDays`；`settings.v1.json` 原子持久化并优先于启动默认值，旧文件缺少新增字段时补用对应默认值。保存后保留当前进程内轮计数，分别重排已有 idle intent、workspace 与 Global dirty/consolidation 计划，只读 Host 拒绝更新。
 - Workspaces 页从完整 WorkspaceRegistry 选择任意已注册 workspace 并读取其索引，不以当前 Session 或已有记忆引用为限。
 - `retentionSweepHours = 24`。
 - 首次加载只恢复已有记忆、调度和注入状态，不自动遍历并蒸馏全部历史 Session；历史回填不是默认生命周期任务。
@@ -51,7 +51,7 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - 只有模型响应可解析、候选完成安全校验且写入/去重成功，或候选为空/被安全策略完整拒绝后，才通过主 MemoryStore 串行 writer 推进游标。路由缺失、请求失败/取消/超时、不可解析输出、输入拒绝或存储失败均保留原游标。
 - 记忆提交后、游标提交前崩溃允许重试同批；稳定 ID、内容去重、sourceRefs 合并和后续整合承担至少一次语义。不得先推进游标再调用模型或写记忆。
 - Review/蒸馏的转录投影仅保留真实用户消息、助手消息和普通工具结果；通过 `tool/call.callId` 排除 `snail_memory_read` 的 `tool/result`，不按结果正文过滤，也不修改原始 Session。
-- 注入索引默认上限 1,200 估算 token，可在 Settings 调整 `snapshotTokenBudget`；新值仅用于后续 Enable/Refresh 新快照，不改写历史快照。核心摘要上限 800 估算 token；超出时保留最新高置信条目并报告截断。
+- 注入索引默认上限 1,200 估算 token，可在 Settings 调整 `snapshotTokenBudget`；新值仅用于后续 Enable/Refresh 新快照，不改写历史快照。条目按 `updatedAt` 从新到旧逐条加入，下一条会使估算超预算时停止并报告剩余数量；没有独立的 800 token 核心摘要预算或“高置信”排序，固定头部和尾部说明也不计入该条目循环的硬上限。
 
 ## Code Style
 
@@ -61,18 +61,19 @@ const pending = this.pendingTurns.get(sessionId)
 pending?.count += 1
 ```
 
-任务以持久 intent + idempotency key 串行执行；post-commit 事件只负责观察，不承担写事务。LLM 失败保留 dirty 和可重试状态，不伪造成功。
+任务以 kind 为 key 的持久 intent 串行执行，通过稳定记忆 ID、内容比较和 sourceRefs 合并提供至少一次处理下的幂等去重；不存在独立的 intent idempotency key 字段。post-commit 事件只负责观察，不承担写事务。LLM 失败保留可重试状态，不伪造成功。
 
 ## Concurrency Boundaries
 
 - 整合候选关联模型调用前的条目快照，写前重新读取并核对条目 revision；模型等待期间已删除或已纠正的条目不得接受旧候选。
-- 整合和 Scheduler 成功收尾都必须核对调用前的 next consolidation 时间；运行期间新 Promote/Delete 建立的 dirty 与重排计划不得被旧任务清除。
-- 上述防护尚未形成完整条件写事务：`store.read()` 与 `store.upsert()` 之间仍存在小的删除/纠正交错窗口。后续应在 Store 同一写事务内校验 expected revision，或提供等价原子条件写，不能宣称该竞态已完全关闭。
+- 整合和 Scheduler 的 consolidation 成功收尾会核对调用前的 next consolidation 时间；运行期间新 Promote/Delete 建立的 dirty 与重排计划不得被旧任务清除。
+- 上述防护尚未形成完整条件写事务：`store.read()` 与 `store.upsert()` 之间仍存在小的删除/纠正交错窗口，`supersedes` 的 `read()` → `remove()` 也没有核对旧条目 revision，可能删除模型等待期间新纠正的版本。后续应在 Store 同一写事务内校验 expected revision，或提供等价原子条件写/条件删除，不能宣称该竞态已完全关闭。
+- Scheduler 当前以 kind 为 pending key，旧任务成功或失败收尾尚未比较 intent 代际；运行期间同 key 新 intent 仍可能被旧任务清理或改写。后续需要持久 intent ID/代际，并仅在当前记录仍等于本次运行快照时收尾。
 
 ## Testing Strategy
 
 - 注入、schedule、runtime-context 不计有效轮；aborted/error 不触发 Review。
-- 第 14/15/16 轮边界、重启恢复、重复事件和乱序通知。
+- 第 14/15/16 轮边界、当前进程内计数重置行为、持久 intent/游标的重启恢复、重复事件和乱序通知。
 - idle debounce、非 idle maintenance 竞态、dispose、archive/stop。
 - 20 小时默认冷却、dirty 设置热更新与计划重排、dirty gate、每日清理、单 timer 和卸载 drain。
 - 五类保留期默认值、持久化与 RPC 校验；`0` 天关闭类别过期，自定义策略在下一次清理生效，显式过期时间优先。
@@ -98,7 +99,7 @@ pending?.count += 1
 - 自动蒸馏只写入当前已验证 workspace；Ungrouped 不自动写全局。
 - 整合在 scope 内去重、合并、修正冲突、删除过期结论并更新摘要/索引。
 - 显式 remember/correct/forget 无需等待 Review，立即持久化并广播变化。
-- 崩溃重启后任务不丢、不重复提交同一 intent；游标恢复后从下一未处理位置继续，崩溃重复窗口不产生重复条目。
+- 崩溃重启后已持久任务和游标不丢，游标从下一未处理位置继续；记忆已写而游标未提交时允许同批重放，相同候选依靠稳定 ID、内容比较和 sourceRefs 合并去重，但重试输出变化时仍可能出现语义重复，不承诺绝不重复调用模型或生成近义条目。
 - Review/Idle/Stop 最终可覆盖持续变长 Session 的中段和尾部，同时保持每次维护调用的批次与字符预算有界。
 
 ## Open Questions
