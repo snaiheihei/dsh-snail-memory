@@ -1,10 +1,12 @@
 # Spec: memory-context
 
-> 2026-10-27 修订：两个独立 enable latch 和“禁止 disable”已废止；当前为关闭/workspace/global 三态单选，全局详情须带来源 workspace。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余注入与提交对账规则继续有效。
+> 2026-10-28 修订：注入协议升级为 Session 级单 active desired、单 pre-step 准入、单用户轮 committed；历史 desired/committed 保留但不代表仍可准入。2026-10-27 的关闭/workspace/global 三态单选与全局聚合契约继续有效。
+>
+> 2026-10-28 跨 workspace 修订：workspace 召回可选择任意已注册项目；`selectedWorkspaceId` 与 Session 写入 owner 分离，refresh 按目标项目独立 revision 对账。
 
 ## Objective
 
-实现每会话全局/workspace 两个单向 enable latch、一次性自动摘要注入、显式 refresh、时效提醒和受限详情读取，保证所有模型可见记忆均可由 dsh Session 重建。
+实现每会话关闭/workspace/global 三态选择、一次性自动摘要注入、显式 refresh、跨 workspace 召回、时效提醒和受限详情读取，保证所有模型可见记忆均可由 dsh Session 重建，且召回选择不改变自动蒸馏与显式写入归属。
 
 ## Tech Stack
 
@@ -49,13 +51,16 @@ agent.inject(createUserMessage({
 
 ## Injection Semantics
 
-- 新会话无状态即两层 disabled；API 不接受 disable。
-- enable 原子持久化 latch 和 desired revision，再尝试排队；失败可重试，不把 queued 当 committed。
-- 每层仅自动 desired 一次；refresh 仅在当前 revision 高于该层最新 desired/committed revision 时创建新 desired。
-- 快照追加到已有上下文之后；运行中调用不保证打断当前 step，而是等待后续可 admitted 的输入。取消/dispose 可丢弃队列，恢复时按 desired/committed 对账。
-- 相同 injection id 不得重复 committed 计数；重复通知不重复 token 统计。
-- 已提交快照永不 replace；忘记只阻止未来注入和详情读取。
-- `snail_memory_read` 仅接受当前 Session 已启用 scope 和已知 MemoryId，不开放任意路径。
+- 新会话无状态即两层 disabled；关闭/workspace/global 为三态单选。每个 Session 同时最多一个 `activeDesired = { layer, injectionId }`，历史 desired 仅用于准入后的提交对账，不再都具有待注入资格。
+- enable(workspace) 可携带任意已注册 `workspaceId`，包括非 Session 所属项目；Ungrouped Session 也可显式选择已注册项目。`selectedWorkspaceId` 只决定 workspace 快照、refresh 和详情读取，原 `workspaceId` 仍是 Session 自动蒸馏与显式写入归属，召回选择不得覆盖它。
+- enable 原子持久化层选择、召回项目和 active desired，再尝试排队；只有重复选择当前层且 workspace 选择相同才幂等恢复，切换层或召回项目时按目标 scope 当前 revision 渲染新代，不能复用旧 automatic desired。
+- refresh 仅在当前 scope revision 高于该 scope 最新 desired revision 时创建新代；不同 workspace 的 revision 分别对账，不得跨项目取最大值。同一发送前多次 refresh 只保留最新 active desired。disable 清除 active desired。
+- restore 先按 Session 中已提交的 Snail `user/message` 对账，再通过公开 `agent.inbox.replace/remove` 收敛未 claim 消息：保留一个 active 快照，移除 stale/duplicate 快照，缺少 active 时才 `agent.inject()`。普通用户和其他插件消息不得被修改。
+- `agent/pre-step` 必须先 `await next()`，再过滤最终 enter decision。每个 turn 最多准入一份与 active desired 匹配的 Snail 快照；已 claim 的 stale 快照在此拦截，新 active 等后续提交，不插入当前 decision。reject decision 原样返回。
+- pre-step 记录实际 admitted injection id。post-commit 只按该 id 提交；pre-step 后发生 switch/refresh 时，旧 admitted 仍如实 committed，新 active 保持 pending。每个 turn 的后续 step 不得再准入第二份 Snail 快照；被过滤的新 active 在 `agent/status` 回到 idle 后通过 restore 重新排队。
+- 相同 injection id 不得重复 committed 计数；重复通知不重复 token 统计。重启时即使插件尚未持久化 committed，也能从 Session 历史补齐并避免再次注入；只读 Host 同样根据 Session 历史抑制重复注入，但不尝试写入 committed。
+- 已提交快照和 committed 历史永不 replace 或追溯改写；忘记只影响未来快照和详情读取，也不改变蒸馏游标。
+- `snail_memory_read` 仅接受当前 Session 已启用 scope 和已知 MemoryId；workspace 层按 `selectedWorkspaceId` 读取，不开放任意路径。
 - `readDetail()` 异步按父索引中的 id/revision 读取目标权威详情记录；enable、refresh 和快照渲染只消费内存父索引，不预读完整详情。工具输出契约不因存储懒加载而改变。
 
 ### 大详情读取契约
@@ -77,10 +82,13 @@ agent.inject(createUserMessage({
 
 ## Testing Strategy
 
-- 默认 disabled、重复 enable 幂等、disable 请求拒绝、两层独立。
-- 自动只一次、refresh 同 revision no-op、新 revision 追加。
-- queued 后重启、commit 后重启、重复 session/event、取消和 dispose。
-- workspace 缺失/删除、Ungrouped、详情工具越权。
+- 默认 disabled、重复 enable 同一召回项目幂等、disable 撤回未提交 active、两层切换只留一份 pending。
+- workspace A→B 直接切换只留一份 active/pending，快照与详情来自 B，Session 写入 owner 保持不动；Ungrouped 可选择已注册项目。
+- 同 scope 同 revision refresh no-op；另一 workspace 的更高 revision 不阻塞当前项目刷新；多次新 revision refresh 合并为最新 active。
+- pre-step 保留普通消息和下游 decision，过滤 stale/duplicate Snail；同 turn 后续 step 不再准入。
+- pre-step 后 switch/refresh 仍提交 admitted 旧代，新代等待后续 turn；未 admitted 的 stale 事件不得 committed。
+- queued 后重启最多恢复一份；Session 已提交但 committed 尚未落盘的崩溃窗口不会重复注入；重复 session/event 幂等。
+- workspace 缺失/删除、未注册项目和详情工具越权。
 - 大详情默认清单无正文、指定单片无其他正文、未知分片未找到、未分片读取完全兼容。
 - 快照包含 revision、生成时间、天数提醒、不可信提示，且正文可重建。
 - 验证估算 token 只统计已提交 injection。
@@ -93,8 +101,8 @@ agent.inject(createUserMessage({
 
 ## Success Criteria
 
-- reload、Host 重启和另一浏览器均恢复相同开关与提交状态。
-- enable 后最新可用摘要只自动注入一次，refresh 语义符合上述约定。
+- reload、Host 重启和另一浏览器均恢复相同开关、召回项目与提交状态。
+- enable 后最新可用摘要只自动注入一次；跨 workspace 切换仍保持单 active，refresh 按当前项目独立 revision 对账。
 - 所有进入模型的记忆均表现为普通 Session 用户/工具事件。
 - 大详情默认读取不返回正文，单片读取只返回目标分片；未分片与越权行为无回归。
 - 无 system prompt 头部污染，无记忆删除或分片引起的对话修改。

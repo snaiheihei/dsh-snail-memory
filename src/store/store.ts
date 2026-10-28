@@ -37,12 +37,29 @@ function emptyLayer() {
 }
 
 function emptySession(sessionId: string): SessionMemoryState {
-  return { sessionId, layers: { global: emptyLayer(), workspace: emptyLayer() } }
+  return { sessionId, activeDesired: null, layers: { global: emptyLayer(), workspace: emptyLayer() } }
 }
 
 function normalizeSessionSelection(state: SessionMemoryState): SessionMemoryState {
   // Legacy builds allowed both latches. Prefer the narrower workspace scope.
   if (state.layers.global.enabled && state.layers.workspace.enabled) state.layers.global.enabled = false
+  const legacy = state.activeDesired === undefined
+  const active = state.activeDesired
+  const activeLayer = active ? state.layers[active.layer] : undefined
+  const activeValid = active !== null && active !== undefined && activeLayer?.enabled === true
+    && activeLayer.desired.some(item => item.injectionId === active.injectionId)
+    && !activeLayer.committed.some(item => item.injectionId === active.injectionId)
+  if (activeValid) return state
+
+  state.activeDesired = null
+  if (!legacy) return state
+  // A legacy Session could have several independently pending generations.
+  // Only its latest desired survives migration; older generations are superseded.
+  const layer = state.layers.workspace.enabled ? 'workspace' : state.layers.global.enabled ? 'global' : null
+  const latest = layer ? state.layers[layer].desired.at(-1) : undefined
+  if (layer && latest && !state.layers[layer].committed.some(item => item.injectionId === latest.injectionId)) {
+    state.activeDesired = { layer, injectionId: latest.injectionId }
+  }
   return state
 }
 
@@ -439,10 +456,21 @@ export class MemoryStore {
   }
 }
 
+export function activeInjection(state: SessionMemoryState): {
+  readonly layer: 'global' | 'workspace'
+  readonly desired: DesiredInjection
+} | null {
+  const active = state.activeDesired
+  if (!active || !state.layers[active.layer].enabled) return null
+  const layerState = state.layers[active.layer]
+  const desired = layerState.desired.find(item => item.injectionId === active.injectionId)
+  if (!desired || layerState.committed.some(item => item.injectionId === active.injectionId)) return null
+  return { layer: active.layer, desired }
+}
+
 export function pendingInjection(state: SessionMemoryState, layer: 'global' | 'workspace'): DesiredInjection[] {
-  const value = state.layers[layer]
-  const committed = new Set(value.committed.map(item => item.injectionId))
-  return value.desired.filter(item => !committed.has(item.injectionId))
+  const active = activeInjection(state)
+  return active?.layer === layer ? [active.desired] : []
 }
 
 export { emptyState }

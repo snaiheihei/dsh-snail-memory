@@ -22,6 +22,7 @@ export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: { code: 
 
 export interface SessionRequest { readonly sessionId: string }
 export interface LayerRequest extends SessionRequest { readonly layer: MemoryLayer }
+export interface EnableRequest extends LayerRequest { readonly workspaceId?: WorkspaceId }
 export interface ScopeRequest { readonly scope: MemoryScope }
 export interface ReadRequest extends ScopeRequest { readonly id: MemoryId }
 export interface WriteRequest extends ScopeRequest {
@@ -40,8 +41,9 @@ export interface SessionLayerView {
   readonly lastTokens: number
   readonly committedTokens: number
 }
-export interface SessionStateView extends Omit<SessionMemoryState, 'layers' | 'workspaceId'> {
+export interface SessionStateView extends Omit<SessionMemoryState, 'layers' | 'workspaceId' | 'selectedWorkspaceId' | 'activeDesired'> {
   readonly workspaceId?: WorkspaceId
+  readonly selectedWorkspaceId?: WorkspaceId
   readonly layers: Record<MemoryLayer, SessionLayerView>
 }
 export interface MemoryStatus extends MemoryMeta { readonly writable: boolean }
@@ -60,5 +62,5 @@ export interface WorkspaceView {
   readonly title: string
 }
 
-export type RpcPayload = SessionRequest | LayerRequest | ScopeRequest | ReadRequest | WriteRequest | CorrectRequest | MemorySettings | Record<string, never>
+export type RpcPayload = SessionRequest | LayerRequest | EnableRequest | ScopeRequest | ReadRequest | WriteRequest | CorrectRequest | MemorySettings | Record<string, never>
 export type RpcValue = SessionStateView | MemoryOperationResult | MemoryIndex | MemoryEntry | { removed: boolean } | MemoryStatus | MemorySettings | WorkspaceView[]

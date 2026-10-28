@@ -237,31 +237,36 @@ estimatedTokens(text) = ceil(text.length / 4) + 8
 
 默认摘要条目预算为 1,200 估算 token，可通过 Settings 的 `snapshotTokenBudget` 调整并持久化。Context 在每次 Enable/Refresh 创建新快照时读取当前值；已有 desired 和已注入 Session 的历史快照保持不变。超限后停止加入后续条目，并提示还有条目可按 ID 读取。该估算不是 provider 的精确计费值；固定头、workspace 引用和尾部说明也不属于当前条目循环的硬上限。
 
-### 8.3 关闭 / 当前 workspace / 全局三态单选
+### 8.3 关闭 / workspace / 全局三态单选
 
-新会话默认关闭。enable(global) 或 enable(workspace) 会原子地选中目标并取消另一层；disable 同时关闭两层。Host 和 Composer 都以这份状态为准，Ungrouped 会话不能选择 workspace，但可以选择 global。旧数据若两层同时 enabled，恢复时以 workspace 为选中层。
+新会话默认关闭。enable(global) 或 enable(workspace) 会原子地选中目标并取消另一层；disable 同时关闭两层。workspace 下拉框可选择任意已注册项目，不限于 Session 所属项目，Ungrouped 会话也可显式选择。Host 和 Composer 都以这份状态为准；旧数据若两层同时 enabled，恢复时以 workspace 为选中层。
 
-每层仍只自动创建一次快照，重复选择当前层幂等恢复；切换或关闭不删除 desired/committed，也不撤回已提交或已排队消息。restore 只恢复当前选中层的 pending injection，关闭层的历史 pending 不会继续排队。
+Session `workspaceId` 与 `selectedWorkspaceId` 分工不同：前者是自动蒸馏和显式写入的 owner，后者只决定 workspace 快照、详情读取与 refresh。召回其他项目不会改变蒸馏归属，也不会给 Ungrouped 会话增加隐式写入 owner。
 
-“只加载一次”指自动注入次数，不禁止用户显式 refresh。当前 refresh 只允许所选层，并且仅在该层 revision 高于已有 desired 最大 revision 时创建新快照，否则恢复尚未提交的注入并返回 up-to-date。
+每个 Session 同时最多一个 `activeDesired = { layer, injectionId }`。只有重复选择当前层且召回项目相同才幂等恢复；切换到另一层或另一 workspace 时按目标 scope 当前 revision 创建新代并移动 active 指针，disable 则清空 active。历史 desired/committed 仅保留作对账和审计记录，不再分别具有待注入资格。
 
-### 8.4 desired → queued → committed
+“只加载一次”指自动注入次数，不禁止用户显式 refresh。当前 refresh 只允许所选层，并且仅在当前 scope revision 高于该 scope 已有 desired 最大 revision 时创建新快照，否则恢复 active 注入并返回 up-to-date。不同 workspace 的 revision 是独立序列，不得跨项目比较。同一发送前多次切换或 refresh 只保留最新 active 快照，未提交的旧代会从 Inbox 撤回；已提交快照不受影响。
 
-`agent.inject()` 返回不代表消息已经持久化，因此插件把注入拆成三个事实：
+### 8.4 desired → queued → admitted → committed
+
+`agent.inject()` 返回不代表消息已经持久化，因此插件把注入拆成四个事实：
 
 ```text
-desired：快照、injectionId、revision 已原子持久化
+desired：快照、injectionId、revision 与唯一 active 指针已原子持久化
    ↓ restore / agent.inject
-queued：本进程已排队，用 Set 防止重复排队
+queued：本进程已将快照放入 Host Inbox，并记录 queued 标记
+   ↓ agent/pre-step 在最终 enter decision 中准入
+admitted：记录本 turn 实际允许进入模型的 injectionId
    ↓ 观察到匹配的 post-commit user/message
 committed：记录 injectionId、revision、提交时间和估算 token
 ```
 
-- 重启后重新计算 `desired - committed`，恢复所有未完成注入。
-- 重复事件不重复累计 committed 或 token。
-- 被宿主 discard 的消息只释放 queued 标记，允许以后重试。
-- 已提交快照永不 replace，删除记忆也不追溯撤回。
-- token 统计只计算 committed，不把“按钮已点击”当成“模型已经看见”。
+- restore 先扫描 Session 已提交的 Snail `user/message`，再通过公开 `agent.inbox.replace/remove` 收敛未 claim 消息：保留一个 active 快照，移除 stale/duplicate 快照，缺少 active 时才调用 `agent.inject()`；普通用户和其他插件消息不变。
+- pre-step 必须先等待下游 decision，再过滤 Snail 快照。每个 turn 最多准入一份 active 快照，后续 step 不得再准入第二份；同 turn 被过滤的新 active 在 agent 回到 idle 后重新 restore。
+- post-commit 只提交 pre-step 实际记录的 admitted ID。若 pre-step 后发生切换或 refresh，旧 admitted 代仍如实 committed，新 active 代保持 pending，不能把新代误记为已注入。
+- 重启后只恢复 active desired，而不是重新计算并恢复全部 `desired - committed`。可写 Host 会从 Session 历史补齐崩溃窗口内尚未落盘的 committed；只读 Host 也用该历史抑制重复注入，但不尝试写状态。
+- 重复事件不重复累计 committed 或 token；被宿主 discard 的消息只释放 queued 标记，允许以后重试。
+- 已提交快照和 committed 历史永不 replace 或追溯改写，删除记忆也不撤回既有对话；token 统计只计算 committed，不把“按钮已点击”当成“模型已经看见”。
 
 快照始终作为 `source: snail-memory` 的用户消息追加到历史尾部，不改 system prompt 头部。这样既保留已有 KV Cache 前缀，也让模型可见内容可由 Session 重建。
 
@@ -466,6 +471,24 @@ Review/Idle/Stop 不再分别截取转录开头，而是共享每 Session 的 ev
 追加复核又覆盖了四种交错：主锁与遗留 quarantine 同时存在时，主锁是当前事实，旧 quarantine 必须清理，不能反复恢复并移走主锁；writable 检查后的 fencing 失败由 Store 事务统一归类为只读，scheduler 暂存 intent 并在重新晋升后补持久化，其他异常不吞没；首次 lifecycle 启动与后续晋升共用 WriterLifecycleRuntime，因此首次瞬时失败也不会使插件直接卸载或失去重试；start 提交 deferred 快照期间新增的 intent 不参与本次清理，只有快照中已持久化且未更新的条目才能删除。
 
 回归测试覆盖快速重启、活跃 writer 保护、并发 stale 接管、quarantine 崩溃恢复与并存清理、旧 heartbeat 隔离、晋升期间持续心跳、正常释放后的状态重载、lifecycle 暂停/恢复、首次及后续启动失败重试、只读和 fencing 竞争事件补持久化，以及启动提交期间的 deferred intent 保留。最终自动化结果为 31 个测试文件、179 条测试，并通过 typecheck、lint 和 build；真实定时器的隔离 Temp 目录冒烟同时验证了 stale 晋升与正常释放后的第二次接管。未通过重新安装或重启用户真实 Host 做验收。
+
+### 阶段十：从双层独立 pending 演进为 Session 级单快照协议
+
+三态单选只限制了 enabled 状态，旧实现仍让两层各自的未完成 desired 都具有恢复资格，因此切换层、连续 refresh 或重启对账时可能叠加多份快照。此次修复把不变量收敛为：每个 Session 同时最多一个 active desired，每次 pre-step 最多准入一份 Snail 快照，每次用户提交最多新增一条 committed；历史 committed 保留且不追溯改写。
+
+enable、切换和 refresh 在 Store 事务中移动唯一 active 指针。restore 先按 Session 历史对账，再用公开 Inbox replace/remove 收敛未 claim 的 stale/duplicate 快照；pre-step 等待下游 decision 后执行最终准入过滤，并记录实际 admitted ID，post-commit 只提交该 ID。这样 pre-step 后的切换或 refresh 不会把新代误记为已提交，同 turn 后续 step 也不会准入第二份；被推迟的新代在 agent 回到 idle 后恢复。
+
+重启对账覆盖“Session 已提交、插件 committed 尚未落盘”的崩溃窗口：可写 Host 补齐 committed，只读 Host 仅据 Session 历史抑制重复注入。自动化契约覆盖层切换、连续 refresh、重复 enable、disable 撤回、提交竞态、同 turn 延迟、普通与下游消息保留、重启、重复通知和只读恢复。该增量全量自动化结果为 31 个测试文件、187 条测试，并通过 typecheck、lint 和 build。语义近重复仍属于独立的记忆内容去重问题，不由注入协议伪装解决；本增量未重新执行真实 Host/UI/模型验收。
+
+### 阶段十一：从当前项目召回演进为可选 workspace 召回
+
+此前 Composer 虽能列出其他 workspace，却只允许启用 Session 所属项目，Host 也没有独立保存召回选择。此次演进让 enable(workspace) 接受任意已注册 workspace id，Ungrouped Session 同样可显式选择；已启用 A 时可直接切换 B，只有当前层且召回项目相同的重复 enable 才幂等返回。
+
+存储把 Session `workspaceId` 与 `selectedWorkspaceId` 分开：前者继续作为自动蒸馏和显式写入 owner，后者只服务快照、refresh 和详情读取。因此召回其他项目不会把后续对话蒸馏到该项目，也不会给 Ungrouped 增加隐式写入归属。workspace 切换仍移动唯一 active desired，不增加第二份 pending 快照，既有 committed 历史保持不变。
+
+不同 workspace 的 revision 是独立序列。workspace desired/committed 新增可选 `workspaceId`，refresh 和公共 Session 状态只按当前召回项目对账，避免 A 的较高 revision 让 B 的新记忆被误判为 up-to-date。旧版缺省该字段的 workspace 记录按 Session owner 解释；切到其他项目时不会误算，回到 owner 或读取旧状态时也不会漏算 revision。global 动态聚合及 committed token 的全 Session 统计不变。
+
+自动化契约覆盖非当前项目与 Ungrouped 启用、RPC 参数校验、A→B 单 active 切换、跨项目详情读取、owner 不变、重复启用、独立 revision 刷新，以及旧版无项目字段记录的 refresh 和公共状态兼容。该增量全量自动化结果为 31 个测试文件、194 条测试，并通过 typecheck、lint 和 build；未重新执行真实 Host/UI/模型验收，也未安装到真实 Host 或重启用户进程。
 
 ## 14. 当前边界与后续演进方向
 

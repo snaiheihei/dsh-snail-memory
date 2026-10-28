@@ -115,6 +115,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     return undefined
   })
   ctx.on('agent/inbox/discarded', ({ agent, message }) => memories.handleDiscarded(agent.session.id, message))
+  ctx.on('agent/pre-step', ({ agent, messages, turn, step }, next) =>
+    memories.handlePreStep(agent, { messages, turn, step }, next))
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (status !== 'idle') return
+    // A refreshed generation claimed in a later step of the same turn is deferred until the agent settles.
+    void memories.restore(agent).catch(() => {
+      ctx.logger.warn('[snail-memory] Could not restore a deferred memory injection')
+    })
+  })
   ctx.on('agent/disposed', ({ agent }) => {
     void lifecycle.handleSessionEvent(agent.session.id, { type: 'agent/stop', data: {} }).catch(() => {
       ctx.logger.warn('[snail-memory] Could not schedule session-end distillation')

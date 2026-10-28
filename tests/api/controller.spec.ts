@@ -29,14 +29,34 @@ async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'snail-memory-api-'))
   roots.push(root)
   const store = await open(root)
+  await store.updateSessionState('session-1', state => { state.workspaceId = workspaceId('workspace-1') })
   const context = new MemoryContextService(store, {})
   const messages: UserMessage[] = []
-  const agent = { session: { id: 'session-1' }, inject(message: UserMessage) { messages.push(message) } }
+  let pending: UserMessage[] = []
+  const agent = {
+    session: { id: 'session-1', snapshotEvents: () => [] },
+    inbox: {
+      get nextTurn() { return pending },
+      nextStep: [],
+      remove(messageId: UserMessage['id']) {
+        const before = pending.length
+        pending = pending.filter(message => message.id !== messageId)
+        return pending.length !== before
+      },
+      replace(messageId: UserMessage['id'], replacement: UserMessage) {
+        const index = pending.findIndex(message => message.id === messageId)
+        if (index < 0) return false
+        pending[index] = replacement
+        return true
+      },
+    },
+    inject(message: UserMessage) { messages.push(message); pending.push(message) },
+  }
   const controller = new MemoryController(store, context, {
     resolveSession(sessionId) {
       return sessionId === 'session-1' ? { agent, workspaceId: workspaceId('workspace-1') } : undefined
     },
-    isWorkspace: id => id === 'workspace-1',
+    isWorkspace: id => id === 'workspace-1' || id === 'workspace-2',
     now: () => new Date('2026-10-26T00:00:00.000Z'),
   })
   return { root, store, context, controller, agent, messages }
@@ -73,7 +93,50 @@ describe('MemoryController', () => {
     await expect(controller.call('enable', { sessionId: 'session-1', layer: 'workspace' })).resolves.toMatchObject({ status: 'enabled' })
     expect(messages).toHaveLength(1)
     expect(store.getSessionState('session-1').workspaceId).toBe('workspace-1')
+    expect(store.getSessionState('session-1').selectedWorkspaceId).toBe('workspace-1')
     await expect(controller.call('refresh', { sessionId: 'session-1', layer: 'workspace' })).resolves.toMatchObject({ status: 'up-to-date' })
+  })
+
+  it('enables another workspace without changing the Session distillation owner', async () => {
+    const { store, context, controller, messages } = await setup()
+    const other = workspaceId('workspace-2')
+    const entry = await store.upsert({
+      scope: { kind: 'workspace', workspaceId: other }, category: 'project-convention',
+      summary: 'Other project convention', detail: 'Read the other project on demand',
+      sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    await expect(controller.call('enable', {
+      sessionId: 'session-1', layer: 'workspace', workspaceId: other,
+    })).resolves.toMatchObject({ status: 'enabled' })
+
+    const state = store.getSessionState('session-1')
+    expect(state.workspaceId).toBe('workspace-1')
+    expect(state.selectedWorkspaceId).toBe(other)
+    expect(controller.workspaceForSession('session-1')).toBe('workspace-1')
+    expect(messages[0]?.content[0]).toMatchObject({ text: expect.stringContaining('Other project convention') })
+    await expect(context.readDetail('session-1', 'workspace', entry.id)).resolves.toMatchObject({
+      id: entry.id, detail: 'Read the other project on demand',
+    })
+    await expect(controller.call('getSessionState', { sessionId: 'session-1' })).resolves.toMatchObject({
+      workspaceId: 'workspace-1', selectedWorkspaceId: other,
+    })
+  })
+
+  it('reports legacy workspace desired revisions through the Session owner', async () => {
+    const { store, controller } = await setup()
+    const owner = workspaceId('workspace-1')
+    await store.upsert({
+      scope: { kind: 'workspace', workspaceId: owner }, category: 'project-convention',
+      summary: 'Legacy revision', detail: 'Legacy revision', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    await controller.call('enable', { sessionId: 'session-1', layer: 'workspace' })
+    await store.updateSessionState('session-1', state => {
+      Reflect.deleteProperty(state.layers.workspace.desired[0]!, 'workspaceId')
+    })
+
+    const view = await controller.call('getSessionState', { sessionId: 'session-1' })
+    expect(view.layers.workspace.desiredRevision).toBe(1)
   })
 
   it('returns durable session state with pending rather than acknowledged token counts', async () => {

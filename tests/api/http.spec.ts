@@ -60,6 +60,20 @@ describe('Snail Memory HTTP RPC', () => {
     expect(response.body).toMatchObject({ ok: true, value: { method: 'disable', payload: { sessionId: 'session-1' } } })
   })
 
+  it('validates an explicit workspace recall scope for enable', async () => {
+    const { handler } = setup(async (method, payload) => ({ method, payload }))
+    const response = await request(handler, {
+      url: '/snail-memory/rpc/enable',
+      body: JSON.stringify({ sessionId: 'session-1', layer: 'workspace', workspaceId: 'workspace-2' }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      value: { method: 'enable', payload: { sessionId: 'session-1', layer: 'workspace', workspaceId: 'workspace-2' } },
+    })
+  })
+
   it('rejects unknown methods and non-POST transport without entering the controller', async () => {
     let calls = 0
     const { handler } = setup(async () => { calls += 1; return {} })

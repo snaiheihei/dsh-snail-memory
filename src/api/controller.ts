@@ -1,5 +1,5 @@
 import type {
-  CorrectRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, ScopeRequest, SessionRequest,
+  CorrectRequest, EnableRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, ScopeRequest, SessionRequest,
   SessionStateView, WorkspaceView, WriteRequest, RpcPayload, RpcValue, RpcMethod,
 } from '../contract.js'
 import type { MemoryContextService, InjectionAgent, MemoryOperationResult } from '../context/service.js'
@@ -48,7 +48,8 @@ export class MemoryController {
 
   call(method: 'getSessionState', payload: SessionRequest): Promise<SessionStateView>
   call(method: 'disable', payload: SessionRequest): Promise<MemoryOperationResult>
-  call(method: 'enable' | 'refresh', payload: LayerRequest): Promise<MemoryOperationResult>
+  call(method: 'enable', payload: EnableRequest): Promise<MemoryOperationResult>
+  call(method: 'refresh', payload: LayerRequest): Promise<MemoryOperationResult>
   call(method: 'list', payload: ScopeRequest): Promise<MemoryIndex>
   call(method: 'read', payload: ReadRequest): Promise<MemoryEntry>
   call(method: 'remove', payload: ReadRequest): Promise<{ removed: boolean }>
@@ -86,34 +87,43 @@ export class MemoryController {
     const resolvedWorkspace = state.workspaceId ?? this.options.resolveSession(sessionId)?.workspaceId
     const layerView = (layer: 'global' | 'workspace') => {
       const value = state.layers[layer]
-      const committed = value.committed
+      const selected = layer === 'workspace' ? state.selectedWorkspaceId : undefined
+      const desired = selected === undefined ? value.desired : value.desired.filter(item => (item.workspaceId ?? state.workspaceId) === selected)
+      const committed = selected === undefined ? value.committed : value.committed.filter(item => (item.workspaceId ?? state.workspaceId) === selected)
       return {
         enabled: value.enabled,
-        desiredRevision: value.desired.at(-1)?.revision ?? null,
+        desiredRevision: desired.at(-1)?.revision ?? null,
         committedRevision: committed.at(-1)?.revision ?? null,
         pending: pendingInjection(state, layer).length,
         lastTokens: committed.at(-1)?.tokens ?? 0,
-        committedTokens: committed.reduce((total, item) => total + item.tokens, 0),
+        committedTokens: value.committed.reduce((total, item) => total + item.tokens, 0),
       }
     }
     return {
       sessionId,
       ...(resolvedWorkspace ? { workspaceId: resolvedWorkspace } : {}),
+      ...(state.selectedWorkspaceId ? { selectedWorkspaceId: state.selectedWorkspaceId } : {}),
       layers: { global: layerView('global'), workspace: layerView('workspace') },
     }
   }
 
-  private async enable(payload: LayerRequest, refresh: boolean): Promise<MemoryOperationResult> {
+  private async enable(payload: EnableRequest, refresh: boolean): Promise<MemoryOperationResult> {
     const resolved = this.options.resolveSession(payload.sessionId)
     if (!resolved) throw new MemoryApiError('session-not-found', 'The session is not live.', 404)
-    return refresh
-      ? this.context.refresh(resolved.agent, payload.layer)
-      : this.context.enable(resolved.agent, payload.layer, resolved.workspaceId)
+    if (refresh) return this.context.refresh(resolved.agent, payload.layer)
+    if (payload.layer === 'global') return this.context.enable(resolved.agent, payload.layer)
+    const selectedWorkspaceId = payload.workspaceId ?? resolved.workspaceId
+    if (!selectedWorkspaceId) {
+      throw new MemoryApiError('workspace-required', 'Select a registered workspace to enable workspace memory.', 400)
+    }
+    this.assertWorkspace({ kind: 'workspace', workspaceId: selectedWorkspaceId })
+    return this.context.enable(resolved.agent, payload.layer, selectedWorkspaceId)
   }
 
   private async disable(sessionId: string): Promise<MemoryOperationResult> {
-    if (!this.options.resolveSession(sessionId)) throw new MemoryApiError('session-not-found', 'The session is not live.', 404)
-    return this.context.disable(sessionId)
+    const resolved = this.options.resolveSession(sessionId)
+    if (!resolved) throw new MemoryApiError('session-not-found', 'The session is not live.', 404)
+    return this.context.disable(resolved.agent)
   }
 
   private list(scope: MemoryScope): MemoryIndex {

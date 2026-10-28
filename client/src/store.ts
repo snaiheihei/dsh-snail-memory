@@ -1,5 +1,5 @@
 import type { MemorySettings, SessionStateView, WorkspaceView } from '../../src/contract.js'
-import type { MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope } from '../../src/store/types.js'
+import type { MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope, WorkspaceId } from '../../src/store/types.js'
 import type { MemoryOperationResult, MemoryRpc } from './rpc.js'
 
 interface StoreOptions {
@@ -171,8 +171,8 @@ export class MemoryClientStore {
     return this.rpc.call('read', { scope, id })
   }
 
-  enable(sessionId: string, layer: MemoryLayer): Promise<MemoryOperationResult> {
-    return this.mutateLayer('enable', sessionId, layer)
+  enable(sessionId: string, layer: MemoryLayer, workspaceId?: WorkspaceId): Promise<MemoryOperationResult> {
+    return this.mutateLayer('enable', sessionId, layer, workspaceId)
   }
 
   disable(sessionId: string): Promise<MemoryOperationResult> {
@@ -213,16 +213,18 @@ export class MemoryClientStore {
     this.listeners.clear()
   }
 
-  private mutateLayer(method: 'enable' | 'refresh', sessionId: string, layer: MemoryLayer): Promise<MemoryOperationResult>
+  private mutateLayer(method: 'enable' | 'refresh', sessionId: string, layer: MemoryLayer, workspaceId?: WorkspaceId): Promise<MemoryOperationResult>
   private mutateLayer(method: 'disable', sessionId: string): Promise<MemoryOperationResult>
-  private mutateLayer(method: 'enable' | 'disable' | 'refresh', sessionId: string, layer?: MemoryLayer): Promise<MemoryOperationResult> {
-    const key = `${method}:${sessionId}:${layer ?? ''}`
+  private mutateLayer(method: 'enable' | 'disable' | 'refresh', sessionId: string, layer?: MemoryLayer, workspaceId?: WorkspaceId): Promise<MemoryOperationResult> {
+    const key = `${method}:${sessionId}:${layer ?? ''}:${workspaceId ?? ''}`
     const existing = this.mutations.get(key)
     if (existing !== undefined) return existing
     const operation = (async () => {
       const result = method === 'disable'
         ? await this.rpc.call(method, { sessionId })
-        : await this.rpc.call(method, { sessionId, layer: layer! })
+        : method === 'enable'
+          ? await this.rpc.call(method, { sessionId, layer: layer!, ...(workspaceId === undefined ? {} : { workspaceId }) })
+          : await this.rpc.call(method, { sessionId, layer: layer! })
       this.trackedSessions.add(sessionId)
       await this.notifyChanged()
       return result

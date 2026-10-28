@@ -85,7 +85,14 @@ export function validatePayload(method: RpcMethod, payload: unknown): RpcPayload
     case 'enable':
     case 'refresh': {
       if (input.layer !== 'global' && input.layer !== 'workspace') throw new MemoryApiError('invalid-request', 'Invalid memory layer.')
-      return { sessionId: session(input.sessionId)!, layer: input.layer }
+      if (input.workspaceId !== undefined && (method !== 'enable' || input.layer !== 'workspace')) {
+        throw new MemoryApiError('invalid-request', 'workspaceId is only valid when enabling workspace memory.')
+      }
+      return {
+        sessionId: session(input.sessionId)!,
+        layer: input.layer,
+        ...(input.workspaceId === undefined ? {} : { workspaceId: workspaceId(string(input.workspaceId, 'workspaceId')!) }),
+      }
     }
     case 'list': return { scope: scope(input.scope) }
     case 'read':

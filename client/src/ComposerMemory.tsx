@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
-import type { MemoryLayer } from '../../src/store/types.js'
+import type { MemoryLayer, WorkspaceId } from '../../src/store/types.js'
 import { MemoryIcon, RefreshIcon } from './icons.js'
 import type { MemoryCopyKey, MemoryTranslator } from './locale.js'
 import type { MemoryClientStore } from './store.js'
@@ -16,7 +16,7 @@ type Message = { readonly sessionId: string; readonly selection: MemoryLayer; re
 export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
   useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const [open, setOpen] = useState(false)
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(null)
+  const [selectedWorkspace, setSelectedWorkspace] = useState<WorkspaceId | null>(null)
   const [operation, setOperation] = useState<Operation | null>(null)
   const [feedback, setFeedback] = useState<Message | null>(null)
   const [error, setError] = useState<Message | null>(null)
@@ -67,15 +67,14 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
   const sessionError = store.getSessionError(sessionId)
   const workspaces = store.getWorkspaces()
   const workspacesError = store.getWorkspacesError()
-  const unavailable = state?.workspaceId === undefined
   const activeLayer: MemoryLayer | null = state?.layers.workspace.enabled ? 'workspace' : state?.layers.global.enabled ? 'global' : null
   const busy = operation?.sessionId === sessionId
+  const enabledWorkspaceId = state?.selectedWorkspaceId ?? state?.workspaceId
   const selectedWorkspaceId = selectedWorkspace !== null && workspaces?.some(item => item.id === selectedWorkspace)
     ? selectedWorkspace
-    : state?.workspaceId !== undefined && workspaces?.some(item => item.id === state.workspaceId)
-      ? state.workspaceId
+    : enabledWorkspaceId !== undefined && workspaces?.some(item => item.id === enabledWorkspaceId)
+      ? enabledWorkspaceId
       : workspaces?.[0]?.id
-  const workspaceMismatch = selectedWorkspaceId !== undefined && selectedWorkspaceId !== state?.workspaceId
 
   const run = async (selection: MemoryLayer, method: Operation['method']): Promise<void> => {
     if (operation !== null) return
@@ -85,7 +84,7 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
     setError(null)
     try {
       const result = method === 'disable' ? await store.disable(sessionId)
-        : method === 'enable' ? await store.enable(sessionId, selection)
+        : method === 'enable' ? await store.enable(sessionId, selection, selection === 'workspace' ? selectedWorkspaceId : undefined)
           : await store.refresh(sessionId, selection)
       if (!mounted.current || currentSession.current !== sessionId) return
       const suffix = selection === 'global' ? 'Global' : 'Workspace'
@@ -117,8 +116,9 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
   }
 
   const enableButton = (layer: MemoryLayer) => {
-    const enabled = activeLayer === layer
-    const disabled = state === undefined || busy || (layer === 'workspace' && (unavailable || workspaceMismatch || workspaces === undefined || workspaces.length === 0))
+    const enabled = activeLayer === layer && (layer === 'global' || selectedWorkspaceId === enabledWorkspaceId)
+    const disabled = state === undefined || busy || (layer === 'workspace'
+      && (selectedWorkspaceId === undefined || workspaces === undefined || workspaces.length === 0))
     return <button
       type="button"
       className="snail-memory-enable"
@@ -152,9 +152,9 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
           <select
             aria-label={t('workspaceTab')}
             value={selectedWorkspaceId ?? ''}
-            disabled={unavailable || busy || workspaces === undefined || workspaces.length === 0}
+            disabled={busy || workspaces === undefined || workspaces.length === 0}
             onChange={event => {
-              setSelectedWorkspace(event.target.value)
+              setSelectedWorkspace(event.target.value as WorkspaceId)
               setFeedback(null)
               setError(null)
             }}
@@ -165,8 +165,6 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
           {enableButton('workspace')}
           {workspaces === undefined && workspacesError === undefined && <span className="snail-memory-feedback" role="status">{t('loading')}</span>}
           {workspacesError !== undefined && <span className="snail-memory-feedback snail-memory-error" role="alert">{workspacesError}</span>}
-          {unavailable && <span className="snail-memory-feedback">{t('ungrouped')}</span>}
-          {workspaceMismatch && <span className="snail-memory-feedback">{t('workspaceSelectionUnavailable')}</span>}
           {rowMessages('workspace')}
         </div>
         <div className="snail-memory-row snail-memory-refresh-row">

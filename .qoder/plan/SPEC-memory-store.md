@@ -3,6 +3,8 @@
 > 2026-10-27 修订：独立 global 条目和双层独立开关已废止；global 改为所有 workspace 的动态只读聚合，旧 global 数据仅兼容保留。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余存储与故障恢复规则继续有效。
 >
 > 2026-10-28 修订：修复快速重启留下的新鲜旧锁使新 Host 永久只读的问题。只读 Host 必须持续重试，在锁释放或 stale 后完成状态恢复并自动晋升；活跃 writer 仍受单写者保护。
+>
+> 2026-10-28 跨 workspace 修订：Session 写入 owner 与召回选择分离，workspace desired/committed 可记录来源项目以独立对账 revision；旧记录保持可选兼容。
 
 ## Objective
 
@@ -53,7 +55,9 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - WriterLock 在持有锁时通过本代 FileHandle 续心跳，在未持有锁时按同一周期间隔重试。stale 回收必须核对 quarantine 中移出的原始锁内容，误移新锁时用硬链接恢复；锁缺失时恢复崩溃遗留的 quarantine，主锁仍存在时则把遗留 quarantine 作为过期残留清理，不得反复移走当前主锁。启动时仍新鲜、随后才 stale 的旧锁与启动时已 stale 的锁都必须可恢复；锁被正常释放后同样允许接管。晋升与 heartbeat 解耦，晋升前重新读取最新 v2（或兼容迁移 v1）、恢复 pending 投影，并在各共享写入阶段续租验权，完成后才发布 writable；活跃 writer 心跳有效时不得抢锁。Store 事务边界把可识别的所有权/fencing 异常统一转换为 `MemoryStoreReadonlyError`，普通 I/O 和编程错误仍按原类别抛出。writable 变化通知 Host 启停 lifecycle，首次及后续准备或启动失败都在当前可写期间自动重试；暂停、只读或验权竞争期间收到的新 intent 在可写启动后补持久化。`start()` 必须提交 deferred 快照，并且只清理该快照中已经持久化且当前值未变化的条目；提交期间新增或更新的 intent 必须保留到后续启动。卸载停止监控、重试并清理 timer。
 - `audit.v1.jsonl` 只记录操作、id、revision、时间和脱敏结果，不记录记忆正文、秘密或完整提示词。
 - `global/INDEX.md` 包含全局条目与所有 workspace 的 id、条目数、revision、更新时间引用；不复制 workspace 详情。
-- 每会话独立保存两个层的 `enabled`、`desiredInjections`、已提交 injection id/revision 和估算 token，以及可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。
+- 每会话独立保存两个层的 `enabled`、`desired`、已提交 injection id/revision 和估算 token，以及唯一 `activeDesired` 和可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。
+- Session `workspaceId` 是自动蒸馏与显式写入的 owner；可选 `selectedWorkspaceId` 是独立的 workspace 召回选择，只用于快照、refresh 和详情读取。enable 其他已注册项目不得改写 owner，Ungrouped 也不会因召回选择获得隐式写入归属。
+- workspace desired/committed 可保存 `workspaceId`，用于按召回项目分别进行 revision 对账和公共状态展示；global 及旧版 workspace 记录可缺省该字段，按兼容路径处理。不同 workspace 的 revision 不得跨项目取最大值。
 - 游标更新复用 `updateSessionState` 和主串行 transaction，因此同样经过 writer queue、`lock.assertOwner()`、原子状态发布和故障恢复。游标-only 更新不推进 scope revision、不设置 dirty、不创建 desired injection 或快照。
 - MemoryEntry 删除与 Session 蒸馏游标是正交事实。单条/全部删除不得修改、重置或推进游标，不得使旧范围重新蒸馏，也不得恢复已删条目；只有宿主真实 Session 生命周期清理才可另议游标垃圾回收。
 - 普通更新不改 Session；格式迁移创建新 successor。显式隐私删除允许清理本插件旧数据世代，但不允许删除 Session 世代。
@@ -94,6 +98,7 @@ async write(entry: MemoryEntry): Promise<void> {
 - 临时目录测试全局/workspace 隔离、索引引用、revision 和重启恢复。
 - 测试忘记只删除目标条目，不影响其他条目、Session、注入历史或蒸馏游标；删除全部条目同样不触发旧范围重蒸馏。
 - 验证游标重启恢复、writer/只读边界，以及游标-only 更新不改变 scope revision、dirty 和 desired injections。
+- 验证召回选择不改变 Session 写入 owner，workspace A→B 移动唯一 active；desired/committed 按项目对账，旧版缺省 workspaceId 的记录保持兼容。
 - 模拟锁占用、stale lock、写失败、损坏 JSON、截断审计尾和崩溃残留 tmp。
 - 验证同 root 第二写者初始只读，旧 fencing token 不能提交；覆盖快速重启时旧锁先新鲜后 stale 的自动晋升、锁正常释放后的状态重载、活跃 heartbeat 不被抢占、失去所有权通知和 lifecycle 暂停/恢复。
 - 确定性交错两个 Host 的 stale 回收，验证误移新锁会恢复且只有一个获取者；覆盖 quarantine 崩溃恢复、主锁与遗留 quarantine 并存时清理残留且不活锁、旧 FileHandle heartbeat 不覆盖继任锁、晋升期间持续 heartbeat、首次及后续 Host 准备/启动失败重试、暂停/只读/fencing 验权竞争期间的 intent 补持久化，以及启动提交 deferred 快照期间新增 intent 不被清理。
@@ -114,7 +119,7 @@ async write(entry: MemoryEntry): Promise<void> {
 ## Success Criteria
 
 - 所有 CRUD 和会话状态在重启后一致；快速重启遇到尚未 stale 的旧锁时无需二次重启，锁过期或释放后可自动恢复写入和 lifecycle。
-- 全局与 workspace 索引不串层，Ungrouped 不会生成 workspace 目录。
+- 全局与 workspace 索引不串层；Ungrouped 的召回选择不会生成新 workspace 目录或隐式写入 owner。
 - 任意写失败不破坏最后一个已提交状态。
 - 忘记后 list/read 均不可取得条目，详情文件和分片目录被移除，审计无正文。
 - 大详情主索引不随分片数增长，投影与工具均可确定性重建，旧分片不残留。

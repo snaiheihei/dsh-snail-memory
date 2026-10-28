@@ -89,30 +89,40 @@ describe('ComposerMemory', () => {
     expect(rpc.count('getSessionState')).toBeGreaterThanOrEqual(2)
   })
 
-  it('selects registered workspaces but only enables the current Session workspace', async () => {
-    let workspaceEnabled = false
+  it('switches from the current workspace to another registered recall scope', async () => {
+    let workspaceEnabled = true
+    let selectedWorkspaceId: typeof WORKSPACE | undefined = WORKSPACE
     const rpc = new FakeRpc()
       .on('getSessionState', () => {
         const state = sessionState()
-        return { ...state, layers: { ...state.layers, workspace: { ...state.layers.workspace, enabled: workspaceEnabled } } }
+        return {
+          ...state,
+          ...(selectedWorkspaceId === undefined ? {} : { selectedWorkspaceId }),
+          layers: { ...state.layers, workspace: { ...state.layers.workspace, enabled: workspaceEnabled } },
+        }
       })
       .on('listWorkspaces', () => registeredWorkspaces())
-      .on('enable', () => { workspaceEnabled = true; return { status: 'enabled' as const } })
+      .on('enable', ({ workspaceId }) => {
+        workspaceEnabled = true
+        selectedWorkspaceId = workspaceId
+        return { status: 'enabled' as const }
+      })
     const store = new MemoryClientStore(rpc)
     render(<ComposerMemory sessionId="session-1" store={store} t={t} />)
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }))
     const row = screen.getByRole('group', { name: 'Workspace memory' })
     const select = await within(row).findByRole('combobox', { name: 'Workspaces' })
-    await waitFor(() => expect(within(row).getByRole('button', { name: 'Enable' })).toHaveProperty('disabled', false))
+    await waitFor(() => expect(within(row).getByRole('button', { name: 'Enabled' })).toHaveProperty('disabled', false))
 
     fireEvent.change(select, { target: { value: 'workspace-2' } })
     expect(select).toHaveProperty('value', 'workspace-2')
-    expect(within(row).getByRole('button', { name: 'Enable' })).toHaveProperty('disabled', true)
-    expect(within(row).getByText('Select the current Session workspace to enable it.')).toBeTruthy()
-    fireEvent.change(select, { target: { value: WORKSPACE } })
+    expect(within(row).getByRole('button', { name: 'Enable' })).toHaveProperty('disabled', false)
+    expect(within(row).queryByText('Select the current Session workspace to enable it.')).toBeNull()
     fireEvent.click(within(row).getByRole('button', { name: 'Enable' }))
     expect(await within(row).findByRole('button', { name: 'Enabled' })).toBeTruthy()
-    expect(rpc.calls.find(call => call.method === 'enable')?.payload).toEqual({ sessionId: 'session-1', layer: 'workspace' })
+    expect(rpc.calls.find(call => call.method === 'enable')?.payload).toEqual({
+      sessionId: 'session-1', layer: 'workspace', workspaceId: 'workspace-2',
+    })
   })
 
   it('refreshes only the enabled layer and reports up-to-date without claiming a commit', async () => {
@@ -149,7 +159,38 @@ describe('ComposerMemory', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Host unavailable')
   })
 
-  it('explains Ungrouped, empty registry, loading, and registry failures without a separate notice panel', async () => {
+  it('allows an Ungrouped session to recall a registered workspace', async () => {
+    const base = sessionState()
+    const ungrouped = { sessionId: base.sessionId, layers: base.layers }
+    let selectedWorkspaceId: typeof WORKSPACE | undefined
+    const rpc = new FakeRpc()
+      .on('getSessionState', () => ({
+        ...ungrouped,
+        ...(selectedWorkspaceId === undefined ? {} : { selectedWorkspaceId }),
+        layers: {
+          ...ungrouped.layers,
+          workspace: { ...ungrouped.layers.workspace, enabled: selectedWorkspaceId !== undefined },
+        },
+      }))
+      .on('listWorkspaces', () => registeredWorkspaces())
+      .on('enable', ({ workspaceId }) => {
+        selectedWorkspaceId = workspaceId
+        return { status: 'enabled' as const }
+      })
+    const store = new MemoryClientStore(rpc)
+    render(<ComposerMemory sessionId="session-1" store={store} t={t} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }))
+    const row = screen.getByRole('group', { name: 'Workspace memory' })
+    const select = await within(row).findByRole('combobox', { name: 'Workspaces' })
+
+    fireEvent.change(select, { target: { value: 'workspace-2' } })
+    fireEvent.click(within(row).getByRole('button', { name: 'Enable' }))
+    expect(await within(row).findByRole('button', { name: 'Enabled' })).toBeTruthy()
+    expect(within(row).queryByText('Workspace memory is unavailable for an Ungrouped session.')).toBeNull()
+    expect(rpc.calls.find(call => call.method === 'enable')?.payload).toMatchObject({ workspaceId: 'workspace-2' })
+  })
+
+  it('shows registry failures without a separate notice panel', async () => {
     const base = sessionState()
     const ungrouped = { sessionId: base.sessionId, layers: base.layers }
     const rpc = new FakeRpc()
@@ -160,7 +201,6 @@ describe('ComposerMemory', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }))
     const row = screen.getByRole('group', { name: 'Workspace memory' })
 
-    expect(await within(row).findByText('Workspace memory is unavailable for an Ungrouped session.')).toBeTruthy()
     expect(within(row).getByRole('button', { name: 'Enable' })).toHaveProperty('disabled', true)
     expect((await within(row).findByRole('alert')).textContent).toContain('Registry unavailable')
     expect(screen.queryByRole('button', { name: 'Refresh workspace memory' })).toBeNull()

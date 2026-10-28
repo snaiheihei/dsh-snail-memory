@@ -74,6 +74,8 @@ export interface MemoryIndex {
 export interface DesiredInjection {
   readonly injectionId: string
   readonly revision: number
+  /** Absent for global snapshots and legacy workspace generations. */
+  readonly workspaceId?: WorkspaceId
   readonly snapshot: string
   readonly createdAt: string
   readonly automatic: boolean
@@ -82,6 +84,8 @@ export interface DesiredInjection {
 export interface CommittedInjection {
   readonly injectionId: string
   readonly revision: number
+  /** Absent for global snapshots and legacy workspace commits. */
+  readonly workspaceId?: WorkspaceId
   readonly tokens: number
   readonly committedAt: string
 }
@@ -92,6 +96,12 @@ export interface LayerMemoryState {
   committed: CommittedInjection[]
 }
 
+/** The only generation currently eligible for Inbox restoration and pre-step admission. */
+export interface ActiveDesiredInjection {
+  readonly layer: MemoryLayer
+  readonly injectionId: string
+}
+
 export interface SessionDistillationCursor {
   lastEventSeq: number
   offset: number
@@ -100,8 +110,13 @@ export interface SessionDistillationCursor {
 
 export interface SessionMemoryState {
   readonly sessionId: string
+  /** The Session owner used for automatic distillation and explicit writes. */
   workspaceId?: WorkspaceId
+  /** The independently selectable workspace used only for recall and detail reads. */
+  selectedWorkspaceId?: WorkspaceId
   distillationCursor?: SessionDistillationCursor
+  /** Null is explicit: older superseded generations must not be resurrected after commit/disable. */
+  activeDesired: ActiveDesiredInjection | null
   readonly layers: Record<MemoryLayer, LayerMemoryState>
 }
 

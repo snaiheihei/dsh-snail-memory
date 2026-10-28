@@ -24,7 +24,11 @@ async function setup() {
   const store = await MemoryStore.open({ root, heartbeatMs: 60_000 })
   stores.push(store)
   const context = new MemoryContextService(store, {})
-  const agent = { session: { id: 'session-1' }, inject() {} }
+  const agent = {
+    session: { id: 'session-1', snapshotEvents: () => [] },
+    inbox: { nextTurn: [], nextStep: [], remove: () => false, replace: () => false },
+    inject() {},
+  }
   const tool = createMemoryReadTool(context)
   const exec = { agent } as unknown as ToolRunContext
   return { store, context, agent, tool, exec }

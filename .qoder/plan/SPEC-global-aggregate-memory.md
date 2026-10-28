@@ -1,8 +1,10 @@
 # Spec: global-aggregate-memory
 
+> 2026-10-28 修订：workspace 召回不再限 Session 所属项目；新增独立 `selectedWorkspaceId`，不改变自动蒸馏与显式写入 owner。全局动态聚合规则不变。
+
 ## Objective
 
-把全局记忆改成所有 workspace 记忆的动态、只读聚合，不再维护独立全局条目；同时把每个 Session 的记忆注入改为“关闭 / 当前 workspace / 全局”三态单选。用户选择全局时，列表、Markdown 投影、注入快照和详情读取均来自同一组 workspace 权威条目，不经过辅助模型二次整合。
+把全局记忆改成所有 workspace 记忆的动态、只读聚合，不再维护独立全局条目；同时把每个 Session 的记忆注入改为“关闭 / workspace / 全局”三态单选，其中 workspace 可选择任意已注册项目。用户选择全局时，列表、Markdown 投影、注入快照和详情读取均来自同一组 workspace 权威条目，不经过辅助模型二次整合。
 
 ### 已确认决策与假设
 
@@ -59,16 +61,17 @@ await this.store.updateSessionState(sessionId, state => {
 - global 快照直接包含预算内的各 workspace 摘要，并显示来源 workspace；不再只列 workspace 引用，也不包含旧 global 条目。
 - global 详情读取必须提供来源 workspace，避免跨 workspace 同 id 的歧义；当前 Session 必须选中 global。
 - global 与 workspace 的 Markdown 索引/核心摘要均从同一聚合规则生成。
-- 自动 Review/idle/stop 仍只写当前 workspace；整合和保留期清理只处理 workspace 条目。
+- 自动 Review/idle/stop 仍只写 Session owner `workspaceId`，不因 `selectedWorkspaceId` 改写到召回项目；整合和保留期清理只处理 workspace 条目。
 
 ### Session 三态单选
 
 - 新 Session 默认关闭。
-- enable(global) 或 enable(workspace) 原子地选中目标并取消另一层；重复选择当前层维持幂等恢复。
+- enable(global) 或 enable(workspace) 原子地选中目标并取消另一层；workspace 可选择任意已注册项目，不限于 Session 所属项目。只有重复选择当前层且召回项目相同才维持幂等恢复。
+- `selectedWorkspaceId` 只控制 workspace 召回、详情读取和 refresh；Session 原 `workspaceId` 继续控制自动蒸馏与显式写入，二者不得互相覆盖。
 - 新增 disable，将两层 enabled 都设为 false，不删除 desired/committed。
-- restore 只恢复当前选中层的 pending injection；关闭层的历史 pending 不得因重启或切换而继续排队。
-- refresh 只允许当前选中层；Ungrouped Session 仍不能选择 workspace，但可选择 global。
-- Composer 提供“关闭 / 当前 workspace / 全局”单选控件和当前层 refresh；旧 Session 的异步响应不得覆盖新 Session。
+- restore 只恢复当前选中层的 active pending injection；关闭层或旧召回项目的历史 pending 不得因重启或切换而继续排队。
+- refresh 只允许当前选中层，并按当前 global 或所选 workspace 的独立 revision 对账；Ungrouped Session 也可选择已注册 workspace 或 global。
+- Composer 提供“关闭 / workspace / 全局”三态控件、已注册 workspace 下拉框和当前层 refresh；旧 Session 的异步响应不得覆盖新 Session。
 
 ## Testing Strategy
 
@@ -76,8 +79,9 @@ await this.store.updateSessionState(sessionId, state => {
 
 - Store：global 汇总多个 workspace、排除旧 global、revision 前进、详情按来源读取、Markdown 一致。
 - Context：两层互斥、disable、旧双层状态归一化、关闭层 pending 不恢复、跨 workspace 全局快照和详情。
-- API/生命周期：disable RPC、remember global 拒绝、自动蒸馏不写 global、整合/清理不触碰旧 global。
-- Client：三态单选、切换调用、关闭调用、refresh 仅当前层、Ungrouped 和 stale response。
+- 跨项目召回：workspace A→B 只留一个 active，详情来自 B，Session 写入 owner 不变，B 的 refresh 不受 A 的 revision 阻塞。
+- API/生命周期：enable 接受已注册项目、disable RPC、remember global 拒绝、自动蒸馏不写 global 或召回项目、整合/清理不触碰旧 global。
+- Client：三态单选、任意已注册项目选择、A→B 切换、关闭调用、refresh 仅当前层、Ungrouped 和 stale response。
 - 最后运行完整测试、三种 typecheck、lint 和 build；不把单元测试等同于真实 Host/UI/模型验收。
 
 ## Boundaries
