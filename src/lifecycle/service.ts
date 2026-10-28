@@ -150,6 +150,7 @@ export class MemoryLifecycleService {
           ...(state.workspaceId === undefined ? {} : { workspaceId: state.workspaceId }),
           events,
           kind: operation,
+          consolidationCooldownHours: this.getSettings().consolidationCooldownHours,
           now: this.now,
           ...(signal === undefined ? {} : { signal }),
         })

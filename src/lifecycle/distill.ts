@@ -14,6 +14,7 @@ export interface DistillOptions {
   readonly workspaceId?: WorkspaceId
   readonly events: readonly TranscriptEvent[]
   readonly kind: 'review' | 'idle' | 'stop'
+  readonly consolidationCooldownHours: number
   readonly now?: () => Date
   readonly signal?: AbortSignal
 }
@@ -106,7 +107,7 @@ export async function distillSession(store: MemoryStore, options: DistillOptions
   if (written > 0) {
     await store.updateMeta(meta => {
       meta.dirty = true
-      meta.nextConsolidationAt = new Date(now.getTime() + 6 * 3_600_000).toISOString()
+      meta.nextConsolidationAt = new Date(now.getTime() + options.consolidationCooldownHours * 3_600_000).toISOString()
     })
   }
   await store.updateSessionState(options.sessionId, current => {
