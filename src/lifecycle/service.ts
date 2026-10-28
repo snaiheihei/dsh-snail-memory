@@ -10,6 +10,7 @@ import { scanSecrets } from '../safety/scanner.js'
 import type { MemorySettings } from '../contract.js'
 import type { MemoryStore } from '../store/store.js'
 import type { MemoryEntry, MemoryId, MemoryScope, UpsertMemoryInput } from '../store/types.js'
+import type { TranscriptEvent } from '../runtime.js'
 
 export interface MaintenanceHost {
   runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>
@@ -38,7 +39,7 @@ export interface MemoryLifecycleOptions {
   readonly consolidationCooldownHours?: number | undefined
   readonly retentionSweepHours?: number | undefined
   readonly settings?: MemorySettingsStore
-  readonly transcript?: (sessionId: string) => string | Promise<string>
+  readonly transcriptEvents?: (sessionId: string) => readonly TranscriptEvent[] | Promise<readonly TranscriptEvent[]>
   readonly onChange?: (change: { kind: string; scope: MemoryScope; ids?: readonly MemoryId[] }) => void | Promise<void>
 }
 
@@ -133,26 +134,33 @@ export class MemoryLifecycleService {
         throw new Error(`Unknown memory lifecycle intent: ${kind}`)
       }
       const state = this.store.getSessionState(sessionId)
-      const result = await distillSession(this.store, {
-        ...(this.options.model === undefined ? {} : { model: this.options.model }),
-        ...(selectedProvider === undefined ? {} : { provider: selectedProvider }),
-        ...(selectedModel === undefined ? {} : { modelName: selectedModel }),
-        sessionId,
-        ...(state.workspaceId === undefined ? {} : { workspaceId: state.workspaceId }),
-        transcript: await this.options.transcript?.(sessionId) ?? '',
-        kind: operation,
-        now: this.now,
-        ...(signal === undefined ? {} : { signal }),
-      })
-      if (result.written > 0 && state.workspaceId) {
-        await this.scheduler.markDirty()
-        await this.options.onChange?.({
-          kind: 'distill',
-          scope: { kind: 'workspace', workspaceId: state.workspaceId },
-          ids: result.entries.map(entry => entry.id),
+      const events = await this.options.transcriptEvents?.(sessionId) ?? []
+      let written = 0
+      const maxBatches = operation === 'review' ? 1 : 2
+      for (let batch = 0; batch < maxBatches; batch += 1) {
+        const result = await distillSession(this.store, {
+          ...(this.options.model === undefined ? {} : { model: this.options.model }),
+          ...(selectedProvider === undefined ? {} : { provider: selectedProvider }),
+          ...(selectedModel === undefined ? {} : { modelName: selectedModel }),
+          sessionId,
+          ...(state.workspaceId === undefined ? {} : { workspaceId: state.workspaceId }),
+          events,
+          kind: operation,
+          now: this.now,
+          ...(signal === undefined ? {} : { signal }),
         })
+        written += result.written
+        if (result.written > 0 && state.workspaceId) {
+          await this.scheduler.markDirty()
+          await this.options.onChange?.({
+            kind: 'distill',
+            scope: { kind: 'workspace', workspaceId: state.workspaceId },
+            ids: result.entries.map(entry => entry.id),
+          })
+        }
+        if (!result.processed || !result.hasMore) break
       }
-      return { written: result.written }
+      return { written }
     } catch (error) {
       await this.store.updateMeta(meta => {
         meta.dirty = true

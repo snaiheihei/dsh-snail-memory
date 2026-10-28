@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, LlmCallConfig, LlmRuntime, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
-import { DshAuxiliaryModel, renderSessionTranscript, resolveSessionWorkspace, selectModelRoute } from '../../src/runtime.js'
+import { DshAuxiliaryModel, nextDistillationBatch, renderSessionTranscript, resolveSessionWorkspace, selectModelRoute } from '../../src/runtime.js'
 
 describe('dsh runtime adapters', () => {
   it('resolves workspace membership by stable session id and preserves Ungrouped', () => {
@@ -46,6 +46,43 @@ describe('dsh runtime adapters', () => {
 
     expect(transcript).not.toContain('full memory detail')
     expect(transcript).toContain('6 tests passed')
+  })
+
+  it('batches complete turns at stable event boundaries', () => {
+    const events = [
+      { seq: 10, type: 'user/message', data: { turnId: 'turn-1', source: { kind: 'user' }, content: [{ type: 'text', text: 'first' }] } },
+      { seq: 20, type: 'assistant/message', data: { turnId: 'turn-1', message: { content: [{ type: 'text', text: 'second' }] } } },
+      { seq: 30, type: 'user/message', data: { turnId: 'turn-2', source: { kind: 'user' }, content: [{ type: 'text', text: 'third' }] } },
+    ]
+    const firstTurn = renderSessionTranscript(events.slice(0, 2))
+
+    const first = nextDistillationBatch(events, { lastEventSeq: 0, offset: 0 }, firstTurn.length)
+    const second = nextDistillationBatch(events, first.cursor, 24_000)
+
+    expect(first.text).toBe(firstTurn)
+    expect(first.cursor).toMatchObject({ lastEventSeq: 20, offset: 0 })
+    expect(first.eventSeqs).toEqual([10, 20])
+    expect(second.text).toContain('third')
+    expect(second.cursor).toMatchObject({ lastEventSeq: 30, offset: 0 })
+  })
+
+  it('uses deterministic intra-event offsets for oversized turns and messages', () => {
+    const events = [
+      { seq: 7, type: 'user/message', data: { turnId: 'large-turn', source: { kind: 'user' }, content: [{ type: 'text', text: 'a'.repeat(35) }] } },
+      { seq: 8, type: 'assistant/message', data: { turnId: 'large-turn', message: { content: [{ type: 'text', text: 'b'.repeat(35) }] } } },
+    ]
+    const expected = renderSessionTranscript(events)
+    let cursor = { lastEventSeq: 0, offset: 0 }
+    let reconstructed = ''
+
+    for (let count = 0; count < 10 && (cursor.lastEventSeq < 8 || cursor.offset > 0); count += 1) {
+      const batch = nextDistillationBatch(events, cursor, 40)
+      reconstructed += batch.text
+      cursor = batch.cursor
+    }
+
+    expect(reconstructed).toBe(expected)
+    expect(cursor).toEqual({ lastEventSeq: 8, offset: 0 })
   })
 
   it('keeps the prepared config immutable across the one-shot auxiliary dispatch', async () => {

@@ -1,10 +1,20 @@
 export const MEMORY_STYLES = `
-.snail-memory-controls { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.snail-memory-layer { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.snail-memory-controls { position: relative; display: flex; align-items: center; min-width: 0; }
+.snail-memory-controls *, .snail-memory-controls *::before, .snail-memory-controls *::after { box-sizing: border-box; }
 .snail-memory-controls button, .snail-memory-page button { min-height: 30px; font: inherit; }
-.snail-memory-controls button { padding: 3px 7px; white-space: nowrap; }
-.snail-memory-status { font-size: 11px; white-space: nowrap; }
-.snail-memory-feedback { max-width: 240px; font-size: 11px; overflow-wrap: anywhere; }
+.snail-memory-controls button { color: inherit; cursor: pointer; }
+.snail-memory-trigger, .snail-memory-refresh { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 3px 8px; white-space: nowrap; border: 0; border-radius: 6px; background: transparent; }
+.snail-memory-trigger:hover, .snail-memory-refresh:hover { background: var(--dsh-hover, #f2f4f7); }
+.snail-memory-popover { position: absolute; z-index: 20; bottom: calc(100% + 8px); inset-inline-start: 0; display: grid; gap: 6px; width: min(420px, calc(100vw - 24px)); padding: 10px; color: var(--dsh-text, #182230); border: 1px solid var(--dsh-border, #d8dce2); border-radius: 10px; background: var(--dsh-background, #fff); box-shadow: 0 8px 24px rgb(16 24 40 / 14%); }
+.snail-memory-row { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; min-width: 0; min-height: 32px; font-size: 12px; }
+.snail-memory-row-label { font-weight: 500; }
+.snail-memory-row select { flex: 1 1 150px; min-width: 0; max-width: 100%; min-height: 30px; padding: 3px 26px 3px 8px; font: inherit; color: inherit; border: 1px solid var(--dsh-border, #d8dce2); border-radius: 6px; background: var(--dsh-background, transparent); }
+.snail-memory-enable { flex: 0 0 auto; min-height: 26px !important; padding: 2px 12px; border: 1px solid var(--dsh-border, #d8dce2); border-radius: 999px; background: var(--dsh-background, transparent); }
+.snail-memory-enable:hover { background: var(--dsh-hover, #f2f4f7); }
+.snail-memory-enable[aria-pressed='true'] { color: var(--dsh-primary-text, #fff); border-color: var(--dsh-primary, #365f9d); background: var(--dsh-primary, #365f9d); }
+.snail-memory-controls button:focus-visible, .snail-memory-controls select:focus-visible { outline: 2px solid var(--dsh-focus, #365f9d); outline-offset: 2px; }
+.snail-memory-controls button:disabled, .snail-memory-controls select:disabled { opacity: .5; cursor: not-allowed; }
+.snail-memory-feedback { max-width: 100%; font-size: 11px; overflow-wrap: anywhere; }
 .snail-memory-page { box-sizing: border-box; width: 100%; max-width: 1080px; min-width: 0; margin: 0 auto; padding: 24px; overflow-x: hidden; }
 .snail-memory-page *, .snail-memory-page *::before, .snail-memory-page *::after { box-sizing: border-box; }
 .snail-memory-page header, .snail-memory-stats, .snail-memory-tabs, .snail-memory-actions { min-width: 0; }

@@ -50,7 +50,9 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - 小详情、INDEX 和 MEMORY 使用临时文件原子替换；大详情继续使用临时目录整套切换。writer 的详情读取与写入进入同一串行队列；只读 Host 读取前刷新 v2 父状态，详情记录 ENOENT 时再刷新并重试，以观察其他 Host 已提交的纠正和删除。
 - `audit.v1.jsonl` 只记录操作、id、revision、时间和脱敏结果，不记录记忆正文、秘密或完整提示词。
 - `global/INDEX.md` 包含全局条目与所有 workspace 的 id、条目数、revision、更新时间引用；不复制 workspace 详情。
-- 每会话独立保存两个层的 `enabled`、`desiredInjections`、已提交 injection id/revision 和估算 token。
+- 每会话独立保存两个层的 `enabled`、`desiredInjections`、已提交 injection id/revision 和估算 token，以及可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。
+- 游标更新复用 `updateSessionState` 和主串行 transaction，因此同样经过 writer queue、`lock.assertOwner()`、原子状态发布和故障恢复。游标-only 更新不推进 scope revision、不设置 dirty、不创建 desired injection 或快照。
+- MemoryEntry 删除与 Session 蒸馏游标是正交事实。单条/全部删除不得修改、重置或推进游标，不得使旧范围重新蒸馏，也不得恢复已删条目；只有宿主真实 Session 生命周期清理才可另议游标垃圾回收。
 - 普通更新不改 Session；格式迁移创建新 successor。显式隐私删除允许清理本插件旧数据世代，但不允许删除 Session 世代。
 
 ### 大详情分片
@@ -87,7 +89,8 @@ async write(entry: MemoryEntry): Promise<void> {
 ## Testing Strategy
 
 - 临时目录测试全局/workspace 隔离、索引引用、revision 和重启恢复。
-- 测试忘记只删除目标条目，不影响其他条目、Session 或注入历史。
+- 测试忘记只删除目标条目，不影响其他条目、Session、注入历史或蒸馏游标；删除全部条目同样不触发旧范围重蒸馏。
+- 验证游标重启恢复、writer/只读边界，以及游标-only 更新不改变 scope revision、dirty 和 desired injections。
 - 模拟锁占用、stale lock、写失败、损坏 JSON、截断审计尾和崩溃残留 tmp。
 - 验证同 root 第二写者只读，旧 fencing token 不能提交。
 - 验证 Markdown 注入转义、Unicode、CRLF/LF 与确定性输出。

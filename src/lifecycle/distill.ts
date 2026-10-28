@@ -3,6 +3,7 @@ import { prepareMemoryCandidate } from '../safety/policy.js'
 import type { MemoryStore } from '../store/store.js'
 import type { MemoryEntry, MemoryScope, MemorySourceRef, WorkspaceId } from '../store/types.js'
 import { memoryId } from '../store/types.js'
+import { nextDistillationBatch, type TranscriptEvent } from '../runtime.js'
 import { invokeAuxiliaryModel, type AuxiliaryModel } from './llm.js'
 
 export interface DistillOptions {
@@ -11,7 +12,7 @@ export interface DistillOptions {
   readonly modelName?: string
   readonly sessionId: string
   readonly workspaceId?: WorkspaceId
-  readonly transcript: string
+  readonly events: readonly TranscriptEvent[]
   readonly kind: 'review' | 'idle' | 'stop'
   readonly now?: () => Date
   readonly signal?: AbortSignal
@@ -21,6 +22,8 @@ export interface DistillResult {
   readonly written: number
   readonly rejected: number
   readonly entries: readonly MemoryEntry[]
+  readonly processed: boolean
+  readonly hasMore: boolean
 }
 
 function stableId(scope: MemoryScope, category: string, summary: string) {
@@ -29,11 +32,32 @@ function stableId(scope: MemoryScope, category: string, summary: string) {
   return memoryId(digest)
 }
 
+function mergeSourceRefs(existing: readonly MemorySourceRef[], incoming: readonly MemorySourceRef[]): MemorySourceRef[] {
+  const merged = new Map<string, MemorySourceRef>()
+  for (const ref of [...existing, ...incoming]) {
+    const previous = merged.get(ref.sessionId)
+    if (!previous) {
+      merged.set(ref.sessionId, ref)
+      continue
+    }
+    if (!ref.eventSeqs) continue
+    merged.set(ref.sessionId, {
+      sessionId: ref.sessionId,
+      eventSeqs: [...new Set([...(previous.eventSeqs ?? []), ...ref.eventSeqs])].sort((a, b) => a - b),
+    })
+  }
+  return [...merged.values()]
+}
+
 export async function distillSession(store: MemoryStore, options: DistillOptions): Promise<DistillResult> {
-  if (!options.workspaceId) return { written: 0, rejected: 0, entries: [] }
-  if (!options.model || !options.provider || !options.modelName) throw new Error('No auxiliary model route is available')
+  if (!options.workspaceId) return { written: 0, rejected: 0, entries: [], processed: false, hasMore: false }
+  const state = store.getSessionState(options.sessionId)
+  const position = state.distillationCursor ?? { lastEventSeq: 0, offset: 0 }
   const inputChars = options.kind === 'review' ? 24_000 : 48_000
-  const safe = prepareMemoryCandidate(options.transcript.slice(0, inputChars), {
+  const batch = nextDistillationBatch(options.events, position, inputChars)
+  if (!batch.text) return { written: 0, rejected: 0, entries: [], processed: false, hasMore: batch.hasMore }
+  if (!options.model || !options.provider || !options.modelName) throw new Error('No auxiliary model route is available')
+  const safe = prepareMemoryCandidate(batch.text, {
     source: 'session',
     mode: 'automatic',
   })
@@ -61,11 +85,12 @@ export async function distillSession(store: MemoryStore, options: DistillOptions
     const matching = store.list(scope).entries.find(entry => entry.category === candidate.category
       && entry.summary.trim().toLowerCase() === candidate.summary.trim().toLowerCase())
     const existing = await store.read(scope, id) ?? (matching ? await store.read(scope, matching.id) : null)
-    if (existing && existing.summary === candidate.summary.trim() && existing.detail === candidate.detail.trim()) {
+    const sourceRefs = mergeSourceRefs(existing?.sourceRefs ?? [], [{ sessionId: options.sessionId, eventSeqs: batch.eventSeqs }])
+    if (existing && existing.summary === candidate.summary.trim() && existing.detail === candidate.detail.trim()
+      && JSON.stringify(existing.sourceRefs) === JSON.stringify(sourceRefs)) {
       entries.push(existing)
       continue
     }
-    const sourceRefs: MemorySourceRef[] = [{ sessionId: options.sessionId }]
     const saved = await store.upsert({
       id: existing?.id ?? id,
       scope,
@@ -84,5 +109,8 @@ export async function distillSession(store: MemoryStore, options: DistillOptions
       meta.nextConsolidationAt = new Date(now.getTime() + 6 * 3_600_000).toISOString()
     })
   }
-  return { written, rejected: parsed.rejected, entries }
+  await store.updateSessionState(options.sessionId, current => {
+    current.distillationCursor = { ...batch.cursor, updatedAt: now.toISOString() }
+  })
+  return { written, rejected: parsed.rejected, entries, processed: true, hasMore: batch.hasMore }
 }

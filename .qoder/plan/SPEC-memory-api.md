@@ -37,7 +37,7 @@ tests/api/               → 路由、校验、错误和命令测试
 - `getSessionState(sessionId)`：返回两层 latch、desired/committed revision、最近/累计估算 token、workspace 和 queued 状态。
 - `enable(sessionId, layer)`、`refresh(sessionId, layer)`：单向开关与追加快照。
 - `list(scope, sessionId?)`：返回有效索引条目、全局 workspace 引用、条目数和存储只读状态。
-- `read(scope, id)`、`remove(scope, id)`：UI 父记忆完整详情与删除；read 异步按需读取目标版本化详情记录，remove 等价忘记且不接受 Session 参数。大详情分片只约束模型工具读取，存储懒加载和分片都不改变管理 UI 的人类完整详情查看契约。
+- `read(scope, id)`、`remove(scope, id)`：UI 父记忆完整详情与删除；read 异步按需读取目标版本化详情记录，remove 等价忘记且不接受 Session 参数。remove 不读取、回退、重置或推进任何 Session `distillationCursor`，也不会使已处理历史重新蒸馏或恢复已删条目。大详情分片只约束模型工具读取，存储懒加载和分片都不改变管理 UI 的人类完整详情查看契约。
 - `remember(input)`、`correct(input)`：显式立即写入；scope 由调用者明确给出。
 - `status()`：writer/read-only、dirty、下次整合/清理时间、最近脱敏错误的安全描述。
 

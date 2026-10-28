@@ -23,9 +23,9 @@
 
 | Module id | Responsibility | Depends on |
 |---|---|---|
-| `memory-store` | 全局/workspace 父索引驻留、版本化权威详情懒加载、大详情确定性分片、Markdown 摘要/详情/分片投影、全局 workspace 索引、revision、来源引用、原子写、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
+| `memory-store` | 全局/workspace 父索引驻留、版本化权威详情懒加载、大详情确定性分片、Markdown 摘要/详情/分片投影、全局 workspace 索引、revision、来源引用、Session 蒸馏游标、原子写、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
 | `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、脱敏审计、失败关闭策略 | — |
-| `memory-lifecycle` | 有效用户轮计数、10 轮轻量 Review、空闲/结束蒸馏、dirty gate、6 小时全局整合、每日遗忘清理、显式记住/纠正/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
+| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、dirty gate、scope 内整合、每日遗忘清理、显式记住/纠正/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
 | `memory-context` | 每会话单层 enable latch、自动一次性注入、refresh revision、排队与提交对账、时效提醒、摘要索引渲染、受限详情读取、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
 | `memory-api` | Host Service Definition、插件自有同源 HTTP RPC、人类命令与 UI 命令、权限和参数校验、结构化错误、读写状态与统计投影 | `memory-store`, `memory-lifecycle`, `memory-context` |
 | `memory-web` | Composer 两组 enable/refresh 控件、Memory sidebar 入口、双 tab、条目与注入 token 统计、删除确认、状态恢复、locale 与交互反馈 | `memory-api` |
@@ -54,7 +54,9 @@
 - dsh 没有统一 session-end：使用真正 idle 的 debounce、`runMaintenance()`、dispose 和 workspace stop 信号组合触发；不得把 `session/event` 的 fire-and-forget 通知当作异步事务提交。
 - 会话蒸馏和全局整合分开。全局整合最多每 6 小时一次且仅在 dirty 时运行；每日清理独立调度。
 - 调度状态持久化 `nextRunAt`、dirty、running intent 和完成游标；全插件只保留一个必要 timer，重启后恢复到期任务。
-- 显式记住/纠正立即进入串行写链；忘记写 tombstone 并删除可读索引/详情，不触碰 Session。
+- Review、Idle、Stop 共享每 Session 的 `lastEventSeq + offset` 蒸馏游标。完整 turn 优先按边界入批，超大 turn/消息按确定性片内位置续批；Review 一次一批，Idle/Stop 一次最多两批，首次加载不自动 backfill。
+- 候选安全处理、写入/去重完成后才推进游标；模型/解析/存储失败不推进。记忆已写而游标未写时允许同批重试，以稳定 ID、内容去重、sourceRefs 合并和整合降低重复。
+- 显式记住/纠正立即进入串行写链；忘记写 tombstone 并删除可读索引/详情，不触碰 Session 或蒸馏游标。删除单条/全部记忆不会重置进度、重新蒸馏旧范围或恢复条目。
 
 ### 注入与可重建性
 

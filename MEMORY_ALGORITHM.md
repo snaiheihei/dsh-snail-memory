@@ -1,6 +1,6 @@
 # Snail Memory：记忆算法、设计技巧与演进
 
-本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-27 的大详情分片、父索引驻留与详情懒加载实现为基线。
+本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-27 的持久游标顺序蒸馏、大详情分片、父索引驻留与详情懒加载实现为基线。
 
 文中严格区分三类机制：
 
@@ -31,6 +31,8 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
       ├─ 有效轮计数 ── 每 15 个完成轮 ──→ Review
       ├─ 活动停止 60 分钟 ──────────────→ Idle 蒸馏
       └─ archive / stop ────────────────→ Stop 蒸馏
+                                             │
+                                  共享 Session 事件游标取下一批
                                              │
                                   来源准入、扫描与脱敏
                                              │
@@ -106,19 +108,27 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 | Idle | 最近活动后空闲 60 分钟 | 48,000 字符 | 对话暂停后的较完整提炼 |
 | Stop | archive、session/agent stop | 48,000 字符 | 结束边界提炼 |
 
-活动事件会刷新 idle intent 的创建时间，形成 debounce。三类入口最终复用同一个 `distillSession`，区别主要是输入预算和调度原因。
+活动事件会刷新 idle intent 的创建时间，形成 debounce。三类入口最终复用同一个 `distillSession` 和同一份 Session 主进度，区别主要是输入预算、每次 intent 的最大批数和调度原因。Review 每次处理下一批；Idle/Stop 每次最多连续处理两批做有界追赶。后续 intent 从持久位置继续，因此长会话的中段和尾部可以最终参与，但单次维护不会退化成无预算全量回填。
 
 管理页的 Settings 可以调整 `reviewEveryUserTurns`、`idleDelayMinutes`、`consolidationCooldownHours`、`snapshotTokenBudget` 和五类 `retentionDays`。频率默认分别为 15 轮、60 分钟和 20 小时，快照预算默认为 1,200 估算 token，保留期默认值见 3.2。所有值持久化到 `$DSH_HOME/snail_memory/settings.v1.json`，启动配置只作为文件缺失时的默认值；旧文件缺少新增字段时补用对应默认值，已显式保存的其他值保持不变。写入复用 MemoryStore 的单写者边界并采用原子替换，只读 Host 可读取但拒绝更新。保存成功后立即更新运行中的计数器和调度器：已有有效轮计数保留，已有 idle intent 按新延迟重新计算到期时间，已有 dirty/consolidation 计划也按新的小时间隔从当前时间重排；保留期策略则由下一次每日清理读取。快照预算在后续 Enable/Refresh 创建新快照时读取，不改写已经生成的 desired 或已注入 Session 的历史快照。
 
-蒸馏读取的是 `renderSessionTranscript()` 生成的投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情的能力不变。
+蒸馏读取的是 Session 事件的确定性投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情的能力不变。
 
-当前实现取转录的**开头**相应字符数，而不是完整历史或最新窗口。这是预算保护，不应被理解为全量记忆覆盖。
+每个 Session 的可选 `distillationCursor` 只保存：
+
+```text
+lastEventSeq：最后已处理事件的稳定 eventSeq；同事件续片时保持该 seq
+offset：该事件渲染文本中已消费的 UTF-16 code unit 数；完整事件结束后为 0
+updatedAt：游标提交时间
+```
+
+初始位置为 `lastEventSeq = 0, offset = 0`。批选择从该位置之后开始，优先把同一 `turnId` 的完整事件组装入预算；装不下整个 turn 时按 eventSeq 和片内 offset 顺序切分。切分是确定性的，不为了语义美观丢字符或改写正文。游标只引用位置，不保存转录正文、秘密或异常原文；`state.v2.json` 的旧 Session 没有该字段时自然从初始位置开始，且只有实际生命周期触发才处理，不在启动时扫描旧 Session。
 
 ### 4.3 首次加载不做全量历史回填
 
 插件首次加载只恢复已有记忆、调度和注入状态，不自动遍历并蒸馏全部历史 Session。首次 Enable 已有记忆层时生成并追加摘要快照，与历史回填是两种不同行为：前者让既有记忆可用，后者会从旧对话新提炼记忆，当前不默认执行后者。
 
-不做自动全量回填的原因是历史结论可能过时，旧 Session 的 workspace 归属未必仍可验证，全量扫描还会放大辅助模型成本、秘密扫描范围和启动延迟。当前转录预算截取也不保证完整覆盖每段旧历史，因此批量运行不能被当作完整可靠的知识迁移。
+不做自动全量回填的原因是历史结论可能过时，旧 Session 的 workspace 归属未必仍可验证，全量扫描还会放大辅助模型成本、秘密扫描范围和启动延迟。持久游标保证的是“被生命周期触发后的顺序覆盖”，不是启动时自动迁移全部旧知识，也不替代显式历史导入的范围确认与成本预算。
 
 未来如确需历史回填，应提供显式导入操作，由用户选择 Session 或时间范围并确认目标 workspace，展示范围和预算，支持取消、断点恢复与幂等去重；不得把它变成 Host 启动时的隐式全量任务。
 
@@ -140,17 +150,22 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 ```text
 限定 Session 来源
-  → 截取预算内转录
+  → 从共享游标选择预算内下一批
   → 扫描并脱敏；拒绝不可接受内容
   → 要求辅助模型只返回 JSON candidates
   → 校验类别、summary、detail 和 16,000 字符详情上限
   → 回扫模型输出，剔除不安全候选
   → 在当前 workspace 内匹配旧记忆
-  → upsert、记录 sourceRefs 和 lastVerifiedAt
+  → upsert/去重、合并 sourceRefs 和 lastVerifiedAt
   → 有写入则标记 dirty
+  → 通过主 Store writer 提交新游标
 ```
 
 模型输出上限为 64,000 字符，对应调用预算 16,000 max tokens。没有可用模型路由时明确失败并保留可重试状态，不生成虚假记忆，也不伪造整合成功。
+
+游标采用**至少处理一次**语义，提交顺序始终是“模型成功响应并解析 → 候选安全校验 → 写入或确定性去重 → 游标提交”。空候选和被安全策略完整拒绝的候选都属于已可靠处理，可以推进；是否有新增记忆不是推进条件。路由缺失、请求失败/取消/超时、输出不可解析、输入安全拒绝或存储失败都不推进。
+
+如果记忆状态已提交而游标提交前进程崩溃，重试会处理同一批。稳定 ID 和相同内容去重避免新增重复条目；相同记忆来自新批次时合并 Session/eventSeq sourceRefs，既有语义整合继续处理措辞不同的近义候选。这个窗口允许重复模型调用和重复候选处理，以换取不丢历史；绝不先推进游标再处理。
 
 ### 5.2 稳定 ID
 
@@ -162,7 +177,7 @@ normalizedSummary = summary.trim().toLowerCase()
 memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 ```
 
-写入前还会在当前 scope 内查找“同类别且规范化 summary 相同”的旧条目。完全相同的 summary 和 detail 不重复写入；内容改变时沿用旧 ID 并更新 revision。
+写入前还会在当前 scope 内查找“同类别且规范化 summary 相同”的旧条目。完全相同的 summary、detail 和 sourceRefs 不重复写入；内容或来源引用改变时沿用旧 ID 并更新 revision，eventSeq 按 Session 合并去重。
 
 这个 ID 不是语义相似度哈希。措辞不同的同义记忆仍需要后续 LLM 整合；scope 和 category 参与哈希则防止跨层、跨类别误合并。
 
@@ -196,7 +211,7 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 
 显式忘记按 `scope + id` 精确删除，不跨 scope 搜索，不调用模型。删除会推进 scope revision、移除权威条目和详情投影，并安排后续整合。
 
-无论哪种遗忘，都不修改 dsh Session。已经注入的旧快照仍是历史事实，只是不会再出现在未来快照中，且对应详情不再可读。
+无论哪种遗忘，都不修改 dsh Session，也不修改任何 Session 蒸馏游标。MemoryEntry 删除与“历史已处理到哪里”是正交事实：删除一条或全部记忆不会回退、重置或推进游标，不会让对应历史重新进入蒸馏，也不会借游标恢复已删条目。已经注入的旧快照仍是历史事实，只是不会再出现在未来快照中，且对应详情不再可读。只有宿主真实 Session 生命周期清理才可另议游标垃圾回收，不能复用 UI 删除记忆按钮的语义。
 
 ## 8. 召回、快照与注入
 
@@ -322,7 +337,8 @@ Host 启动只读取 `state.v2.json` 到 `MemoryStore`。`list()`、`enable()` �
 
 关键技巧：
 
-- 所有 CRUD、Session 状态和调度元数据进入同一串行写队列；writer 的单条详情读取也进入该队列，避免读取与纠正、删除竞争。
+- 所有 CRUD、Session 状态、蒸馏游标和调度元数据进入同一串行写队列；游标复用 `updateSessionState` 的 `lock.assertOwner()`/fencing 与原子恢复边界，不新增独立写入队列。writer 的单条详情读取也进入该队列，避免读取与纠正、删除竞争。
+- 游标-only 事务只更新 Session 位置元数据：不推进记忆 scope revision、不设置 dirty、不创建 desired injection 或新快照，也不触发整合。
 - 新详情先写入 `detail-data/<id>/<newRevision>.json`，对应详情 Markdown 也完整发布成功后，才原子切换 `state.v2.json`；这些步骤失败时父 revision 不前进。
 - 每次事务先持久化只含受影响父 id 的 `projection-pending.v1.json`。提交前失败按当前父状态尝试恢复旧投影，恢复本身失败时保留 intent；崩溃或提交后派生失败同样保留 intent，由下次可写启动或后续事务按父状态重建详情和索引、清理未引用记录，再删除 intent。
 - 父状态发布后立即更新内存，再写 INDEX/MEMORY 投影和清理旧详情世代。派生失败不能把内存回退到旧权威状态，也不能把已提交操作误报为未提交。
@@ -364,6 +380,10 @@ workspace scope revision 只在实际 upsert/remove 时前进；global revision 
 ### 12.7 用失败注入验证真正的不变量
 
 正常 CRUD 测试无法发现目录写一半、旧删除误删新文件等竞争。针对这些风险，测试注入指定分片写失败和受控删除延迟，分别证明旧整套投影保留、删除与重建不会串序。
+
+### 12.8 用持久位置换取顺序覆盖，用重复窗口换取不丢历史
+
+固定前缀截取的实现最简单，但会让每次 Review/Idle/Stop 重复总结同一段历史，长会话中段和尾部永远没有输入机会。持久 eventSeq 游标把进度变成 Session 的权威元数据；片内 offset 又避免超大消息因无法整批装入而永久卡住。取舍是需要承受“记忆已写、游标未写”的崩溃重复窗口，并用幂等写入而不是先推进位置来控制它。
 
 ## 13. 演进过程
 
@@ -428,11 +448,17 @@ store + safety
 
 Session 从两个独立 enable latch 演进为“关闭 / 当前 workspace / 全局”三态单选，新增 disable RPC，并在 Host 侧原子互斥和归一化旧双层状态。切换只影响后续恢复与新注入，既有 Session 快照仍遵守 append-only。
 
+### 阶段八：从固定前缀演进为持久游标顺序覆盖
+
+Review/Idle/Stop 不再分别截取转录开头，而是共享每 Session 的 eventSeq/片内 offset。完整 turn 优先整批处理，超大 turn 和消息可确定性地跨批续接；Review 每次一批，Idle/Stop 每次最多两批。游标在候选可靠处理后由主 Store writer 提交，重启恢复与至少一次重复窗口均有自动化契约覆盖。
+
+该增量的自动化验证覆盖顺序推进、三入口去重、空候选、安全拒绝、失败不推进、重启、崩溃重复、长会话尾部、大 turn/消息、scope 隔离、sourceRefs 合并，以及删除单条/全部后的游标正交性。未安装到真实 Host，也未调用真实模型；真实 Session 事件形态、维护调度和模型时延仍需隔离环境验收。
+
 ## 14. 当前边界与后续演进方向
 
 以下是当前限制或候选方向，不是已经实现的能力：
 
-1. **长历史覆盖**：Review/蒸馏当前截取转录开头，后续可演进为持久游标、最新窗口或多段预算分配，避免长会话尾部长期未参与。
+1. **显式历史 backfill**：持久游标只服务正常生命周期触发，不会首次启动自动扫描全部旧 Session；如需迁移旧知识，仍需显式选择范围、独立预算、取消和恢复方案。
 2. **全量整合覆盖**：整合有 64,000 字符输入预算，后续可增加分批整合和跨批合并计划，但不能牺牲 scope 与失败恢复。
 3. **Refresh 再追加规则**：当前同 revision 永远 no-op；若需要“发送前多次点击不重复，但后续新对话后可再追加”，必须增加新的对话代际/注入时机语义，不能只放宽 revision 判断。
 4. **变更后的刷新体验**：记忆 correct/forget 不会改写既有快照，生产 wiring 也未自动刷新已启用层；目前依赖手动 refresh 或后续新快照。
@@ -453,7 +479,7 @@ Session 从两个独立 enable latch 演进为“关闭 / 当前 workspace / 全
 | 版本化权威详情与按需读取 | `src/store/records.ts`、`src/store/store.ts` |
 | 大详情切分与 Markdown 投影 | `src/store/chunks.ts`、`src/store/projections.ts` |
 | 有效轮与生命周期调度 | `src/lifecycle/counters.ts`、`src/lifecycle/scheduler.ts` |
-| 蒸馏转录投影 | `src/runtime.ts` |
+| 蒸馏转录投影、turn 组批与片内游标 | `src/runtime.ts` |
 | 蒸馏、整合、遗忘 | `src/lifecycle/distill.ts`、`src/lifecycle/consolidate.ts`、`src/lifecycle/retention.ts` |
 | 辅助模型调用与输出校验 | `src/lifecycle/llm.ts` |
 | 秘密扫描、脱敏与来源准入 | `src/safety/` |

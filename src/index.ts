@@ -17,7 +17,7 @@ import { MemoryLifecycleService } from './lifecycle/service.js'
 import { DEFAULT_MEMORY_SETTINGS, MemorySettingsStore } from './lifecycle/settings.js'
 import { MemoryStore } from './store/store.js'
 import { workspaceId } from './store/types.js'
-import { DshAuxiliaryModel, renderSessionTranscript, resolveSessionWorkspace, selectModelRoute } from './runtime.js'
+import { DshAuxiliaryModel, resolveSessionWorkspace, selectModelRoute, type TranscriptEvent } from './runtime.js'
 
 export const name = 'snail-memory'
 export const inject = ['agents', 'commands', 'llm', 'tools', 'webServer', 'workspaceRegistry'] as const
@@ -61,7 +61,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const memories = new MemoryContextService(store, {
     getSnapshotTokenBudget: () => settings.get().snapshotTokenBudget,
   })
-  const transcripts = new Map<string, string>()
+  const transcripts = new Map<string, readonly TranscriptEvent[]>()
   const configuredRoute = config.provider && config.model ? { provider: config.provider, model: config.model } : undefined
   const lifecycle = new MemoryLifecycleService(store, {
     settings,
@@ -71,11 +71,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     ...(config.idleDelayMinutes === undefined ? {} : { idleDelayMinutes: config.idleDelayMinutes }),
     ...(config.consolidationCooldownHours === undefined ? {} : { consolidationCooldownHours: config.consolidationCooldownHours }),
     ...(config.retentionSweepHours === undefined ? {} : { retentionSweepHours: config.retentionSweepHours }),
-    transcript: sessionId => {
+    transcriptEvents: sessionId => {
       const agent = ctx.agents.get(SessionId(sessionId))
-      const transcript = agent ? renderSessionTranscript(agent.session.snapshotEvents()) : transcripts.get(sessionId)
-      if (transcript === undefined) throw new Error('Session transcript is not currently available')
-      return transcript
+      const events = agent ? agent.session.snapshotEvents() : transcripts.get(sessionId)
+      if (events === undefined) throw new Error('Session transcript is not currently available')
+      return events
     },
     runMaintenance: (sessionId, task) => {
       const agent = ctx.agents.get(SessionId(sessionId))
@@ -120,7 +120,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     })
   })
   ctx.on('session/event', (session, event) => {
-    transcripts.set(session.id, renderSessionTranscript(session.snapshotEvents()))
+    transcripts.set(session.id, session.snapshotEvents())
     if (transcripts.size > 50) transcripts.delete(transcripts.keys().next().value!)
     void memories.handleSessionEvent(session.id, event).catch(() => {
       ctx.logger.warn('[snail-memory] Could not reconcile a memory injection')

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryLifecycleService } from '../../src/lifecycle/service.js'
 import { MemoryStore } from '../../src/store/store.js'
+import type { TranscriptEvent } from '../../src/runtime.js'
 import type { MemoryScope } from '../../src/store/types.js'
 import { workspaceId } from '../../src/store/types.js'
 
@@ -31,16 +32,21 @@ async function setup(responses: Array<string | Error> = [], maintenance?: { runM
     },
   }
   const changes: Array<{ kind: string; scope: MemoryScope }> = []
+  const events: TranscriptEvent[] = [{
+    seq: 1,
+    type: 'user/message',
+    data: { turnId: 'turn-1', source: { kind: 'user' }, content: [{ type: 'text', text: 'User established a project convention to run focused tests.' }] },
+  }]
   const service = new MemoryLifecycleService(store, {
     model,
     ...(maintenance === undefined ? {} : { maintenance }),
     provider: 'test',
     modelName: 'aux',
-    transcript: async () => 'User established a project convention to run focused tests.',
+    transcriptEvents: async () => events,
     onChange: change => { changes.push(change) },
   })
   services.push(service)
-  return { store, service, prompts, changes, responses }
+  return { store, service, prompts, changes, responses, events }
 }
 
 beforeEach(() => {
@@ -149,13 +155,15 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
 
   it('rejects secret candidates and preserves dirty retry state on model failure', async () => {
     const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
-    const { service, store } = await setup([
+    const { service, store, events } = await setup([
       '{"candidates":[{"category":"environment-fact","summary":"Credential","detail":"token = abcdefghijkl"}]}',
       'not-json',
     ])
     await store.updateSessionState('session-1', state => { state.workspaceId = scope.workspaceId })
 
     expect((await service.runIntent('review:session-1')).written).toBe(0)
+    expect(store.getSessionState('session-1').distillationCursor).toMatchObject({ lastEventSeq: 1 })
+    events.push({ seq: 2, type: 'user/message', data: { turnId: 'turn-2', source: { kind: 'user' }, content: [{ type: 'text', text: 'A second completed turn.' }] } })
     await expect(service.runIntent('review:session-1')).rejects.toThrow(/json/i)
     expect(store.getMeta().dirty).toBe(true)
     expect(store.getMeta().lastError).toBe('Session distillation failed')

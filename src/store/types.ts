@@ -92,9 +92,16 @@ export interface LayerMemoryState {
   committed: CommittedInjection[]
 }
 
+export interface SessionDistillationCursor {
+  lastEventSeq: number
+  offset: number
+  updatedAt: string
+}
+
 export interface SessionMemoryState {
   readonly sessionId: string
   workspaceId?: WorkspaceId
+  distillationCursor?: SessionDistillationCursor
   readonly layers: Record<MemoryLayer, LayerMemoryState>
 }
 

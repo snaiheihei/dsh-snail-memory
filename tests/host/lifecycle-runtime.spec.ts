@@ -34,7 +34,7 @@ describe('lifecycle dsh runtime composition', () => {
     const lifecycle = new MemoryLifecycleService(store, {
       model,
       route: () => ({ provider: 'late-provider', model: 'late-model' }),
-      transcript: () => 'A verified project convention.',
+      transcriptEvents: () => [{ seq: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'A verified project convention.' }] } }],
       runMaintenance: async (sessionId, task) => { maintenance.push(sessionId); return task(new AbortController().signal) },
     })
 
