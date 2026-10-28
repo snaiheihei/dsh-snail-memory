@@ -15,12 +15,25 @@ function Invoke-Step {
   param(
     [string]$Name,
     [string]$FilePath,
-    [string[]]$ArgumentList
+    [string[]]$ArgumentList,
+    [string]$AllowedFailurePattern
   )
 
   Write-Host "`n==> $Name"
-  & $FilePath @ArgumentList
+  $output = @()
+  if ($PSBoundParameters.ContainsKey('AllowedFailurePattern')) {
+    $output = @(& $FilePath @ArgumentList 2>&1)
+    $output | ForEach-Object { Write-Host $_ }
+  }
+  else {
+    & $FilePath @ArgumentList
+  }
   if ($LASTEXITCODE -ne 0) {
+    if ($PSBoundParameters.ContainsKey('AllowedFailurePattern') `
+      -and (($output | Out-String) -match $AllowedFailurePattern)) {
+      Write-Host "$Name did not find an installed dependency; continuing."
+      return
+    }
     throw "$Name failed with exit code $LASTEXITCODE."
   }
 }
@@ -53,7 +66,8 @@ Push-Location $RepoRoot
 try {
   Invoke-Step -Name "Remove $PackageName from dsh profile $Profile" `
     -FilePath 'node.exe' `
-    -ArgumentList @($DshBin, 'plugin', '--profile', $Profile, 'remove', $PackageName)
+    -ArgumentList @($DshBin, 'plugin', '--profile', $Profile, 'remove', $PackageName) `
+    -AllowedFailurePattern 'ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS'
 
   if (Test-Path -LiteralPath $TarballPath -PathType Leaf) {
     Remove-Item -LiteralPath $TarballPath -Force
