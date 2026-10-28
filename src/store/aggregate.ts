@@ -1,16 +1,16 @@
 import type { MemoryScope, StoreState, StoredMemoryEntry, WorkspaceIndexRef } from './types.js'
 import { workspaceId } from './types.js'
 
-/** Global is a read-only projection of workspace entries, never an independent entry scope. */
+/** Each scope reads only its own authoritative entries; Global is no longer an aggregate. */
 export function entriesForScope(state: StoreState, scope: MemoryScope): StoredMemoryEntry[] {
   return state.entries.filter(entry => scope.kind === 'global'
-    ? entry.scope.kind === 'workspace'
+    ? entry.scope.kind === 'global'
     : entry.scope.kind === 'workspace' && entry.scope.workspaceId === scope.workspaceId)
 }
 
 export function revisionForScope(state: StoreState, scope: MemoryScope): number {
-  if (scope.kind === 'workspace') return state.scopeRevisions.workspaces[scope.workspaceId] ?? 0
-  return Object.values(state.scopeRevisions.workspaces).reduce((total, revision) => total + revision, 0)
+  if (scope.kind === 'global') return state.scopeRevisions.global
+  return state.scopeRevisions.workspaces[scope.workspaceId] ?? 0
 }
 
 export function workspaceIndexRefs(state: StoreState): WorkspaceIndexRef[] {

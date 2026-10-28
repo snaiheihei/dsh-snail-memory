@@ -9,7 +9,7 @@ import { retentionSweep } from './retention.js'
 import { scanSecrets } from '../safety/scanner.js'
 import type { MemorySettings } from '../contract.js'
 import type { MemoryStore } from '../store/store.js'
-import type { MemoryEntry, MemoryId, MemoryScope, UpsertMemoryInput } from '../store/types.js'
+import type { MemoryEntry, MemoryId, MemoryScope, PromoteMemoryResult, UpsertMemoryInput } from '../store/types.js'
 import type { TranscriptEvent } from '../runtime.js'
 
 export interface MaintenanceHost {
@@ -37,6 +37,7 @@ export interface MemoryLifecycleOptions {
   readonly reviewEveryUserTurns?: number | undefined
   readonly idleDelayMinutes?: number | undefined
   readonly consolidationCooldownHours?: number | undefined
+  readonly globalConsolidationCooldownDays?: number | undefined
   readonly retentionSweepHours?: number | undefined
   readonly settings?: MemorySettingsStore
   readonly transcriptEvents?: (sessionId: string) => readonly TranscriptEvent[] | Promise<readonly TranscriptEvent[]>
@@ -58,6 +59,7 @@ export class MemoryLifecycleService {
     this.scheduler = new LifecycleScheduler(store, {
       idleDelayMinutes: settings.idleDelayMinutes,
       consolidationCooldownHours: settings.consolidationCooldownHours,
+      globalConsolidationCooldownDays: settings.globalConsolidationCooldownDays,
       ...(options.retentionSweepHours === undefined ? {} : { retentionSweepHours: options.retentionSweepHours }),
       now: this.now,
       run: async kind => { await this.runIntent(kind) },
@@ -73,6 +75,7 @@ export class MemoryLifecycleService {
       reviewEveryUserTurns: this.options.reviewEveryUserTurns ?? DEFAULT_MEMORY_SETTINGS.reviewEveryUserTurns,
       idleDelayMinutes: this.options.idleDelayMinutes ?? DEFAULT_MEMORY_SETTINGS.idleDelayMinutes,
       consolidationCooldownHours: this.options.consolidationCooldownHours ?? DEFAULT_MEMORY_SETTINGS.consolidationCooldownHours,
+      globalConsolidationCooldownDays: this.options.globalConsolidationCooldownDays ?? DEFAULT_MEMORY_SETTINGS.globalConsolidationCooldownDays,
       snapshotTokenBudget: DEFAULT_MEMORY_SETTINGS.snapshotTokenBudget,
       retentionDays: { ...DEFAULT_MEMORY_SETTINGS.retentionDays },
     }
@@ -84,6 +87,7 @@ export class MemoryLifecycleService {
     this.counter.updateReviewEveryUserTurns(settings.reviewEveryUserTurns)
     this.scheduler.updateIdleDelayMinutes(settings.idleDelayMinutes)
     await this.scheduler.updateConsolidationCooldownHours(settings.consolidationCooldownHours)
+    await this.scheduler.updateGlobalConsolidationCooldownDays(settings.globalConsolidationCooldownDays)
     return settings
   }
 
@@ -132,7 +136,10 @@ export class MemoryLifecycleService {
         return { written: removed.length }
       }
       if (operation === 'consolidate') {
-        return { written: await this.consolidateWithResult(signal) }
+        return { written: await this.consolidateWithResult(undefined, signal) }
+      }
+      if (operation === 'global-consolidate') {
+        return { written: await this.consolidateWithResult({ kind: 'global' }, signal) }
       }
       if (operation !== 'review' && operation !== 'idle' && operation !== 'stop') {
         throw new Error(`Unknown memory lifecycle intent: ${kind}`)
@@ -168,9 +175,14 @@ export class MemoryLifecycleService {
       return { written }
     } catch (error) {
       await this.store.updateMeta(meta => {
-        meta.dirty = true
         meta.lastError = lifecycleErrorMessage(kind)
-        meta.nextConsolidationAt = new Date(this.now().getTime() + this.getSettings().consolidationCooldownHours * 3_600_000).toISOString()
+        if (kind === 'global-consolidate') {
+          meta.globalDirty = true
+          meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.getSettings().globalConsolidationCooldownDays * 86_400_000).toISOString()
+        } else {
+          meta.dirty = true
+          meta.nextConsolidationAt = new Date(this.now().getTime() + this.getSettings().consolidationCooldownHours * 3_600_000).toISOString()
+        }
       })
       throw error
     }
@@ -198,6 +210,15 @@ export class MemoryLifecycleService {
     return removed
   }
 
+  async promote(scope: MemoryScope, id: MemoryId): Promise<PromoteMemoryResult> {
+    const result = await this.store.promote(scope, id)
+    if (result.created) {
+      await this.scheduler.markGlobalDirty()
+      await this.options.onChange?.({ kind: 'promote', scope: { kind: 'global' }, ids: [result.id] })
+    }
+    return result
+  }
+
   consolidate(): Promise<number> {
     return this.consolidateWithResult()
   }
@@ -216,7 +237,7 @@ export class MemoryLifecycleService {
     })
   }
 
-  private async consolidateWithResult(signal?: AbortSignal): Promise<number> {
+  private async consolidateWithResult(scope?: MemoryScope, signal?: AbortSignal): Promise<number> {
     const route = this.options.route?.()
     const provider = route?.provider ?? this.options.provider
     const modelName = route?.model ?? this.options.modelName
@@ -224,6 +245,7 @@ export class MemoryLifecycleService {
       ...(this.options.model === undefined ? {} : { model: this.options.model }),
       ...(provider === undefined ? {} : { provider }),
       ...(modelName === undefined ? {} : { modelName }),
+      ...(scope === undefined ? {} : { scope }),
       now: this.now,
       ...(signal === undefined ? {} : { signal }),
       onChange: async (scope, entries) => {
@@ -241,7 +263,8 @@ export class MemoryLifecycleService {
   }
 
   private async markChanged(kind: string, scope: MemoryScope, ids: readonly MemoryId[]): Promise<void> {
-    await this.scheduler.markDirty()
+    if (scope.kind === 'global') await this.scheduler.markGlobalDirty()
+    else await this.scheduler.markDirty()
     await this.options.onChange?.({ kind, scope, ids })
   }
 }

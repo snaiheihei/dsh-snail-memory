@@ -30,6 +30,7 @@ export interface Config {
   readonly reviewEveryUserTurns?: number
   readonly idleDelayMinutes?: number
   readonly consolidationCooldownHours?: number
+  readonly globalConsolidationCooldownDays?: number
   readonly retentionSweepHours?: number
 }
 
@@ -40,6 +41,7 @@ export const Config: z<Config> = z.object({
   reviewEveryUserTurns: z.number().min(1).default(15),
   idleDelayMinutes: z.number().min(0).default(60),
   consolidationCooldownHours: z.number().min(0).default(20),
+  globalConsolidationCooldownDays: z.number().min(0).default(7),
   retentionSweepHours: z.number().min(0).default(24),
 })
 
@@ -52,6 +54,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       reviewEveryUserTurns: config.reviewEveryUserTurns ?? 15,
       idleDelayMinutes: config.idleDelayMinutes ?? 60,
       consolidationCooldownHours: config.consolidationCooldownHours ?? 20,
+      globalConsolidationCooldownDays: config.globalConsolidationCooldownDays ?? 7,
       snapshotTokenBudget: DEFAULT_MEMORY_SETTINGS.snapshotTokenBudget,
       retentionDays: { ...DEFAULT_MEMORY_SETTINGS.retentionDays },
     })
@@ -71,6 +74,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     ...(config.reviewEveryUserTurns === undefined ? {} : { reviewEveryUserTurns: config.reviewEveryUserTurns }),
     ...(config.idleDelayMinutes === undefined ? {} : { idleDelayMinutes: config.idleDelayMinutes }),
     ...(config.consolidationCooldownHours === undefined ? {} : { consolidationCooldownHours: config.consolidationCooldownHours }),
+    ...(config.globalConsolidationCooldownDays === undefined ? {} : { globalConsolidationCooldownDays: config.globalConsolidationCooldownDays }),
     ...(config.retentionSweepHours === undefined ? {} : { retentionSweepHours: config.retentionSweepHours }),
     transcriptEvents: sessionId => {
       const agent = ctx.agents.get(SessionId(sessionId))

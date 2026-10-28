@@ -12,7 +12,11 @@ const roots: string[] = []
 const stores: MemoryStore[] = []
 const services: MemoryLifecycleService[] = []
 
-async function setup(responses: Array<string | Error> = [], maintenance?: { runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> }) {
+async function setup(
+  responses: Array<string | Error> = [],
+  maintenance?: { runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> },
+  beforeResponse?: () => Promise<void>,
+) {
   const root = await mkdtemp(join(tmpdir(), 'snail-memory-lifecycle-'))
   roots.push(root)
   // Lifecycle tests advance fake time by hours; keep the real-time lock heartbeat out of that clock.
@@ -24,6 +28,7 @@ async function setup(responses: Array<string | Error> = [], maintenance?: { runM
       expect(config.provider).toBe('test')
       return {
         async *stream() {
+          await beforeResponse?.()
           const response = responses.shift() ?? '{"candidates":[]}'
           if (response instanceof Error) throw response
           yield { type: 'text-delta' as const, index: 0, text: response }
@@ -149,7 +154,9 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect((await service.runIntent('review:session-1')).written).toBe(0)
     expect(store.list(scope).entries).toHaveLength(1)
     expect(store.list(scope).entries[0]?.revision).toBe(1)
-    expect(store.list({ kind: 'global' }).entries).toEqual(store.list(scope).entries)
+    expect(store.list({ kind: 'global' }).entries).toEqual([])
+    expect(store.getMeta().globalDirty).toBe(false)
+    expect(store.getMeta().nextGlobalConsolidationAt).toBeNull()
     expect(changes.map(change => change.kind)).toEqual(['distill'])
   })
 
@@ -187,25 +194,135 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getMeta().pending['idle:session-1']).toBeUndefined()
   })
 
-  it('leaves legacy global entries untouched and never consolidates across scopes', async () => {
+  it('consolidates only global entries for the global intent without clearing workspace dirty state', async () => {
     const globalScope: MemoryScope = { kind: 'global' }
     const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
     const { service, store, responses } = await setup([
       '{"candidates":[{"id":"global-id","category":"long-term-decision","summary":"New global decision","detail":"Corrected global detail.","sourceRefs":[{"sessionId":"session-1"}]}]}',
-      '{"candidates":[{"id":"global-id","category":"long-term-decision","summary":"Cross scope","detail":"Must not cross scopes.","sourceRefs":[{"sessionId":"session-1"}]}]}',
     ])
-    const global = await store.upsert({ scope: globalScope, category: 'long-term-decision', summary: 'Old global decision', detail: 'Old global detail.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
-    const workspace = await store.upsert({ scope: workspaceScope, category: 'project-convention', summary: 'Workspace convention', detail: 'Workspace detail.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
-    await store.remove(globalScope, global.id)
     const target = await store.upsert({ scope: globalScope, category: 'long-term-decision', summary: 'Old global decision', detail: 'Old global detail.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    const workspace = await store.upsert({ scope: workspaceScope, category: 'project-convention', summary: 'Workspace convention', detail: 'Workspace detail.', sourceRefs: [{ sessionId: 'session-1' }], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
     responsesWithIds(responses, target.id, workspace.id)
 
-    await service.consolidate()
+    expect((await service.runIntent('global-consolidate')).written).toBe(1)
 
-    expect((await store.read(globalScope, target.id))?.summary).toBe('Old global decision')
+    expect((await store.read(globalScope, target.id))?.summary).toBe('New global decision')
     expect((await store.read(workspaceScope, workspace.id))?.summary).toBe('Workspace convention')
-    expect(store.list(workspaceScope).entries).toHaveLength(1)
-    expect(store.list(globalScope).entries.map(entry => entry.id)).toEqual([workspace.id])
+    expect(store.getMeta()).toMatchObject({
+      dirty: true,
+      globalDirty: false,
+      lastGlobalConsolidationAt: '2026-10-26T00:00:00.000Z',
+      nextGlobalConsolidationAt: null,
+    })
+  })
+
+  it('does not recreate a Global memory deleted while consolidation is waiting for the model', async () => {
+    const globalScope: MemoryScope = { kind: 'global' }
+    let releaseModel!: () => void
+    let markModelStarted!: () => void
+    const modelStarted = new Promise<void>(resolve => { markModelStarted = resolve })
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve })
+    const { service, store } = await setup([
+      '{"candidates":[{"category":"preference","summary":"Prefer concise answers","detail":"Stale model result."}]}',
+    ], undefined, async () => {
+      markModelStarted()
+      await modelGate
+    })
+    const target = await store.upsert({
+      scope: globalScope,
+      category: 'preference',
+      summary: 'Prefer concise answers',
+      detail: 'Use concise answers.',
+      sourceRefs: [],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    const running = service.runIntent('global-consolidate')
+    await modelStarted
+    expect(await store.remove(globalScope, target.id)).toBe(true)
+    releaseModel()
+
+    await expect(running).resolves.toEqual({ written: 0 })
+    expect(store.list(globalScope).entries).toEqual([])
+  })
+
+  it('preserves a Promote schedule created while Global consolidation is waiting for the model', async () => {
+    const globalScope: MemoryScope = { kind: 'global' }
+    const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    let releaseModel!: () => void
+    let markModelStarted!: () => void
+    const modelStarted = new Promise<void>(resolve => { markModelStarted = resolve })
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve })
+    const { service, store } = await setup(['{"candidates":[]}'], undefined, async () => {
+      markModelStarted()
+      await modelGate
+    })
+    await store.upsert({
+      scope: globalScope,
+      category: 'long-term-decision',
+      summary: 'Existing global decision',
+      detail: 'Existing global detail.',
+      sourceRefs: [],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    const source = await store.upsert({
+      scope: workspaceScope,
+      category: 'preference',
+      summary: 'Prefer concise answers',
+      detail: 'Use concise answers.',
+      sourceRefs: [],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    const running = service.runIntent('global-consolidate')
+    await modelStarted
+    const promoted = await service.promote(workspaceScope, source.id)
+    releaseModel()
+
+    await expect(running).resolves.toEqual({ written: 0 })
+    expect(promoted.created).toBe(true)
+    expect(store.getMeta()).toMatchObject({
+      globalDirty: true,
+      nextGlobalConsolidationAt: '2026-11-02T00:00:00.000Z',
+    })
+  })
+
+  it('promotes with global-only scheduling and no Session cursor changes', async () => {
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const { service, store, changes } = await setup()
+    const source = await store.upsert({
+      scope,
+      category: 'preference',
+      summary: 'Prefer concise answers',
+      detail: 'Use concise answers.',
+      sourceRefs: [{ sessionId: 'session-1' }],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    await store.updateSessionState('session-1', state => {
+      state.workspaceId = scope.workspaceId
+      state.distillationCursor = { lastEventSeq: 9, offset: 0, updatedAt: '2026-10-25T00:00:00.000Z' }
+    })
+    const before = store.getSessionState('session-1')
+    await store.updateMeta(meta => {
+      meta.dirty = false
+      meta.nextConsolidationAt = null
+      meta.globalDirty = false
+      meta.nextGlobalConsolidationAt = null
+    })
+
+    const promoted = await service.promote(scope, source.id)
+    const duplicate = await service.promote(scope, source.id)
+
+    expect(promoted.created).toBe(true)
+    expect(duplicate).toEqual({ id: promoted.id, created: false })
+    expect(store.getMeta()).toMatchObject({
+      dirty: false,
+      nextConsolidationAt: null,
+      globalDirty: true,
+      nextGlobalConsolidationAt: '2026-11-02T00:00:00.000Z',
+    })
+    expect(store.getSessionState('session-1')).toEqual(before)
+    expect(changes).toEqual([{ kind: 'promote', scope: { kind: 'global' }, ids: [promoted.id] }])
   })
 
   it('runs lifecycle work through the injected maintenance host', async () => {

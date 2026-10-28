@@ -27,6 +27,11 @@ export interface MemorySourceRef {
   readonly eventSeqs?: readonly number[]
 }
 
+export interface MemoryPromotionSource {
+  readonly workspaceId: WorkspaceId
+  readonly id: MemoryId
+}
+
 export interface MemoryEntry {
   readonly id: MemoryId
   readonly scope: MemoryScope
@@ -38,8 +43,14 @@ export interface MemoryEntry {
   readonly lastVerifiedAt: string
   readonly revision: number
   readonly sourceRefs: readonly MemorySourceRef[]
+  readonly promotedFrom?: MemoryPromotionSource
   readonly expiresAt?: string
   readonly supersedes?: readonly MemoryId[]
+}
+
+export interface PromoteMemoryResult {
+  readonly id: MemoryId
+  readonly created: boolean
 }
 
 export interface UpsertMemoryInput {
@@ -123,8 +134,11 @@ export interface SessionMemoryState {
 export interface MemoryMeta {
   dirty: boolean
   nextConsolidationAt: string | null
-  nextRetentionAt: string | null
   lastConsolidationAt: string | null
+  globalDirty: boolean
+  nextGlobalConsolidationAt: string | null
+  lastGlobalConsolidationAt: string | null
+  nextRetentionAt: string | null
   lastRetentionAt: string | null
   lastError: string | null
   pending: Record<string, { readonly kind: string; readonly createdAt: string }>

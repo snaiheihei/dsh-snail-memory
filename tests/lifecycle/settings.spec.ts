@@ -25,6 +25,7 @@ const DEFAULT_SETTINGS = {
   reviewEveryUserTurns: 15,
   idleDelayMinutes: 60,
   consolidationCooldownHours: 20,
+  globalConsolidationCooldownDays: 7,
   snapshotTokenBudget: 1_200,
   retentionDays: {
     'environment-fact': 30,
@@ -39,6 +40,7 @@ const CUSTOM_SETTINGS = {
   reviewEveryUserTurns: 4,
   idleDelayMinutes: 2.5,
   consolidationCooldownHours: 8,
+  globalConsolidationCooldownDays: 3,
   snapshotTokenBudget: 800,
   retentionDays: {
     'environment-fact': 0,

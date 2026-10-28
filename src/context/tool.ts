@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { chunkMemoryDetail } from '../store/chunks.js'
-import { memoryId, workspaceId, type MemoryLayer } from '../store/types.js'
+import { memoryId, type MemoryLayer } from '../store/types.js'
 import type { MemoryContextService } from './service.js'
 import { estimateTokens } from './snapshot.js'
 
@@ -12,7 +12,6 @@ export function createMemoryReadTool(memories: MemoryContextService) {
     parameters: {
       layer: { type: 'string', required: true, enum: ['global', 'workspace'], description: 'Enabled memory layer.' },
       memory_id: { type: 'string', required: true, description: 'Parent memory id from the injected index.' },
-      workspace_id: { type: 'string', description: 'Source workspace id shown in a global snapshot; required for global reads.' },
       chunk_id: { type: 'string', description: 'Optional chunk id from a large memory manifest, for example part-001.' },
     },
     output: {
@@ -56,7 +55,6 @@ export function createMemoryReadTool(memories: MemoryContextService) {
         sessionId,
         args.layer as MemoryLayer,
         memoryId(args.memory_id),
-        args.workspace_id === undefined ? undefined : workspaceId(args.workspace_id),
       )
       if (!entry) return { found: false }
       const chunks = chunkMemoryDetail(entry.detail)

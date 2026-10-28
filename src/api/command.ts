@@ -34,7 +34,7 @@ export async function executeMemoryCommand(
     let target = scope(layer)
     if (!target || !rest) return { kind: 'error', text: USAGE }
     if (target.kind === 'global') {
-      return { kind: 'error', text: 'Global memory is a read-only aggregate; use workspace memory.' }
+      return { kind: 'error', text: 'Direct global writes are unavailable; use Promote from a workspace memory.' }
     }
     const attachedWorkspaceId = controller.workspaceForSession(sessionId)
     if (!attachedWorkspaceId) return { kind: 'error', text: 'Workspace memory requires a session attached to a workspace.' }

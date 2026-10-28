@@ -125,7 +125,7 @@ describe('Snail Memory HTTP RPC', () => {
     }
     const response = await request(handler, {
       url: '/snail-memory/rpc/updateSettings',
-      body: JSON.stringify({ reviewEveryUserTurns: 15, idleDelayMinutes: 60, consolidationCooldownHours: -2, snapshotTokenBudget: 1_200, retentionDays }),
+      body: JSON.stringify({ reviewEveryUserTurns: 15, idleDelayMinutes: 60, consolidationCooldownHours: -2, globalConsolidationCooldownDays: 7, snapshotTokenBudget: 1_200, retentionDays }),
     })
     expect(response.status).toBe(400)
     expect(response.body).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
@@ -136,6 +136,7 @@ describe('Snail Memory HTTP RPC', () => {
         reviewEveryUserTurns: 15,
         idleDelayMinutes: 60,
         consolidationCooldownHours: 20,
+        globalConsolidationCooldownDays: 7,
         snapshotTokenBudget: 1_200,
         retentionDays: { ...retentionDays, 'environment-fact': -1 },
       }),
@@ -143,12 +144,26 @@ describe('Snail Memory HTTP RPC', () => {
     expect(invalidRetention.status).toBe(400)
     expect(invalidRetention.body).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
 
+    const invalidGlobalDelay = await request(handler, {
+      url: '/snail-memory/rpc/updateSettings',
+      body: JSON.stringify({
+        reviewEveryUserTurns: 15,
+        idleDelayMinutes: 60,
+        consolidationCooldownHours: 20,
+        globalConsolidationCooldownDays: -1,
+        snapshotTokenBudget: 1_200,
+        retentionDays,
+      }),
+    })
+    expect(invalidGlobalDelay.status).toBe(400)
+
     const invalidSnapshotBudget = await request(handler, {
       url: '/snail-memory/rpc/updateSettings',
       body: JSON.stringify({
         reviewEveryUserTurns: 15,
         idleDelayMinutes: 60,
         consolidationCooldownHours: 20,
+        globalConsolidationCooldownDays: 7,
         snapshotTokenBudget: 0,
         retentionDays,
       }),

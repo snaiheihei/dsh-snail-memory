@@ -1,6 +1,6 @@
 # Spec: memory-store
 
-> 2026-10-27 修订：独立 global 条目和双层独立开关已废止；global 改为所有 workspace 的动态只读聚合，旧 global 数据仅兼容保留。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余存储与故障恢复规则继续有效。
+> 2026-10-28 独立 Global 修订：Global 从动态只读聚合改为独立权威 scope。workspace 详情可 Promote 深复制到 Global，副本以新 ID、独立详情和 `promotedFrom` 维护；重复 Promote 幂等，来源与副本更新/删除互不影响。以 `SPEC-global-aggregate-memory.md` 的当前独立 Global 契约为准。
 >
 > 2026-10-28 修订：修复快速重启留下的新鲜旧锁使新 Host 永久只读的问题。只读 Host 必须持续重试，在锁释放或 stale 后完成状态恢复并自动晋升；活跃 writer 仍受单写者保护。
 >
@@ -10,7 +10,7 @@
 
 为 Snail Memory 提供单用户、全局/workspace 分层的持久存储。存储是所有读写、索引展示、注入 revision 和删除语义的权威来源；原始 Session 永远不由本模块修改。
 
-验收结果：重启后记忆与会话开关状态可恢复；全局索引包含 workspace 引用；忘记后条目正文和索引不再可读；异常写入不会暴露半条 JSON 或半条 Markdown。
+验收结果：重启后记忆与会话开关状态可恢复；Global 只包含独立条目；Promote 完整复制且幂等，来源与副本互不影响；忘记后目标条目正文和索引不再可读；异常写入不会暴露半条 JSON 或半条 Markdown。
 
 ## Tech Stack
 
@@ -43,7 +43,7 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 ## Data Contract
 
 - `MemoryScope` 为 `{ kind: 'global' }` 或 `{ kind: 'workspace', workspaceId }`；目录只使用 branded id 的字符串值。
-- `MemoryEntry` 包含 `id`、`scope`、`category`、`summary`、`detail`、`createdAt`、`updatedAt`、`lastVerifiedAt`、`revision`、`sourceRefs`，以及可选 `expiresAt`、`supersedes`。
+- `MemoryEntry` 包含 `id`、`scope`、`category`、`summary`、`detail`、`createdAt`、`updatedAt`、`lastVerifiedAt`、`revision`、`sourceRefs`，以及可选 `expiresAt`、`supersedes`、`promotedFrom`。
 - 五类 category 为 `preference`、`project-convention`、`environment-fact`、`troubleshooting`、`long-term-decision`。
 - `state.v2.json` 原子发布父索引、Session 和运行状态；父条目只保存摘要等元数据及 `detailChars`，不保存完整 `detail`。Host 启动只把这份父状态加载进内存，`list()`、`enable()` 和 `refresh()` 不读取详情记录。
 - `detail-data/<id>/<revision>.json` 保存父状态指向的不可变权威详情。`read()` 按 id 和 revision 异步读取目标记录并重新组成完整 `MemoryEntry`；不得为读取一个条目而加载全部详情。
@@ -54,7 +54,7 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - 小详情、INDEX 和 MEMORY 使用临时文件原子替换；大详情继续使用临时目录整套切换。writer 的详情读取与写入进入同一串行队列；只读 Host 读取前刷新 v2 父状态，详情记录 ENOENT 时再刷新并重试，以观察其他 Host 已提交的纠正和删除。
 - WriterLock 在持有锁时通过本代 FileHandle 续心跳，在未持有锁时按同一周期间隔重试。stale 回收必须核对 quarantine 中移出的原始锁内容，误移新锁时用硬链接恢复；锁缺失时恢复崩溃遗留的 quarantine，主锁仍存在时则把遗留 quarantine 作为过期残留清理，不得反复移走当前主锁。启动时仍新鲜、随后才 stale 的旧锁与启动时已 stale 的锁都必须可恢复；锁被正常释放后同样允许接管。晋升与 heartbeat 解耦，晋升前重新读取最新 v2（或兼容迁移 v1）、恢复 pending 投影，并在各共享写入阶段续租验权，完成后才发布 writable；活跃 writer 心跳有效时不得抢锁。Store 事务边界把可识别的所有权/fencing 异常统一转换为 `MemoryStoreReadonlyError`，普通 I/O 和编程错误仍按原类别抛出。writable 变化通知 Host 启停 lifecycle，首次及后续准备或启动失败都在当前可写期间自动重试；暂停、只读或验权竞争期间收到的新 intent 在可写启动后补持久化。`start()` 必须提交 deferred 快照，并且只清理该快照中已经持久化且当前值未变化的条目；提交期间新增或更新的 intent 必须保留到后续启动。卸载停止监控、重试并清理 timer。
 - `audit.v1.jsonl` 只记录操作、id、revision、时间和脱敏结果，不记录记忆正文、秘密或完整提示词。
-- `global/INDEX.md` 包含全局条目与所有 workspace 的 id、条目数、revision、更新时间引用；不复制 workspace 详情。
+- `global/INDEX.md` 只包含独立 Global 条目，不包含 workspace 聚合引用；Promote 通过新 ID、独立版本化详情和 `promotedFrom` 深复制，不共享来源详情或分片所有权。
 - 每会话独立保存两个层的 `enabled`、`desired`、已提交 injection id/revision 和估算 token，以及唯一 `activeDesired` 和可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。
 - Session `workspaceId` 是自动蒸馏与显式写入的 owner；可选 `selectedWorkspaceId` 是独立的 workspace 召回选择，只用于快照、refresh 和详情读取。enable 其他已注册项目不得改写 owner，Ungrouped 也不会因召回选择获得隐式写入归属。
 - workspace desired/committed 可保存 `workspaceId`，用于按召回项目分别进行 revision 对账和公共状态展示；global 及旧版 workspace 记录可缺省该字段，按兼容路径处理。不同 workspace 的 revision 不得跨项目取最大值。

@@ -3,6 +3,7 @@ import { MemoryStoreReadonlyError, type MemoryStore } from '../store/store.js'
 export interface LifecycleSchedulerOptions {
   readonly idleDelayMinutes?: number
   readonly consolidationCooldownHours?: number
+  readonly globalConsolidationCooldownDays?: number
   readonly retentionSweepHours?: number
   readonly now?: () => Date
   readonly run: (kind: string) => Promise<void>
@@ -12,6 +13,7 @@ export interface LifecycleSchedulerOptions {
 export function lifecycleErrorMessage(kind: string): string {
   const separator = kind.indexOf(':')
   const operation = separator < 0 ? kind : kind.slice(0, separator)
+  if (operation === 'global-consolidate') return 'Global memory consolidation failed'
   if (operation === 'consolidate') return 'Memory consolidation failed'
   if (operation === 'retention') return 'Memory retention failed'
   if (operation === 'review' || operation === 'idle' || operation === 'stop') return 'Session distillation failed'
@@ -56,6 +58,22 @@ export class LifecycleScheduler {
     this.schedule()
   }
 
+  async updateGlobalConsolidationCooldownDays(value: number): Promise<void> {
+    if (!Number.isFinite(value) || value < 0) throw new Error('globalConsolidationCooldownDays must be a non-negative finite number')
+    const current = this.store.getMeta()
+    if (current.globalDirty || current.pending['global-consolidate']) {
+      const nextRunAt = new Date(this.now().getTime() + value * 86_400_000).toISOString()
+      await this.store.updateMeta(meta => {
+        if (meta.globalDirty) meta.nextGlobalConsolidationAt = nextRunAt
+        if (meta.pending['global-consolidate']) {
+          meta.pending['global-consolidate'] = { ...meta.pending['global-consolidate'], createdAt: nextRunAt }
+        }
+      })
+    }
+    this.options = { ...this.options, globalConsolidationCooldownDays: value }
+    this.schedule()
+  }
+
   async start(): Promise<void> {
     if (this.started || this.disposed) return
     this.started = true
@@ -67,6 +85,9 @@ export class LifecycleScheduler {
         }
         if (meta.dirty && meta.nextConsolidationAt === null) {
           meta.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+        }
+        if (meta.globalDirty && meta.nextGlobalConsolidationAt === null) {
+          meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.globalConsolidationDelayMs).toISOString()
         }
         for (const [kind, createdAt] of deferred) {
           meta.pending[kind] = { kind, createdAt }
@@ -105,6 +126,14 @@ export class LifecycleScheduler {
     await this.store.updateMeta(meta => {
       meta.dirty = true
       meta.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+    })
+    this.schedule()
+  }
+
+  async markGlobalDirty(): Promise<void> {
+    await this.store.updateMeta(meta => {
+      meta.globalDirty = true
+      meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.globalConsolidationDelayMs).toISOString()
     })
     this.schedule()
   }
@@ -149,20 +178,29 @@ export class LifecycleScheduler {
       const due = Object.entries(meta.pending).find(([, value]) => this.dueAt(value.kind, value.createdAt) <= now)
       const consolidationDue = meta.dirty && meta.nextConsolidationAt !== null
         && new Date(meta.nextConsolidationAt).getTime() <= now
+      const globalConsolidationDue = meta.globalDirty && meta.nextGlobalConsolidationAt !== null
+        && new Date(meta.nextGlobalConsolidationAt).getTime() <= now
       const retentionDue = meta.nextRetentionAt !== null && new Date(meta.nextRetentionAt).getTime() <= now
-      if (!due && !consolidationDue && !retentionDue) break
+      if (!due && !consolidationDue && !globalConsolidationDue && !retentionDue) break
 
-      const key = due?.[0] ?? (consolidationDue ? 'consolidate' : 'retention')
+      const key = due?.[0] ?? (consolidationDue ? 'consolidate' : globalConsolidationDue ? 'global-consolidate' : 'retention')
       const value = due?.[1] ?? { kind: key, createdAt: this.now().toISOString() }
+      const consolidationSchedule = value.kind === 'global-consolidate'
+        ? meta.nextGlobalConsolidationAt
+        : meta.nextConsolidationAt
       if (!due) await this.store.updateMeta(current => { current.pending[key] = value })
       try {
         await this.options.run(value.kind)
         await this.store.updateMeta(current => {
           delete current.pending[key]
           current.lastError = null
-          if (value.kind === 'consolidate') {
+          if (value.kind === 'consolidate' && current.nextConsolidationAt === consolidationSchedule) {
             current.dirty = false
             current.nextConsolidationAt = null
+          } else if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === consolidationSchedule) {
+            current.globalDirty = false
+            current.nextGlobalConsolidationAt = null
+            current.lastGlobalConsolidationAt = this.now().toISOString()
           } else if (value.kind === 'retention') {
             current.lastRetentionAt = this.now().toISOString()
             current.nextRetentionAt = new Date(this.now().getTime() + this.retentionDelayMs).toISOString()
@@ -171,11 +209,13 @@ export class LifecycleScheduler {
       } catch {
         const delay = value.kind === 'consolidate'
           ? this.consolidationDelayMs
-          : value.kind === 'retention'
-            ? this.retentionDelayMs
-            : this.idleDelayMs
+          : value.kind === 'global-consolidate'
+            ? this.globalConsolidationDelayMs
+            : value.kind === 'retention'
+              ? this.retentionDelayMs
+              : this.idleDelayMs
         const retryAt = new Date(this.now().getTime() + delay).toISOString()
-        const retryCreatedAt = value.kind === 'consolidate' || value.kind === 'retention'
+        const retryCreatedAt = value.kind === 'consolidate' || value.kind === 'global-consolidate' || value.kind === 'retention'
           ? retryAt
           : this.now().toISOString()
         await this.store.updateMeta(current => {
@@ -187,6 +227,7 @@ export class LifecycleScheduler {
             createdAt: retryCreatedAt,
           }
           if (value.kind === 'consolidate') current.nextConsolidationAt = retryAt
+          if (value.kind === 'global-consolidate') current.nextGlobalConsolidationAt = retryAt
           if (value.kind === 'retention') current.nextRetentionAt = retryAt
         })
       }
@@ -208,6 +249,10 @@ export class LifecycleScheduler {
     return (this.options.consolidationCooldownHours ?? 20) * 3_600_000
   }
 
+  private get globalConsolidationDelayMs(): number {
+    return (this.options.globalConsolidationCooldownDays ?? 7) * 86_400_000
+  }
+
   private get retentionDelayMs(): number {
     return (this.options.retentionSweepHours ?? 24) * 3_600_000
   }
@@ -219,6 +264,7 @@ export class LifecycleScheduler {
     const now = this.now().getTime()
     const times = Object.values(meta.pending).map(value => this.dueAt(value.kind, value.createdAt))
     if (meta.dirty && meta.nextConsolidationAt) times.push(new Date(meta.nextConsolidationAt).getTime())
+    if (meta.globalDirty && meta.nextGlobalConsolidationAt) times.push(new Date(meta.nextGlobalConsolidationAt).getTime())
     if (meta.nextRetentionAt) times.push(new Date(meta.nextRetentionAt).getTime())
     if (times.length === 0) {
       this.timer = undefined

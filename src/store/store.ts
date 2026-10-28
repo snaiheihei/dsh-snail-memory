@@ -14,6 +14,7 @@ import type {
   MemoryIndexEntry,
   MemoryMeta,
   MemoryScope,
+  PromoteMemoryResult,
   SessionMemoryState,
   StoreState,
   StoredMemoryEntry,
@@ -222,8 +223,15 @@ export class MemoryStore {
       scope,
       revision: revisionForScope(this.state, scope),
       entries,
-      workspaces: scope.kind === 'global' ? workspaceIndexRefs(this.state) : [],
+      workspaces: [],
     }
+  }
+
+  workspaceScopes(): MemoryScope[] {
+    return workspaceIndexRefs(this.state).map(ref => ({
+      kind: 'workspace',
+      workspaceId: ref.workspaceId,
+    }))
   }
 
   async read(scope: MemoryScope, id: MemoryId): Promise<MemoryEntry | null> {
@@ -279,13 +287,16 @@ export class MemoryStore {
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
         revision,
+        ...(existing?.promotedFrom === undefined ? {} : { promotedFrom: existing.promotedFrom }),
       }
       draft.entries = [...draft.entries.filter(candidate => candidate.id !== entry.id), storedEntry(entry)]
       if (input.scope.kind === 'workspace') {
         const current = draft.workspaces[input.scope.workspaceId]
         draft.workspaces[input.scope.workspaceId] = { createdAt: current?.createdAt ?? timestamp, updatedAt: timestamp }
+        draft.meta.dirty = true
+      } else {
+        draft.meta.globalDirty = true
       }
-      draft.meta.dirty = true
       return structuredClone(entry)
     }, async (_entry, draft) => {
       await removeUnreferencedDetailRecords(this.paths, draft)
@@ -295,13 +306,57 @@ export class MemoryStore {
     })
   }
 
+  async promote(scope: MemoryScope, id: MemoryId): Promise<PromoteMemoryResult> {
+    if (scope.kind !== 'workspace') throw new Error('Only workspace memories can be promoted')
+    return this.transaction('memory/promote', async draft => {
+      const existing = draft.entries.find(entry => entry.scope.kind === 'global'
+        && entry.promotedFrom?.workspaceId === scope.workspaceId && entry.promotedFrom.id === id)
+      if (existing) return { id: existing.id, created: false }
+      const sourceIndex = draft.entries.find(entry => entry.id === id && scopeKey(entry.scope) === scopeKey(scope))
+      if (!sourceIndex) throw new Error('Cannot promote a memory that does not exist in this workspace')
+      const source = await readDetailRecord(this.paths, sourceIndex)
+      const timestamp = this.now().toISOString()
+      const entry: MemoryEntry = {
+        id: memoryId(randomUUID()),
+        scope: { kind: 'global' },
+        category: source.category,
+        summary: source.summary,
+        detail: source.detail,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        lastVerifiedAt: source.lastVerifiedAt,
+        revision: this.nextScopeRevision(draft, { kind: 'global' }),
+        sourceRefs: structuredClone(source.sourceRefs),
+        promotedFrom: { workspaceId: scope.workspaceId, id: source.id },
+        ...(source.expiresAt === undefined ? {} : { expiresAt: source.expiresAt }),
+      }
+      draft.entries = [...draft.entries, storedEntry(entry)]
+      draft.meta.globalDirty = true
+      return { id: entry.id, created: true }
+    }, async (_result, draft) => {
+      await removeUnreferencedDetailRecords(this.paths, draft)
+    }, async (result, draft) => {
+      if (!result.created) return
+      const index = draft.entries.find(entry => entry.id === result.id)
+      const source = index?.promotedFrom
+        ? draft.entries.find(entry => entry.id === index.promotedFrom?.id
+          && entry.scope.kind === 'workspace' && entry.scope.workspaceId === index.promotedFrom?.workspaceId)
+        : undefined
+      if (!index || !source) throw new Error('Cannot prepare promoted memory details')
+      const sourceDetail = await readDetailRecord(this.paths, source)
+      const entry: MemoryEntry = { ...withoutDetail(index), detail: sourceDetail.detail }
+      await writeDetailRecord(this.paths, entry)
+      await writeDetailProjection(this.paths, entry)
+    })  }
+
   async remove(scope: MemoryScope, id: MemoryId): Promise<boolean> {
     return this.transaction('memory/forget', draft => {
       const exists = draft.entries.some(entry => entry.id === id && scopeKey(entry.scope) === scopeKey(scope))
       if (!exists) return false
       draft.entries = draft.entries.filter(entry => entry.id !== id)
       this.nextScopeRevision(draft, scope)
-      draft.meta.dirty = true
+      if (scope.kind === 'global') draft.meta.globalDirty = true
+      else draft.meta.dirty = true
       return true
     }, async removed => {
       if (!removed) return
@@ -416,7 +471,7 @@ export class MemoryStore {
 
   private transaction<T>(
     operation: string,
-    update: (draft: StoreState) => T,
+    update: (draft: StoreState) => T | Promise<T>,
     finalize?: (result: T, draft: StoreState) => Promise<void>,
     prepare?: (result: T, draft: StoreState) => Promise<void>,
   ): Promise<T> {
@@ -424,7 +479,7 @@ export class MemoryStore {
       await this.assertWritable()
       await this.recoverPendingProjections()
       const draft = structuredClone(this.state)
-      const result = update(draft)
+      const result = await update(draft)
       const ids = changedProjectionIds(this.state, draft)
       await writeJsonAtomic(this.paths.projectionPending, { formatVersion: 1, ids } satisfies ProjectionPending)
       try {

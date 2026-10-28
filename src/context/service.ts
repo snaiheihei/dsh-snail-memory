@@ -229,14 +229,9 @@ export class MemoryContextService {
     if (metadata) this.queued.delete(this.queueKey(sessionId, metadata.layer, metadata.injectionId))
   }
 
-  async readDetail(sessionId: string, layer: MemoryLayer, id: MemoryId, sourceWorkspaceId?: WorkspaceId): Promise<MemoryEntry | null> {
+  async readDetail(sessionId: string, layer: MemoryLayer, id: MemoryId): Promise<MemoryEntry | null> {
     const state = this.store.getSessionState(sessionId)
     if (!state.layers[layer].enabled) return null
-    if (layer === 'global') {
-      return sourceWorkspaceId
-        ? this.store.read({ kind: 'workspace', workspaceId: sourceWorkspaceId }, id)
-        : null
-    }
     return this.store.read(this.scopeFor(sessionId, layer), id)
   }
 

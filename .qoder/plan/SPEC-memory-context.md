@@ -1,6 +1,6 @@
 # Spec: memory-context
 
-> 2026-10-28 修订：注入协议升级为 Session 级单 active desired、单 pre-step 准入、单用户轮 committed；历史 desired/committed 保留但不代表仍可准入。2026-10-27 的关闭/workspace/global 三态单选与全局聚合契约继续有效。
+> 2026-10-28 独立 Global 修订：global 快照与详情只读取独立 Global 条目，不再聚合或要求来源 workspace；三态单选、单 active desired 和跨 workspace 召回保持不变。
 >
 > 2026-10-28 跨 workspace 修订：workspace 召回可选择任意已注册项目；`selectedWorkspaceId` 与 Session 写入 owner 分离，refresh 按目标项目独立 revision 对账。
 
@@ -60,7 +60,7 @@ agent.inject(createUserMessage({
 - pre-step 记录实际 admitted injection id。post-commit 只按该 id 提交；pre-step 后发生 switch/refresh 时，旧 admitted 仍如实 committed，新 active 保持 pending。每个 turn 的后续 step 不得再准入第二份 Snail 快照；被过滤的新 active 在 `agent/status` 回到 idle 后通过 restore 重新排队。
 - 相同 injection id 不得重复 committed 计数；重复通知不重复 token 统计。重启时即使插件尚未持久化 committed，也能从 Session 历史补齐并避免再次注入；只读 Host 同样根据 Session 历史抑制重复注入，但不尝试写入 committed。
 - 已提交快照和 committed 历史永不 replace 或追溯改写；忘记只影响未来快照和详情读取，也不改变蒸馏游标。
-- `snail_memory_read` 仅接受当前 Session 已启用 scope 和已知 MemoryId；workspace 层按 `selectedWorkspaceId` 读取，不开放任意路径。
+- `snail_memory_read` 仅接受当前 Session 已启用 scope 和已知 MemoryId；workspace 层按 `selectedWorkspaceId` 读取，Global 层直接读取独立 Global 条目，均不开放任意路径。
 - `readDetail()` 异步按父索引中的 id/revision 读取目标权威详情记录；enable、refresh 和快照渲染只消费内存父索引，不预读完整详情。工具输出契约不因存储懒加载而改变。
 
 ### 大详情读取契约

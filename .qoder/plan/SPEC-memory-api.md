@@ -1,6 +1,6 @@
 # Spec: memory-api
 
-> 2026-10-27 修订：新增 disable RPC；remember/correct/read/remove 不接受独立 global scope，全局列表仍是动态只读聚合。以 `SPEC-global-aggregate-memory.md` 为当前契约，本文其余传输与错误边界继续有效。
+> 2026-10-28 独立 Global 修订：新增 Promote RPC；Global read/remove 接受独立 global scope，remember/correct 仍只允许 workspace。Global 列表不再聚合 workspace。
 
 ## Objective
 
@@ -36,10 +36,11 @@ tests/api/               → 路由、校验、错误和命令测试
 
 - `getSessionState(sessionId)`：返回两层 latch、desired/committed revision、最近/累计估算 token、workspace 和 queued 状态。
 - `enable(sessionId, layer)`、`refresh(sessionId, layer)`：单向开关与追加快照。
-- `list(scope, sessionId?)`：返回有效索引条目、全局 workspace 引用、条目数和存储只读状态。
-- `read(scope, id)`、`remove(scope, id)`：UI 父记忆完整详情与删除；read 异步按需读取目标版本化详情记录，remove 等价忘记且不接受 Session 参数。remove 不读取、回退、重置或推进任何 Session `distillationCursor`，也不会使已处理历史重新蒸馏或恢复已删条目。大详情分片只约束模型工具读取，存储懒加载和分片都不改变管理 UI 的人类完整详情查看契约。
-- `remember(input)`、`correct(input)`：显式立即写入；scope 由调用者明确给出。
-- `status()`：writer/read-only、dirty、下次整合/清理时间、最近脱敏错误的安全描述。
+- `list(scope, sessionId?)`：返回目标 scope 的有效索引条目、条目数和存储只读状态；Global 不再返回 workspace 聚合引用。
+- `read(scope, id)`、`remove(scope, id)`：UI 父记忆完整详情与删除；read 异步按需读取目标版本化详情记录，remove 等价忘记且不接受 Session 参数。Global remove 只删除独立 Global 副本。remove 不读取、回退、重置或推进任何 Session `distillationCursor`，也不会使已处理历史重新蒸馏或恢复已删条目。大详情分片只约束模型工具读取，存储懒加载和分片都不改变管理 UI 的人类完整详情查看契约。
+- `promote(scope, id)`：从已注册 workspace 的源条目深复制到独立 Global，返回 `{ id, created }`；重复 Promote 幂等，不接受 global 来源。
+- `remember(input)`、`correct(input)`：显式立即写入；scope 由调用者明确给出且仍为 workspace。
+- `status()`：writer/read-only、workspace/Global dirty、各自下次整合、下次清理时间及最近脱敏错误的安全描述。
 
 所有端点仅接受 POST JSON 和白名单短方法名；限制 body 大小，校验 content-type、自定义请求头、id 枚举和字符串长度。错误分业务 `ok:false` 与传输失败，不返回堆栈或秘密。
 

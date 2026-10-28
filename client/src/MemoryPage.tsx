@@ -16,7 +16,6 @@ interface DetailState {
   readonly scope: MemoryScope
   readonly summary: string
   readonly id: MemoryEntry['id']
-  readonly readOnly: boolean
   readonly entry?: MemoryEntry
   readonly error?: string
 }
@@ -40,6 +39,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const [detail, setDetail] = useState<DetailState | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [promoting, setPromoting] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const detailRequest = useRef(0)
   const detailTrigger = useRef<HTMLElement | null>(null)
@@ -94,20 +94,19 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
 
   const openDetails = async (entry: MemoryIndexEntry, trigger: HTMLElement): Promise<void> => {
     const request = ++detailRequest.current
-    const readOnly = tab === 'global'
     detailTrigger.current = trigger
-    setDetail({ scope: entry.scope, id: entry.id, summary: entry.summary, readOnly })
+    setDetail({ scope: entry.scope, id: entry.id, summary: entry.summary })
     setConfirming(false)
     setNotice(null)
     try {
       const full = await store.read(entry.scope, entry.id)
       if (mounted.current && detailRequest.current === request) {
-        setDetail({ scope: entry.scope, id: entry.id, summary: full.summary, entry: full, readOnly })
+        setDetail({ scope: entry.scope, id: entry.id, summary: full.summary, entry: full })
       }
     } catch (reason) {
       if (mounted.current && detailRequest.current === request) {
         setDetail({
-          scope: entry.scope, id: entry.id, summary: entry.summary, readOnly,
+          scope: entry.scope, id: entry.id, summary: entry.summary,
           error: reason instanceof Error ? reason.message : String(reason),
         })
       }
@@ -115,7 +114,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   }
 
   const closeDetails = (): void => {
-    if (deleting) return
+    if (deleting || promoting) return
     detailRequest.current += 1
     setDetail(null)
     setConfirming(false)
@@ -136,7 +135,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
       document.body.style.overflow = previousOverflow
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [detail, deleting])
+  }, [detail, deleting, promoting])
 
   const remove = async (): Promise<void> => {
     if (detail === null || deleting) return
@@ -153,6 +152,21 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
       if (mounted.current) setNotice(reason instanceof Error ? reason.message : String(reason))
     } finally {
       if (mounted.current) setDeleting(false)
+    }
+  }
+
+  const promote = async (): Promise<void> => {
+    if (detail === null || detail.scope.kind !== 'workspace' || promoting) return
+    const target = detail
+    setPromoting(true)
+    setNotice(null)
+    try {
+      const result = await store.promote(target.scope, target.id)
+      if (mounted.current) setNotice(t(result.created ? 'promoteSuccess' : 'promoteAlready'))
+    } catch (reason) {
+      if (mounted.current) setNotice(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      if (mounted.current) setPromoting(false)
     }
   }
 
@@ -177,7 +191,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
         <button type="button" role="tab" id="snail-memory-workspaces-tab" aria-selected={tab === 'workspaces'} aria-controls="snail-memory-panel" onClick={() => selectTab('workspaces')}>{t('workspaceTab')}</button>
         <button type="button" role="tab" id="snail-memory-settings-tab" aria-selected={tab === 'settings'} aria-controls="snail-memory-panel" onClick={() => selectTab('settings')}>{t('settingsTab')}</button>
       </div>
-      {notice !== null && <p role={notice === t('deleteSuccess') ? 'status' : 'alert'}>{notice}</p>}
+      {notice !== null && <p role={[t('deleteSuccess'), t('promoteSuccess'), t('promoteAlready')].includes(notice) ? 'status' : 'alert'}>{notice}</p>}
       {sessionError !== undefined && <p className="snail-memory-error" role="alert">{sessionError}</p>}
       <div
         role="tabpanel"
@@ -214,7 +228,6 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               <li className="snail-memory-entry" key={`${entry.scope.kind}:${entry.scope.kind === 'workspace' ? entry.scope.workspaceId : ''}:${entry.id}`}>
                 <h2>{entry.summary}</h2>
                 <p>{t(CATEGORY_COPY[entry.category])}</p>
-                {tab === 'global' && entry.scope.kind === 'workspace' && <p>{t('workspace')}: {entry.scope.workspaceId}</p>}
                 <small>{t('updatedAt')}: {entry.updatedAt} · {t('revision')} {entry.revision}</small>
                 {entry.sourceRefs.length > 0 && (
                   <p>{t('sources')}: {entry.sourceRefs.map(ref => `${ref.sessionId}${ref.eventSeqs === undefined ? '' : ` (${t('events')} ${ref.eventSeqs.join(', ')})`}`).join('; ')}</p>
@@ -223,20 +236,6 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               </li>
             ))}
           </ul>
-          {tab === 'global' && index !== undefined && index.workspaces.length > 0 && (
-            <section aria-label={t('workspaceReferences')}>
-              <h2>{t('workspaceReferences')}</h2>
-              <ul className="snail-memory-list">
-                {index.workspaces.map(workspace => (
-                  <li className="snail-memory-entry" key={workspace.workspaceId}>
-                    <strong>{workspace.workspaceId}</strong>
-                    <p>{workspace.entryCount} {t('entries')} · {t('revision')} {workspace.revision}</p>
-                    <small>{t('updatedAt')}: {workspace.updatedAt}</small>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
           </>}
         </>}
       </div>
@@ -257,8 +256,9 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
                 <button type="button" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
                 <button type="button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
               </> : <>
-                {!detail.readOnly && <button type="button" disabled={detail.entry === undefined} onClick={() => setConfirming(true)}>{t('delete')}</button>}
-                <button type="button" autoFocus onClick={closeDetails}>{t('close')}</button>
+                {detail.scope.kind === 'workspace' && <button type="button" disabled={detail.entry === undefined || promoting || deleting} onClick={() => { void promote() }}>{promoting ? t('promoting') : t('promote')}</button>}
+                <button type="button" disabled={detail.entry === undefined || promoting || deleting} onClick={() => setConfirming(true)}>{t('delete')}</button>
+                <button type="button" autoFocus disabled={promoting || deleting} onClick={closeDetails}>{t('close')}</button>
               </>}
             </div>
           </div>
@@ -275,6 +275,7 @@ function SettingsPanel({ store, t }: { readonly store: MemoryClientStore; readon
     reviewEveryUserTurns: '15',
     idleDelayMinutes: '60',
     consolidationCooldownHours: '20',
+    globalConsolidationCooldownDays: '7',
     snapshotTokenBudget: '1200',
     retentionDays: {
       'environment-fact': '30',
@@ -293,6 +294,7 @@ function SettingsPanel({ store, t }: { readonly store: MemoryClientStore; readon
         reviewEveryUserTurns: String(settings.reviewEveryUserTurns),
         idleDelayMinutes: String(settings.idleDelayMinutes),
         consolidationCooldownHours: String(settings.consolidationCooldownHours),
+        globalConsolidationCooldownDays: String(settings.globalConsolidationCooldownDays),
         snapshotTokenBudget: String(settings.snapshotTokenBudget),
         retentionDays: {
           'environment-fact': String(settings.retentionDays['environment-fact']),
@@ -314,6 +316,7 @@ function SettingsPanel({ store, t }: { readonly store: MemoryClientStore; readon
         reviewEveryUserTurns: Number(draft.reviewEveryUserTurns),
         idleDelayMinutes: Number(draft.idleDelayMinutes),
         consolidationCooldownHours: Number(draft.consolidationCooldownHours),
+        globalConsolidationCooldownDays: Number(draft.globalConsolidationCooldownDays),
         snapshotTokenBudget: Number(draft.snapshotTokenBudget),
         retentionDays: {
           'environment-fact': Number(draft.retentionDays['environment-fact']),
@@ -381,6 +384,20 @@ function SettingsPanel({ store, t }: { readonly store: MemoryClientStore; readon
           onChange={event => setDraft(current => ({ ...current, consolidationCooldownHours: event.target.value }))}
         />
         <p>{t('consolidationCooldownHoursHelp')}</p>
+      </div>
+      <div className="snail-memory-setting">
+        <label htmlFor="snail-memory-global-consolidation-delay">{t('globalConsolidationCooldownDays')}</label>
+        <input
+          id="snail-memory-global-consolidation-delay"
+          type="number"
+          min={0}
+          step="any"
+          required
+          disabled={saving}
+          value={draft.globalConsolidationCooldownDays}
+          onChange={event => setDraft(current => ({ ...current, globalConsolidationCooldownDays: event.target.value }))}
+        />
+        <p>{t('globalConsolidationCooldownDaysHelp')}</p>
       </div>
       <div className="snail-memory-setting">
         <label htmlFor="snail-memory-snapshot-token-budget">{t('snapshotTokenBudget')}</label>

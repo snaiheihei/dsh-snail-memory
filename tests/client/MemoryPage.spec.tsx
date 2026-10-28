@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryPage } from '../../client/src/MemoryPage.js'
 import { MemoryClientStore } from '../../client/src/store.js'
 import type { WorkspaceId } from '../../src/store/types.js'
-import { ENTRY, FakeRpc, memoryIndex, sessionState, t, WORKSPACE_SCOPE } from './fixtures.js'
+import { ENTRY, FakeRpc, GLOBAL_SCOPE, memoryIndex, sessionState, t, WORKSPACE_SCOPE } from './fixtures.js'
 
 afterEach(cleanup)
 
@@ -22,6 +22,7 @@ function readyRpc() {
     .on('list', ({ scope }) => memoryIndex(scope))
     .on('read', () => ENTRY)
     .on('remove', () => ({ removed: true }))
+    .on('promote', () => ({ id: ENTRY.id, created: true }))
     .on('listWorkspaces', () => [
       { id: 'workspace-1' as WorkspaceId, title: 'First project' },
       { id: 'workspace-2' as WorkspaceId, title: 'Second project' },
@@ -30,6 +31,7 @@ function readyRpc() {
       reviewEveryUserTurns: 15,
       idleDelayMinutes: 60,
       consolidationCooldownHours: 20,
+      globalConsolidationCooldownDays: 7,
       snapshotTokenBudget: 1_200,
       retentionDays: DEFAULT_RETENTION_DAYS,
     }))
@@ -51,8 +53,7 @@ describe('MemoryPage', () => {
     expect(screen.getByText('Use pnpm workspaces')).toBeTruthy()
     expect(screen.getByText('Project convention')).toBeTruthy()
     expect(screen.getByText('Sources: session-1 (events 3, 4)')).toBeTruthy()
-    expect(screen.getByText('Workspace references')).toBeTruthy()
-    expect(screen.getByText('3 entries · revision 7')).toBeTruthy()
+    expect(screen.queryByText('Workspace references')).toBeNull()
     expect(screen.queryByText(/provider exact usage/i)).toBeNull()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
@@ -81,7 +82,7 @@ describe('MemoryPage', () => {
     expect(rpc.calls.filter(call => call.method === 'list')).toHaveLength(1)
   })
 
-  it('reads global aggregate details from their source workspace without offering deletion', async () => {
+  it('reads and deletes an independent global memory without touching a source workspace', async () => {
     const rpc = readyRpc()
     const store = new MemoryClientStore(rpc)
     render(<MemoryPage sessionId="session-1" store={store} t={t} />)
@@ -89,9 +90,12 @@ describe('MemoryPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
     expect(await screen.findByRole('dialog', { name: 'Use pnpm workspaces' })).toBeTruthy()
     expect(screen.getByText(ENTRY.detail)).toBeTruthy()
-    expect(rpc.calls.find(call => call.method === 'read')?.payload).toEqual({ scope: WORKSPACE_SCOPE, id: ENTRY.id })
-    expect(screen.queryByRole('button', { name: 'Delete memory' })).toBeNull()
-    expect(rpc.count('remove')).toBe(0)
+    expect(rpc.calls.find(call => call.method === 'read')?.payload).toEqual({ scope: GLOBAL_SCOPE, id: ENTRY.id })
+    fireEvent.click(screen.getByRole('button', { name: 'Delete memory' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }))
+
+    expect(await screen.findByText('Memory deleted. Conversation history was not deleted; injected snapshots remain.')).toBeTruthy()
+    expect(rpc.calls.find(call => call.method === 'remove')?.payload).toEqual({ scope: GLOBAL_SCOPE, id: ENTRY.id })
   })
 
   it('opens details in a modal overlay and supports Escape and outside dismissal', async () => {
@@ -115,7 +119,21 @@ describe('MemoryPage', () => {
     expect(screen.queryByRole('dialog', { name: 'Use pnpm workspaces' })).toBeNull()
   })
 
-  it('requires confirmation before deleting a workspace memory only', async () => {
+  it('promotes a workspace memory from its detail dialog', async () => {
+    const rpc = readyRpc()
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Promote to global memory' }))
+
+    expect(await screen.findByText('Memory promoted to global memory.')).toBeTruthy()
+    expect(rpc.calls.find(call => call.method === 'promote')?.payload).toEqual({ scope: WORKSPACE_SCOPE, id: ENTRY.id })
+    expect(rpc.count('remove')).toBe(0)
+  })
+
+  it('requires confirmation before deleting a workspace memory', async () => {
     const rpc = readyRpc()
     const store = new MemoryClientStore(rpc)
     render(<MemoryPage sessionId="session-1" store={store} t={t} />)
@@ -165,6 +183,7 @@ describe('MemoryPage', () => {
     const review = await screen.findByRole('spinbutton', { name: 'Review every N real user turns' })
     const idle = screen.getByRole('spinbutton', { name: 'Idle distillation delay (minutes)' })
     const dirty = screen.getByRole('spinbutton', { name: 'Dirty consolidation delay (hours)' })
+    const globalDirty = screen.getByRole('spinbutton', { name: 'Global dirty consolidation delay (days)' })
     const snapshotBudget = screen.getByRole('spinbutton', { name: 'Snapshot token budget (estimated tokens)' })
     const environment = screen.getByRole('spinbutton', { name: 'Environment fact retention (days)' })
     const convention = screen.getByRole('spinbutton', { name: 'Project convention retention (days)' })
@@ -174,6 +193,7 @@ describe('MemoryPage', () => {
     expect((review as HTMLInputElement).value).toBe('15')
     expect((idle as HTMLInputElement).value).toBe('60')
     expect((dirty as HTMLInputElement).value).toBe('20')
+    expect((globalDirty as HTMLInputElement).value).toBe('7')
     expect((snapshotBudget as HTMLInputElement).value).toBe('1200')
     expect((environment as HTMLInputElement).value).toBe('30')
     expect((convention as HTMLInputElement).value).toBe('180')
@@ -184,6 +204,7 @@ describe('MemoryPage', () => {
     fireEvent.change(review, { target: { value: '4' } })
     fireEvent.change(idle, { target: { value: '2.5' } })
     fireEvent.change(dirty, { target: { value: '8' } })
+    fireEvent.change(globalDirty, { target: { value: '3' } })
     fireEvent.change(snapshotBudget, { target: { value: '800' } })
     fireEvent.change(environment, { target: { value: '45' } })
     fireEvent.change(convention, { target: { value: '90' } })
@@ -197,6 +218,7 @@ describe('MemoryPage', () => {
       reviewEveryUserTurns: 4,
       idleDelayMinutes: 2.5,
       consolidationCooldownHours: 8,
+      globalConsolidationCooldownDays: 3,
       snapshotTokenBudget: 800,
       retentionDays: {
         'environment-fact': 45,

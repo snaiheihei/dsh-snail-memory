@@ -98,7 +98,7 @@ async function setup() {
 
 async function addGlobalMemory(store: MemoryStore, summary: string) {
   return store.upsert({
-    scope: { kind: 'workspace', workspaceId: workspaceId('workspace-1') },
+    scope: { kind: 'global' },
     category: 'preference',
     summary,
     detail: summary,
@@ -330,30 +330,28 @@ describe('MemoryContextService single-snapshot protocol', () => {
 })
 
 describe('MemoryContextService snapshots and detail reads', () => {
-  it('renders global snapshots from all workspaces instead of legacy global entries', async () => {
+  it('renders only independent global entries without workspace aggregate references', async () => {
     const { store, context, agent } = await setup()
-    const first = workspaceId('workspace-1')
-    const second = workspaceId('workspace-2')
-    for (const [id, summary] of [[first, 'First project rule'], [second, 'Second project rule']] as const) {
+    for (const [id, summary] of [[workspaceId('workspace-1'), 'First project rule'], [workspaceId('workspace-2'), 'Second project rule']] as const) {
       await store.upsert({
         scope: { kind: 'workspace', workspaceId: id }, category: 'project-convention',
         summary, detail: summary, sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
       })
     }
     await store.upsert({
-      scope: { kind: 'global' }, category: 'preference', summary: 'Legacy global preference',
-      detail: 'Legacy global preference', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+      scope: { kind: 'global' }, category: 'preference', summary: 'Independent global preference',
+      detail: 'Independent global preference', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
     })
 
     await context.enable(agent, 'global')
     const active = context.getSessionState('session-1').activeDesired
     const snapshot = context.getSessionState('session-1').layers.global.desired
       .find(item => item.injectionId === active?.injectionId)?.snapshot
-    expect(snapshot).toContain('First project rule')
-    expect(snapshot).toContain('Second project rule')
-    expect(snapshot).toContain('workspace-1')
-    expect(snapshot).toContain('workspace-2')
-    expect(snapshot).not.toContain('Legacy global preference')
+    expect(snapshot).toContain('Independent global preference')
+    expect(snapshot).not.toContain('First project rule')
+    expect(snapshot).not.toContain('Second project rule')
+    expect(snapshot).not.toContain('Workspace 索引')
+    expect(snapshot).toContain('按 id 按需读取')
   })
 
   it('applies a changed token budget only to newly created snapshots', async () => {
@@ -388,11 +386,10 @@ describe('MemoryContextService snapshots and detail reads', () => {
     await expect(context.refresh(agent, 'global')).rejects.toThrow(/disabled|enable/i)
   })
 
-  it('reads detail only for an enabled layer and matching memory id', async () => {
+  it('reads global detail only for an enabled layer and matching independent memory id', async () => {
     const { store, context, agent } = await setup()
-    const id = workspaceId('workspace-1')
     const entry = await store.upsert({
-      scope: { kind: 'workspace', workspaceId: id },
+      scope: { kind: 'global' },
       category: 'long-term-decision',
       summary: 'Keep Session append-only',
       detail: 'Never rewrite a committed memory snapshot.',
@@ -400,11 +397,10 @@ describe('MemoryContextService snapshots and detail reads', () => {
       lastVerifiedAt: '2026-10-26T00:00:00.000Z',
     })
 
-    await expect(context.readDetail('session-1', 'global', memoryId('missing'), id)).resolves.toBeNull()
-    await expect(context.readDetail('session-1', 'global', entry.id, id)).resolves.toBeNull()
+    await expect(context.readDetail('session-1', 'global', memoryId('missing'))).resolves.toBeNull()
+    await expect(context.readDetail('session-1', 'global', entry.id)).resolves.toBeNull()
     await context.enable(agent, 'global')
-    expect((await context.readDetail('session-1', 'global', entry.id))?.detail).toBeUndefined()
-    expect((await context.readDetail('session-1', 'global', entry.id, id))?.detail).toBe('Never rewrite a committed memory snapshot.')
+    expect((await context.readDetail('session-1', 'global', entry.id))?.detail).toBe('Never rewrite a committed memory snapshot.')
   })
 
   it('uses an explicit workspace as the recall selection without changing the Session owner', async () => {

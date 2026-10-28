@@ -10,6 +10,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   reviewEveryUserTurns: 15,
   idleDelayMinutes: 60,
   consolidationCooldownHours: 20,
+  globalConsolidationCooldownDays: 7,
   snapshotTokenBudget: 1_200,
   retentionDays: {
     'environment-fact': 30,
@@ -33,6 +34,10 @@ function validate(value: unknown): MemorySettings {
     || !Number.isFinite(input.consolidationCooldownHours) || input.consolidationCooldownHours < 0) {
     throw new Error('consolidationCooldownHours must be a non-negative finite number')
   }
+  if (typeof input.globalConsolidationCooldownDays !== 'number'
+    || !Number.isFinite(input.globalConsolidationCooldownDays) || input.globalConsolidationCooldownDays < 0) {
+    throw new Error('globalConsolidationCooldownDays must be a non-negative finite number')
+  }
   if (!Number.isSafeInteger(input.snapshotTokenBudget) || (input.snapshotTokenBudget as number) < 1) {
     throw new Error('snapshotTokenBudget must be a positive integer')
   }
@@ -52,6 +57,7 @@ function validate(value: unknown): MemorySettings {
     reviewEveryUserTurns: input.reviewEveryUserTurns as number,
     idleDelayMinutes: input.idleDelayMinutes,
     consolidationCooldownHours: input.consolidationCooldownHours,
+    globalConsolidationCooldownDays: input.globalConsolidationCooldownDays,
     snapshotTokenBudget: input.snapshotTokenBudget as number,
     retentionDays,
   }

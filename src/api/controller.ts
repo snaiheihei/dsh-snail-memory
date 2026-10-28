@@ -4,7 +4,7 @@ import type {
 } from '../contract.js'
 import type { MemoryContextService, InjectionAgent, MemoryOperationResult } from '../context/service.js'
 import { pendingInjection, type MemoryStore } from '../store/store.js'
-import { workspaceId, type MemoryEntry, type MemoryId, type MemoryIndex, type MemoryScope, type UpsertMemoryInput, type WorkspaceId } from '../store/types.js'
+import { workspaceId, type MemoryEntry, type MemoryId, type MemoryIndex, type MemoryScope, type PromoteMemoryResult, type UpsertMemoryInput, type WorkspaceId } from '../store/types.js'
 import { prepareMemoryCandidate } from '../safety/index.js'
 import { MemoryApiError, safeError } from './errors.js'
 
@@ -15,6 +15,7 @@ export interface ResolvedSession {
 export interface MemoryWriteLifecycle {
   remember(input: UpsertMemoryInput): Promise<MemoryEntry>
   correct(input: UpsertMemoryInput & { id: MemoryId }): Promise<MemoryEntry>
+  promote(scope: MemoryScope, id: MemoryId): Promise<PromoteMemoryResult>
   forget(scope: MemoryScope, id: MemoryId): Promise<boolean>
 }
 export interface MemorySettingsLifecycle {
@@ -53,6 +54,7 @@ export class MemoryController {
   call(method: 'list', payload: ScopeRequest): Promise<MemoryIndex>
   call(method: 'read', payload: ReadRequest): Promise<MemoryEntry>
   call(method: 'remove', payload: ReadRequest): Promise<{ removed: boolean }>
+  call(method: 'promote', payload: ReadRequest): Promise<PromoteMemoryResult>
   call(method: 'remember', payload: WriteRequest): Promise<MemoryEntry>
   call(method: 'correct', payload: CorrectRequest): Promise<MemoryEntry>
   call(method: 'status', payload: Record<string, never>): Promise<MemoryStatus>
@@ -70,6 +72,7 @@ export class MemoryController {
         case 'list': return this.list((payload as ScopeRequest).scope)
         case 'read': return await this.readMemory(payload as ReadRequest)
         case 'remove': return { removed: await this.forget(payload as ReadRequest) }
+        case 'promote': return await this.promote(payload as ReadRequest)
         case 'remember': return await this.writeMemory(payload as WriteRequest, false)
         case 'correct': return await this.writeMemory(payload as CorrectRequest, true)
         case 'status': return { writable: this.store.writable, ...this.store.getMeta() }
@@ -132,7 +135,7 @@ export class MemoryController {
   }
 
   private async readMemory(request: ReadRequest): Promise<MemoryEntry> {
-    this.assertWorkspace(request.scope)
+    this.assertWorkspace(request.scope, true)
     const entry = await this.store.read(request.scope, request.id)
     if (!entry) throw new MemoryApiError('memory-not-found', 'The memory entry does not exist.', 404)
     return entry
@@ -157,15 +160,22 @@ export class MemoryController {
   }
 
   private async forget(request: ReadRequest): Promise<boolean> {
-    this.assertWorkspace(request.scope)
+    this.assertWorkspace(request.scope, true)
     return this.options.lifecycle
       ? this.options.lifecycle.forget(request.scope, request.id)
       : this.store.remove(request.scope, request.id)
   }
 
-  private assertWorkspace(scope: MemoryScope, aggregate = false): void {
-    if (scope.kind === 'global' && !aggregate) {
-      throw new MemoryApiError('invalid-operation', 'Global memory is a read-only aggregate; use its source workspace.', 409)
+  private async promote(request: ReadRequest): Promise<PromoteMemoryResult> {
+    this.assertWorkspace(request.scope)
+    return this.options.lifecycle
+      ? this.options.lifecycle.promote(request.scope, request.id)
+      : this.store.promote(request.scope, request.id)
+  }
+
+  private assertWorkspace(scope: MemoryScope, allowGlobal = false): void {
+    if (scope.kind === 'global' && !allowGlobal) {
+      throw new MemoryApiError('invalid-operation', 'Direct global writes are unavailable; promote a workspace memory instead.', 409)
     }
     if (scope.kind === 'workspace' && this.options.isWorkspace && !this.options.isWorkspace(scope.workspaceId)) {
       throw new MemoryApiError('workspace-not-found', 'The workspace does not exist.', 404)

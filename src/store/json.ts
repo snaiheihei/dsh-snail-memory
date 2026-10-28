@@ -22,6 +22,9 @@ export function emptyState(): StoreState {
       nextConsolidationAt: null,
       nextRetentionAt: null,
       lastConsolidationAt: null,
+      globalDirty: false,
+      nextGlobalConsolidationAt: null,
+      lastGlobalConsolidationAt: null,
       lastRetentionAt: null,
       lastError: null,
       pending: {},
@@ -55,11 +58,33 @@ async function readSnapshot(path: string, formatVersion: 1 | 2): Promise<unknown
 }
 
 export async function readState(path: string): Promise<StoreState | null> {
-  return await readSnapshot(path, 2) as StoreState | null
+  const state = await readSnapshot(path, 2) as StoreState | null
+  return state ? normalizeState(state) : null
 }
 
 export async function readLegacyState(path: string): Promise<LegacyStoreState | null> {
-  return await readSnapshot(path, 1) as LegacyStoreState | null
+  const state = await readSnapshot(path, 1) as LegacyStoreState | null
+  return state ? normalizeState(state) : null
+}
+
+function normalizeState<T extends StoreState | LegacyStoreState>(state: T): T {
+  const legacyGlobal = state.meta.globalDirty === undefined
+  const aggregateRevision = Object.values(state.scopeRevisions.workspaces).reduce((total, revision) => total + revision, 0)
+  return {
+    ...state,
+    scopeRevisions: {
+      ...state.scopeRevisions,
+      global: legacyGlobal
+        ? Math.max(state.scopeRevisions.global, aggregateRevision + 1)
+        : state.scopeRevisions.global,
+    },
+    meta: {
+      ...state.meta,
+      globalDirty: state.meta.globalDirty ?? false,
+      nextGlobalConsolidationAt: state.meta.nextGlobalConsolidationAt ?? null,
+      lastGlobalConsolidationAt: state.meta.lastGlobalConsolidationAt ?? null,
+    },
+  }
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {

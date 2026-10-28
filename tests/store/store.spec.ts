@@ -58,26 +58,56 @@ afterEach(async () => {
 })
 
 describe('MemoryStore', () => {
-  it('builds global as a live aggregate of every workspace and excludes legacy global entries', async () => {
+  it('lists only independent global entries and does not advance global revision for workspace writes', async () => {
     const store = await open(await tempRoot())
     const globalScope: MemoryScope = { kind: 'global' }
     const first: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
     const second: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-2') }
-    await store.upsert(input(globalScope, 'Legacy independent global'))
+    await store.upsert(input(globalScope, 'Independent global'))
     await store.upsert(input(first, 'First workspace convention'))
     await store.upsert(input(second, 'Second workspace convention'))
     const before = store.list(globalScope)
 
-    expect(before.entries.map(entry => entry.summary)).toEqual([
-      'Second workspace convention',
-      'First workspace convention',
-    ])
-    expect(before.entries.map(entry => entry.scope)).toEqual([second, first])
+    expect(before.entries.map(entry => entry.summary)).toEqual(['Independent global'])
+    expect(before.entries.map(entry => entry.scope)).toEqual([globalScope])
+    expect(before.workspaces).toEqual([])
     const revision = before.revision
     await store.updateSessionState('session-1', state => { state.layers.global.enabled = true })
     expect(store.list(globalScope).revision).toBe(revision)
     await store.upsert(input(first, 'Another first workspace convention'))
+    expect(store.list(globalScope).revision).toBe(revision)
+    await store.upsert(input(globalScope, 'Another global convention'))
     expect(store.list(globalScope).revision).toBeGreaterThan(revision)
+  })
+
+  it('establishes an independent global revision baseline for legacy aggregate snapshots', async () => {
+    const root = await tempRoot()
+    const store = await open(root)
+    const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const source = await store.upsert(input(workspaceScope, 'Legacy workspace'))
+    const workspaceRevision = store.list(workspaceScope).revision
+    const statePath = store.paths.state
+    await store.close()
+    const legacy = JSON.parse(await readFile(statePath, 'utf8')) as {
+      scopeRevisions: { global: number }
+      meta: Record<string, unknown>
+    }
+    legacy.scopeRevisions.global = 0
+    Reflect.deleteProperty(legacy.meta, 'globalDirty')
+    Reflect.deleteProperty(legacy.meta, 'nextGlobalConsolidationAt')
+    Reflect.deleteProperty(legacy.meta, 'lastGlobalConsolidationAt')
+    await writeFile(statePath, JSON.stringify(legacy), 'utf8')
+
+    const reopened = await open(root)
+    const baseline = reopened.list({ kind: 'global' }).revision
+    expect(baseline).toBeGreaterThan(workspaceRevision)
+    expect(reopened.getMeta()).toMatchObject({
+      globalDirty: false,
+      nextGlobalConsolidationAt: null,
+      lastGlobalConsolidationAt: null,
+    })
+    await reopened.promote(workspaceScope, source.id)
+    expect(reopened.list({ kind: 'global' }).revision).toBeGreaterThan(baseline)
   })
 
   it('normalizes legacy dual-enabled sessions to workspace only', async () => {
@@ -92,21 +122,56 @@ describe('MemoryStore', () => {
     expect(state.layers.global.enabled).toBe(false)
   })
 
-  it('keeps legacy global entries out of the aggregate and publishes workspace references', async () => {
+  it('promotes a complete workspace memory once with independent identity and provenance', async () => {
     const store = await open(await tempRoot())
     const globalScope: MemoryScope = { kind: 'global' }
     const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const source = await store.upsert({
+      ...input(workspaceScope, 'Run focused tests'),
+      detail: `Heading\n\n${'a'.repeat(9_000)}`,
+      supersedes: [memoryId('old-workspace-memory')],
+    })
 
-    await store.upsert(input(globalScope, 'Use pnpm'))
-    await store.upsert(input(workspaceScope, 'Run focused tests'))
-
-    expect(store.list(globalScope).entries.map(entry => entry.summary)).toEqual(['Run focused tests'])
-    expect(store.list(workspaceScope).entries.map(entry => entry.summary)).toEqual(['Run focused tests'])
-    const globalIndex = store.list(globalScope)
-    expect(globalIndex.workspaces).toEqual([
-      expect.objectContaining({ workspaceId: workspaceId('workspace-1'), entryCount: 1 }),
+    const [first, duplicate] = await Promise.all([
+      store.promote(workspaceScope, source.id),
+      store.promote(workspaceScope, source.id),
     ])
-    expect(globalIndex.workspaces[0]).not.toHaveProperty('detail')
+
+    expect(first.created).toBe(true)
+    expect(duplicate.created).toBe(false)
+    expect(duplicate.id).toBe(first.id)
+    expect(first.id).not.toBe(source.id)
+    expect(store.list(globalScope).entries).toHaveLength(1)
+    const promoted = await store.read(globalScope, first.id)
+    expect(promoted).toMatchObject({
+      scope: globalScope,
+      summary: source.summary,
+      detail: source.detail,
+      sourceRefs: source.sourceRefs,
+      promotedFrom: { workspaceId: workspaceScope.workspaceId, id: source.id },
+    })
+    expect(promoted?.supersedes).toBeUndefined()
+    expect(store.list(workspaceScope).entries).toHaveLength(1)
+  })
+
+  it('keeps promoted global and source workspace memories isolated after later edits and deletes', async () => {
+    const store = await open(await tempRoot())
+    const globalScope: MemoryScope = { kind: 'global' }
+    const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const source = await store.upsert(input(workspaceScope, 'Original source'))
+    const promoted = await store.promote(workspaceScope, source.id)
+
+    await store.upsert({ ...input(workspaceScope, 'Corrected source'), id: source.id })
+    expect((await store.read(globalScope, promoted.id))?.summary).toBe('Original source')
+    await store.remove(workspaceScope, source.id)
+    expect((await store.read(globalScope, promoted.id))?.detail).toBe('Original source details')
+
+    await store.remove(globalScope, promoted.id)
+    const recreated = await store.upsert(input(workspaceScope, 'New source'))
+    expect((await store.read(workspaceScope, recreated.id))?.detail).toBe('New source details')
+    const promotedAgain = await store.promote(workspaceScope, recreated.id)
+    expect(promotedAgain.created).toBe(true)
+    expect(store.list(globalScope).entries).toHaveLength(1)
   })
 
   it('links workspace index entries to the shared detail projection', async () => {
@@ -126,11 +191,11 @@ describe('MemoryStore', () => {
     const detail = `Heading\n\n${'a'.repeat(9_000)}`
     const entry = await store.upsert({ ...input(scope, 'Large detail'), detail })
 
-    const index = await readFile(join(root, 'global', 'INDEX.md'), 'utf8')
+    const index = await readFile(join(root, 'workspaces', 'workspace-1', 'INDEX.md'), 'utf8')
     const chunkIndex = await readFile(join(root, 'details', entry.id, 'INDEX.md'), 'utf8')
     const firstChunk = await readFile(join(root, 'details', entry.id, 'part-001.md'), 'utf8')
 
-    expect(index).toContain(`](../details/${entry.id}/INDEX.md)`)
+    expect(index).toContain(`](../../details/${entry.id}/INDEX.md)`)
     expect(index.match(/Large detail/g)).toHaveLength(1)
     expect(index).not.toContain('part-001')
     expect(chunkIndex).toContain('part-001.md')
@@ -183,7 +248,7 @@ describe('MemoryStore', () => {
 
     const second = await open(root)
     expect((await second.read(scope, entry.id))?.summary).toBe('Prefer explicit APIs')
-    expect(second.list(scope).entries.map(item => item.summary)).toEqual([])
+    expect(second.list(scope).entries.map(item => item.summary)).toEqual(['Prefer explicit APIs'])
     expect(second.getSessionState('session-1').layers.global).toMatchObject({
       enabled: true,
       committed: [{ injectionId: 'injection-1', tokens: 42 }],

@@ -47,6 +47,10 @@ function settings(input: Record<string, unknown>) {
     || !Number.isFinite(input.consolidationCooldownHours) || input.consolidationCooldownHours < 0) {
     throw new MemoryApiError('invalid-request', 'Invalid consolidationCooldownHours.')
   }
+  if (typeof input.globalConsolidationCooldownDays !== 'number'
+    || !Number.isFinite(input.globalConsolidationCooldownDays) || input.globalConsolidationCooldownDays < 0) {
+    throw new MemoryApiError('invalid-request', 'Invalid globalConsolidationCooldownDays.')
+  }
   if (typeof input.snapshotTokenBudget !== 'number'
     || !Number.isSafeInteger(input.snapshotTokenBudget) || input.snapshotTokenBudget < 1) {
     throw new MemoryApiError('invalid-request', 'Invalid snapshotTokenBudget.')
@@ -64,6 +68,7 @@ function settings(input: Record<string, unknown>) {
     reviewEveryUserTurns: input.reviewEveryUserTurns,
     idleDelayMinutes: input.idleDelayMinutes,
     consolidationCooldownHours: input.consolidationCooldownHours,
+    globalConsolidationCooldownDays: input.globalConsolidationCooldownDays,
     snapshotTokenBudget: input.snapshotTokenBudget,
     retentionDays,
   }
@@ -96,7 +101,8 @@ export function validatePayload(method: RpcMethod, payload: unknown): RpcPayload
     }
     case 'list': return { scope: scope(input.scope) }
     case 'read':
-    case 'remove': return { scope: scope(input.scope), id: memoryId(string(input.id, 'id')!) }
+    case 'remove':
+    case 'promote': return { scope: scope(input.scope), id: memoryId(string(input.id, 'id')!) }
     case 'remember': return write(input)
     case 'correct': return { ...write(input), id: memoryId(string(input.id, 'id')!) }
     case 'status':

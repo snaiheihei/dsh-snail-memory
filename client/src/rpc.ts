@@ -2,7 +2,7 @@ import type {
   CorrectRequest, EnableRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, RpcMethod, RpcResult, ScopeRequest,
   SessionRequest, SessionStateView, WorkspaceView, WriteRequest,
 } from '../../src/contract.js'
-import type { MemoryEntry, MemoryIndex } from '../../src/store/types.js'
+import type { MemoryEntry, MemoryIndex, PromoteMemoryResult } from '../../src/store/types.js'
 
 export type MemoryRpcMethod = RpcMethod
 export interface MemoryOperationResult {
@@ -18,6 +18,7 @@ export interface RpcRequestMap {
   readonly list: ScopeRequest
   readonly read: ReadRequest
   readonly remove: ReadRequest
+  readonly promote: ReadRequest
   readonly remember: WriteRequest
   readonly correct: CorrectRequest
   readonly status: Record<string, never>
@@ -34,6 +35,7 @@ export interface RpcResponseMap {
   readonly list: MemoryIndex
   readonly read: MemoryEntry
   readonly remove: { readonly removed: boolean }
+  readonly promote: PromoteMemoryResult
   readonly remember: MemoryEntry
   readonly correct: MemoryEntry
   readonly status: MemoryStatus

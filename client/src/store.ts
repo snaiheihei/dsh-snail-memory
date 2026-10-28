@@ -1,5 +1,5 @@
 import type { MemorySettings, SessionStateView, WorkspaceView } from '../../src/contract.js'
-import type { MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope, WorkspaceId } from '../../src/store/types.js'
+import type { MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope, PromoteMemoryResult, WorkspaceId } from '../../src/store/types.js'
 import type { MemoryOperationResult, MemoryRpc } from './rpc.js'
 
 interface StoreOptions {
@@ -185,6 +185,12 @@ export class MemoryClientStore {
 
   async remove(scope: MemoryScope, id: MemoryId): Promise<{ readonly removed: boolean }> {
     const result = await this.rpc.call('remove', { scope, id })
+    await this.notifyChanged()
+    return result
+  }
+
+  async promote(scope: MemoryScope, id: MemoryId): Promise<PromoteMemoryResult> {
+    const result = await this.rpc.call('promote', { scope, id })
     await this.notifyChanged()
     return result
   }

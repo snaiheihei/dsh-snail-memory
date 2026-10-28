@@ -1,6 +1,6 @@
 # Spec: memory-web
 
-> 2026-10-27 修订：两个独立 enable 按钮已替换为关闭/workspace/global 三态单选和当前层 refresh；全局页展示所有 workspace 聚合条目且只读，删除在具体 workspace 页执行。以 `SPEC-global-aggregate-memory.md` 为当前契约。
+> 2026-10-28 独立 Global 修订：Global tab 只显示人工 Promote 的独立条目并允许删除；workspace 详情弹窗增加 Promote，Settings 增加默认 7 天的 Global consolidation delay。全局不再显示 workspace 聚合条目和引用。
 >
 > 2026-10-28 修订：workspace 下拉框支持选择任意已注册项目并直接切换召回范围；Ungrouped 不再禁用该选择，Host 的 `selectedWorkspaceId` 是恢复依据。
 
@@ -43,9 +43,10 @@ scripts/build-client.mjs      → 单文件 window.__ModuleLoader__ handoff
 - workspace 下拉框列出全部已注册项目，默认恢复 Host 的 `selectedWorkspaceId`，其次使用 Session owner，再其次使用首个注册项目。可选择非当前项目，Ungrouped Session 也可选择；已启用 A 时选择 B 会显示 Enable，并可直接切换召回项目。
 - enable(workspace) 将下拉选择发送给 Host；重复启用同一项目保持幂等，refresh 只刷新 Host 当前已启用的召回 scope。旧 Session 或旧选择的异步响应不得覆盖新状态。
 - `sidebar.panellist` 注册 Memory icon，`main` 使用相同 key 注册页面。
-- 页面 tab 为“总记忆索引”和“当前 workspace 索引”；展示有效条目数、最近快照和当前 Session 累计注入估算 token。
-- 条目可查看摘要、分类、更新时间和详情；删除需确认，成功文案明确“未删除对话历史，已注入快照仍保留”。
-- 全局 tab 展示聚合条目及来源 workspace；无当前 workspace 时第二个 tab 显示空状态。
+- 页面 tab 为“全局记忆索引”、“Workspaces”和“Settings”；展示有效条目数、最近快照和当前 Session 累计注入估算 token。
+- 条目可查看摘要、分类、更新时间和详情；workspace 详情提供 Promote，Global 与 workspace 均允许删除且需确认。删除成功文案明确“未删除对话历史，已注入快照仍保留”；Promote 成功/已存在反馈不暗示后续自动同步。
+- 全局 tab 只展示独立 Global 条目，不显示来源 workspace 聚合列表；Settings 提供默认 7 天的 Global consolidation delay，与 workspace 20 小时设置分开保存。
+- 无当前 workspace 时 Workspaces tab 显示空状态，Global tab 仍可独立使用。
 - token 一律标为“估算”，不得显示为 provider 精确 usage。
 
 ## Code Style

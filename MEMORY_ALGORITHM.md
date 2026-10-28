@@ -1,6 +1,6 @@
 # Snail Memory：记忆算法、设计技巧与演进
 
-本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-27 的持久游标顺序蒸馏、大详情分片、父索引驻留与详情懒加载实现为基线。
+本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-28 的持久游标顺序蒸馏、大详情分片、父索引驻留、详情懒加载和独立 Global 记忆库实现为基线。
 
 文中严格区分三类机制：
 
@@ -10,18 +10,18 @@
 
 ## 1. 设计目标与非目标
 
-Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一套对话压缩器。它把少量稳定知识保存到 workspace 层，在会话明确选择当前 workspace 或全局聚合后注入摘要索引，并允许模型按需读取详情。
+Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一套对话压缩器。它把少量稳定知识保存到 workspace 层，并允许用户把值得跨项目复用的条目显式 Promote 到独立 Global 记忆库。会话明确选择当前 workspace 或 Global 后注入对应摘要索引，模型再按需读取详情。
 
 核心目标：
 
-1. workspace 隔离权威写入，全局按需汇总所有 workspace，不复制或二次蒸馏条目。
-2. 自动蒸馏与显式记住、纠正、忘记并存。
+1. workspace 隔离权威写入；Global 只通过人工 Promote 深复制和自身整合维护，不动态汇总或自动同步所有 workspace。
+2. 自动蒸馏与显式记住、纠正、提升、忘记并存。
 3. 摘要优先、详情按需，大详情再按片读取，控制单次模型可见量。
 4. 所有模型可见内容都有普通 Session 消息或工具结果作为证据。
-5. 删除只影响记忆，不删除、替换或压缩对话历史。
+5. 删除只影响目标 scope 的记忆，不删除、替换或压缩对话历史，也不影响来源或副本。
 6. 重启可恢复，多 Host 不静默并发写，秘密不进入长期记忆和审计正文。
 
-当前明确不采用向量数据库、embedding 召回或查询相关性排序，也不把 workspace 记忆复制、晋升或整合成独立全局条目。全局只是所有 workspace 当前条目的动态只读聚合。它不是完整知识图谱或实时事实系统；旧记忆只是带来源时间的参考数据。
+当前明确不采用向量数据库、embedding 召回或查询相关性排序，也不自动批量迁移、晋升或同步 workspace 记忆。Global 不是完整知识图谱或实时事实系统；旧记忆只是带来源时间的参考数据。
 
 ## 2. 总体算法视图
 
@@ -42,12 +42,18 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
                                              │
                               scope 内确定性去重与 upsert
                                              │
-                                      dirty + 整合计划
+                              workspace dirty + 整合计划
                                              │
-                         至多 20 小时后：scope 内语义整合
-                         每 24 小时：保留期与显式过期清理
+                         默认 20 小时后：逐 workspace 语义整合
+                         每 24 小时：仅 workspace 保留期清理
+
+workspace 详情 ── 人工 Promote 深复制 ──→ 独立 Global 条目
                                              │
-                       父索引 JSON + 版本化详情 JSON + Markdown 投影
+                                Global dirty + 独立整合计划
+                                             │
+                              默认 7 天后：仅 Global 语义整合
+
+两类 scope ──→ 父索引 JSON + 版本化详情 JSON + Markdown 投影
                                              │
                 enable / refresh → 摘要索引快照 → append-only 注入
                                              │
@@ -60,10 +66,10 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
 
 ### 3.1 两种 scope
 
-- `workspace`：唯一可写的条目来源，保存当前 WorkspaceId 下的项目记忆。自动蒸馏、显式记住/纠正/忘记、整合和保留期清理都只在这一层执行；Ungrouped 会话没有隐式 workspace，因此不会自动蒸馏到全局。
-- `global`：所有 workspace 当前条目的动态只读聚合。列表、Markdown、注入快照和 Web 详情保留原条目的 scope 与 id，并按来源 workspace 读取详情；不接受独立写入，不做跨 workspace LLM 去重或冲突裁决。
+- `workspace`：自动蒸馏和显式记住/纠正的项目记忆权威来源。整合按 WorkspaceId 分别执行，保留期清理只处理这一层；Ungrouped 会话没有隐式 workspace，因此不会自动蒸馏到 Global。
+- `global`：人工精选、独立维护的权威记忆库。用户只能从已注册 workspace 的条目执行 Promote；副本使用新 ID 和独立详情，以 `promotedFrom = { workspaceId, id }` 记录来源并幂等查重。复制后不随来源更新或删除，Global 自身删除也不反向影响来源。普通 remember/correct 仍不开放 Global 写入。
 
-旧版独立 global 条目仍保留在权威 JSON 和详情数据中，但不进入新的聚合列表、投影、快照、整合或保留期清理，也不会被静默迁移或删除。
+旧动态聚合不会批量复制到 Global，已有 workspace 数据保持不变；旧独立 Global 条目按权威记录恢复可见，但不会仅因格式升级自动发起 LLM 整合。旧聚合 revision 只用于一次性独立基线，此后 workspace 写入不再推进 Global revision。
 
 WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作为记忆 ID。这样避免路径大小写、符号链接或目录解析变化直接重写记忆身份。
 
@@ -81,7 +87,7 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 ### 3.3 父记忆是唯一实体
 
-每条 `MemoryEntry` 包含稳定 ID、scope、类别、摘要、完整详情、创建/更新/最近验证时间、条目 revision、来源引用，以及可选的过期和取代元数据。磁盘驻留时把它拆成父索引和版本化详情；`read()` 按 id/revision 读取详情后重新组成同一逻辑实体。
+每条 `MemoryEntry` 包含稳定 ID、scope、类别、摘要、完整详情、创建/更新/最近验证时间、条目 revision、来源引用，以及可选的过期、取代和 `promotedFrom` 元数据。磁盘驻留时把它拆成父索引和版本化详情；`read()` 按 id/revision 读取详情后重新组成同一逻辑实体。
 
 主索引不包含 `detail`，内部另存 `detailChars` 用于详情形态和完整性校验，不会把分片变成独立记忆。全局索引、workspace 索引、模型快照和 Web 管理页都围绕同一个父条目工作。
 
@@ -110,7 +116,7 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 活动事件会刷新 idle intent 的创建时间，形成 debounce。三类入口最终复用同一个 `distillSession` 和同一份 Session 主进度，区别主要是输入预算、每次 intent 的最大批数和调度原因。Review 每次处理下一批；Idle/Stop 每次最多连续处理两批做有界追赶。后续 intent 从持久位置继续，因此长会话的中段和尾部可以最终参与，但单次维护不会退化成无预算全量回填。
 
-管理页的 Settings 可以调整 `reviewEveryUserTurns`、`idleDelayMinutes`、`consolidationCooldownHours`、`snapshotTokenBudget` 和五类 `retentionDays`。频率默认分别为 15 轮、60 分钟和 20 小时，快照预算默认为 1,200 估算 token，保留期默认值见 3.2。所有值持久化到 `$DSH_HOME/snail_memory/settings.v1.json`，启动配置只作为文件缺失时的默认值；旧文件缺少新增字段时补用对应默认值，已显式保存的其他值保持不变。写入复用 MemoryStore 的单写者边界并采用原子替换，只读 Host 可读取但拒绝更新。保存成功后立即更新运行中的计数器和调度器：已有有效轮计数保留，已有 idle intent 按新延迟重新计算到期时间，已有 dirty/consolidation 计划也按新的小时间隔从当前时间重排；保留期策略则由下一次每日清理读取。快照预算在后续 Enable/Refresh 创建新快照时读取，不改写已经生成的 desired 或已注入 Session 的历史快照。
+管理页的 Settings 可以调整 `reviewEveryUserTurns`、`idleDelayMinutes`、`consolidationCooldownHours`、`globalConsolidationCooldownDays`、`snapshotTokenBudget` 和五类 `retentionDays`。默认值分别为 15 轮、60 分钟、workspace 20 小时和 Global 7 天，快照预算默认为 1,200 估算 token，保留期默认值见 3.2。所有值持久化到 `$DSH_HOME/snail_memory/settings.v1.json`，启动配置只作为文件缺失时的默认值；旧文件缺少新增字段时补用对应默认值，已显式保存的其他值保持不变。写入复用 MemoryStore 的单写者边界并采用原子替换，只读 Host 可读取但拒绝更新。保存成功后立即更新运行中的计数器和调度器：已有有效轮计数保留，已有 idle intent 按新延迟重新计算到期时间，workspace 与 Global 各自已有的 dirty/consolidation 计划分别按新的小时或天间隔从当前时间重排；保留期策略则由下一次每日清理读取。快照预算由两类 scope 共用，在后续 Enable/Refresh 创建新快照时读取，不改写已经生成的 desired 或已注入 Session 的历史快照。
 
 蒸馏读取的是 Session 事件的确定性投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情的能力不变。
 
@@ -134,13 +140,13 @@ updatedAt：游标提交时间
 
 ### 4.4 单 timer 与持久 intent
 
-调度器只保留一个必要 timer，所有任务串行执行。`meta.pending` 持久化 Review、Idle、Stop、Consolidate 和 Retention 意图；重启后根据时间恢复到期任务。
+调度器只保留一个必要 timer，所有任务串行执行。`meta.pending` 持久化 Review、Idle、Stop、workspace `consolidate`、独立 `global-consolidate` 和 Retention 意图；重启后根据各自时间恢复到期任务。
 
-- 有实际写入时设置 `dirty`，通常将整合安排在 20 小时后。
-- 整合只在 dirty 且到期时运行。
-- 保留期清理默认每 24 小时运行。
-- Review/Stop 失败后降级为 Idle 意图，空闲类任务按 60 分钟重试。
-- 整合和保留期失败分别按各自周期重试。
+- workspace 有实际写入时设置 `dirty`，默认将整合安排在 20 小时后；Global 新建、修改或删除只设置 `globalDirty`，默认独立安排在 7 天后。
+- 两类整合都只在各自 dirty 且到期时运行，成功清理、失败重试和设置热更新不互相清除或重排对方状态。
+- 保留期清理默认每 24 小时运行，只枚举 workspace scope。
+- Review/Idle/Stop 只写 Session owner workspace，不改变 Global dirty 或调度；Review/Stop 失败后降级为 Idle 意图，空闲类任务按 60 分钟重试。
+- 两类整合和保留期失败分别按各自周期重试。
 - 卸载停止新 timer，但等待已经进入队列的工作 drain。
 - 错误状态只保存稳定类别，不保存可能包含路径、提示词或秘密的异常正文。
 
@@ -181,26 +187,34 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 
 这个 ID 不是语义相似度哈希。措辞不同的同义记忆仍需要后续 LLM 整合；scope 和 category 参与哈希则防止跨层、跨类别误合并。
 
+### 5.3 人工 Promote 是事务内深复制
+
+Promote 只接受已注册 workspace 的来源条目。Store 在同一串行写事务中按 `promotedFrom = { workspaceId, id }` 查重、读取来源当前权威详情、生成新的 Global ID，并完整写入新详情世代和投影；UI 禁用按钮只改善交互，不能替代 Host 幂等。
+
+副本保留类别、摘要、正文、sourceRefs 和内容时间语义，但获得自己的 createdAt/updatedAt/revision；来源 `supersedes` 不复制，避免产生跨 scope 悬空引用。重复或并发 Promote 在副本仍存在时返回同一个 ID，不推进 revision、不设置 dirty；删除副本后再次显式 Promote 则允许创建新副本。Promote 不修改 Session、蒸馏游标或来源条目，后续来源 correction、retention、supersedes 和删除也不会自动同步到副本。
+
 ## 6. 整合与冲突裁决
 
-整合按各 workspace 分别执行，不处理 global 聚合视图或旧 global 条目，也不跨 workspace 自动晋升。每个 workspace 的处理过程为：
+整合严格按 scope 隔离：workspace intent 逐项目处理，Global intent 只处理独立 Global 条目，不把来源 workspace 或其他项目装入同一次模型输入，也不自动晋升。每个目标 scope 的处理过程为：
 
 1. 按 `updatedAt` 从新到旧排列完整条目。
 2. 逐条装入最多 64,000 字符的模型输入；达到预算后停止加入更老条目。
 3. 要求模型在当前 scope 内合并重复、修正冲突、淘汰旧结论，返回 candidates 和可选 `supersedes`。
 4. 确定性代码只接受当前 scope 已存在的候选 ID；未知 ID 不用于跨 scope 移动。
-5. 合并并按 JSON 精确值去重 `sourceRefs`，写回新 revision，再删除同 scope 中被取代的旧 ID。
-6. 全部成功后清理 dirty、pending 和下次整合时间。
+5. 合并并按 JSON 精确值去重 `sourceRefs`，写回新 revision，再删除同 scope 中被取代的旧 ID；Global 写回保留 `promotedFrom`。
+6. 全部成功后只清理目标类的 dirty、pending 和下次整合时间，并记录对应的最近整合时间。
 
 因此，“语义上是否重复、哪个结论更新”是模型判断；“是否允许写、能否跨 scope、如何持久化和删除”是程序判断。这个分工让语义能力可演进，同时把数据安全边界留在确定性代码中。
+
+为限制模型等待期间的写回竞态，候选会关联调用前的条目快照，写前重新读取并核对条目 revision；已删除或已纠正的条目不再接受旧候选。最终清理也只在对应 next consolidation 时间仍等于调用前计划时执行，避免旧任务清除运行期间新 Promote/Delete 建立的 dirty 和重排计划。这些防护不是完整的条件写事务：`store.read()` 与后续 `store.upsert()` 之间仍存在很小的交错窗口，彻底关闭需要在该 Store 写事务内校验 expected revision 或提供等价条件写。
 
 整合同样是预算内批处理，不保证每轮让所有历史条目都参与。首条本身过大时只会截取其 detail 以形成降级输入。
 
 ## 7. 遗忘算法
 
-遗忘分为自动保留期清理和显式忘记。
+遗忘分为 workspace 自动保留期清理和两个 scope 各自的显式忘记。Global 不参与每日 retention，即使条目带有显式 `expiresAt`，也不会被该任务自动删除。
 
-自动过期判断：
+workspace 自动过期判断：
 
 ```text
 若 expiresAt 有效且 expiresAt <= now：过期
@@ -209,7 +223,7 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 否则若 lastVerifiedAt + retentionDays <= now：过期
 ```
 
-显式忘记按 `scope + id` 精确删除，不跨 scope 搜索，不调用模型。删除会推进 scope revision、移除权威条目和详情投影，并安排后续整合。
+显式忘记按 `scope + id` 精确删除，不跨 scope 搜索，不调用模型。删除会推进目标 scope revision、移除权威条目和详情投影，并只安排该类 scope 的后续整合。删除 Global 副本不删除来源 workspace 条目，删除来源也不删除已 Promote 的 Global 副本。
 
 无论哪种遗忘，都不修改 dsh Session，也不修改任何 Session 蒸馏游标。MemoryEntry 删除与“历史已处理到哪里”是正交事实：删除一条或全部记忆不会回退、重置或推进游标，不会让对应历史重新进入蒸馏，也不会借游标恢复已删条目。已经注入的旧快照仍是历史事实，只是不会再出现在未来快照中，且对应详情不再可读。只有宿主真实 Session 生命周期清理才可另议游标垃圾回收，不能复用 UI 删除记忆按钮的语义。
 
@@ -219,10 +233,10 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 
 当前召回策略是“所选层摘要索引 + 按 ID 精确读取”：
 
-1. Store 按 `updatedAt` 新到旧排列，ID 作为稳定次序兜底；global 直接汇总所有 workspace 的父索引条目。
+1. Store 按 `updatedAt` 新到旧排列，ID 作为稳定次序兜底；Global 只枚举独立 Global 父索引，不汇总 workspace。
 2. enable 或 refresh 时渲染所选层摘要索引。
-3. 全局快照包含预算内的各 workspace 摘要、来源 workspace 和引用统计，不读取或注入完整详情，也不包含旧 global 条目。
-4. 模型确有需要时调用 `snail_memory_read`，提供已启用 layer 和父 memory ID；global 还必须提供快照中的来源 `workspace_id`。Store 此时才按 id/revision 异步读取目标权威详情记录。
+3. Global 快照只包含预算内的独立 Global 摘要，不包含 workspace 引用统计；两类快照都不读取或注入完整详情。
+4. 模型确有需要时调用 `snail_memory_read`，提供已启用 layer 和父 memory ID；Store 此时才按当前 scope 的 id/revision 异步读取目标权威详情记录，Global 不再要求来源 `workspace_id`。
 5. 小详情直接返回；大详情先返回分片清单，再按 chunk ID 读取单片。
 
 每条快照记忆带类别、ID、摘要和“若干天前”的时点提示，并明确它是不可信参考数据，不能覆盖当前用户、系统或安全指令。
@@ -235,7 +249,7 @@ Token 使用启发式估算：
 estimatedTokens(text) = ceil(text.length / 4) + 8
 ```
 
-默认摘要条目预算为 1,200 估算 token，可通过 Settings 的 `snapshotTokenBudget` 调整并持久化。Context 在每次 Enable/Refresh 创建新快照时读取当前值；已有 desired 和已注入 Session 的历史快照保持不变。超限后停止加入后续条目，并提示还有条目可按 ID 读取。该估算不是 provider 的精确计费值；固定头、workspace 引用和尾部说明也不属于当前条目循环的硬上限。
+默认摘要条目预算为 1,200 估算 token，可通过 Settings 的 `snapshotTokenBudget` 调整并持久化，workspace 与 Global 共用该值。Context 在每次 Enable/Refresh 创建新快照时读取当前值；已有 desired 和已注入 Session 的历史快照保持不变。超限后停止加入后续条目，并提示还有条目可按 ID 读取。该估算不是 provider 的精确计费值；固定头和尾部说明也不属于当前条目循环的硬上限。
 
 ### 8.3 关闭 / workspace / 全局三态单选
 
@@ -369,7 +383,7 @@ LLM 适合提炼、同义合并和冲突解释，不适合承担权限、事务�
 
 ### 12.3 用 revision 驱动显式刷新
 
-workspace scope revision 只在实际 upsert/remove 时前进；global revision 是所有 workspace scope revision 的求和，因此任一 workspace 变化都会推进聚合 revision，而 Session 状态更新不会。刷新基于 revision，而不是比较整段 Markdown，因此重复点击和进程恢复可以使用稳定规则判断是否需要新快照。
+每个 workspace 和独立 Global 都只在各自实际 upsert/remove/promote 时推进自己的 revision；Session 状态更新不会推进记忆 revision。旧动态聚合的 Global revision 在首次加载旧格式时转为一次性独立基线，避免既有 Global 快照让首次 Promote 后的新 revision 被误判为 up-to-date。刷新基于当前 scope 的 revision，而不是比较整段 Markdown，因此重复点击和进程恢复可以使用稳定规则判断是否需要新快照。
 
 ### 12.4 用 append-only 换取可审计性
 
@@ -490,6 +504,18 @@ enable、切换和 refresh 在 Store 事务中移动唯一 active 指针。resto
 
 自动化契约覆盖非当前项目与 Ungrouped 启用、RPC 参数校验、A→B 单 active 切换、跨项目详情读取、owner 不变、重复启用、独立 revision 刷新，以及旧版无项目字段记录的 refresh 和公共状态兼容。该增量全量自动化结果为 31 个测试文件、194 条测试，并通过 typecheck、lint 和 build；未重新执行真实 Host/UI/模型验收，也未安装到真实 Host 或重启用户进程。
 
+### 阶段十二：从动态聚合演进为人工精选的独立 Global
+
+动态聚合让任一 workspace 的条目都自动进入 Global，无法在全局层独立取舍、删除或整合，也让 workspace 变化持续影响 Global 快照。此次演进把 Global 改为独立权威 scope：只有用户在 workspace 详情中显式 Promote 才创建副本，Global tab、快照和工具读取都不再汇总 workspace，也不要求来源 `workspace_id`。
+
+Promote 在 Store 事务内完成幂等查重和深复制，使用新 ID、独立权威详情和 `promotedFrom`；长正文沿用现有版本化记录与确定性分片。副本与来源双向隔离，重复 Promote 不增加 revision，删除后再次显式 Promote 可以重建。旧动态聚合不批量迁移，旧独立 Global 条目恢复可见，旧聚合 revision 只转为一次性独立基线，避免首次新写入无法 Refresh。
+
+Global 新增独立 `globalDirty`、`nextGlobalConsolidationAt`、`lastGlobalConsolidationAt` 和 `global-consolidate` 持久 intent，默认 7 天执行一次 dirty 整合；workspace 仍默认 20 小时并逐项目隔离。两者共用单 timer、串行队列和快照 token 预算，但 dirty、成功、失败、重试和热更新互不影响。Review/Idle/Stop 仍只写 Session owner workspace，retention 仍只清理 workspace，Promote/Delete 仍不触碰 Session 或蒸馏游标。
+
+自动化契约覆盖独立列表与 revision、并发 Promote、长正文分片、双向隔离、旧基线、独立调度与重试、Global 单 scope 整合、API/工具/界面和游标正交。独立复核后又增加慢模型回归，覆盖模型等待期间删除后旧候选不复活，以及旧整合或 Scheduler 任务不清除运行期间新 Promote/Delete 建立的 Global dirty 和重排计划；命令中过时的“只读聚合”文案也同步修正。
+
+该增量全量自动化结果为 31 个测试文件、205 条测试，并通过 typecheck、lint、build 和 `git diff --check`。整合的 `store.read()` → `store.upsert()` 尚未形成同事务 expected-revision 条件写，极小交错窗口仍作为已知边界保留，不能宣称复核发现已全部关闭。本轮未重新执行真实 Host/UI/模型验收，也未安装到真实 Host、重启用户进程或创建 git commit。
+
 ## 14. 当前边界与后续演进方向
 
 以下是当前限制或候选方向，不是已经实现的能力：
@@ -499,10 +525,11 @@ enable、切换和 refresh 在 Store 事务中移动唯一 active 指针。resto
 3. **Refresh 再追加规则**：当前同 revision 永远 no-op；若需要“发送前多次点击不重复，但后续新对话后可再追加”，必须增加新的对话代际/注入时机语义，不能只放宽 revision 判断。
 4. **变更后的刷新体验**：记忆 correct/forget 不会改写既有快照，生产 wiring 也未自动刷新已启用层；目前依赖手动 refresh 或后续新快照。
 5. **召回质量**：当前没有查询相关性排序或向量召回。未来可在保留摘要索引和确定性权限边界的前提下增加可重建召回索引，而不是直接把所有详情塞入上下文。
-6. **预算完整性**：当前 token 预算主要约束摘要条目，后续可把固定头、workspace 索引和尾部说明统一纳入最终快照预算。
+6. **预算完整性**：当前 token 预算主要约束摘要条目，后续可把固定头和尾部说明统一纳入最终快照预算。
 7. **时间元数据健壮性**：无效 `lastVerifiedAt` 的展示和验证策略可进一步统一，避免快照出现无效年龄。
 8. **模型调用韧性**：辅助模型已支持 AbortSignal 和可选 timeout，但蒸馏与整合调用方尚未设置统一默认超时，可补充明确超时和重试预算。
 9. **安全入口收敛**：可把安全策略进一步下沉为所有生产写入都必须经过的用例层，减少未来新增入口绕过扫描的可能。
+10. **整合原子条件写**：当前已用调用前快照、写前 revision 复核和调度时间代际判断缩小竞态，但 `store.read()` 与 `store.upsert()` 之间仍可发生删除或纠正交错。后续应在 Store 同一写事务内校验 expected revision，或提供等价条件写；在此之前不能承诺慢模型期间的所有并发写回都已隔离。
 
 这些演进都应继续保持：父记忆单一事实源、scope 隔离、append-only Session、model-visible means logged、秘密最小化和可恢复写入。
 
@@ -510,7 +537,7 @@ enable、切换和 refresh 在 Store 事务中移动唯一 active 指针。resto
 
 | 主题 | 主要实现 |
 |---|---|
-| 数据模型、聚合、scope、revision、会话状态 | `src/store/types.ts`、`src/store/aggregate.ts`、`src/store/store.ts` |
+| 数据模型、scope、Promote、revision、会话状态 | `src/store/types.ts`、`src/store/aggregate.ts`、`src/store/store.ts` |
 | 原子 JSON、锁与 fencing | `src/store/json.ts`、`src/store/lock.ts` |
 | 版本化权威详情与按需读取 | `src/store/records.ts`、`src/store/store.ts` |
 | 大详情切分与 Markdown 投影 | `src/store/chunks.ts`、`src/store/projections.ts` |

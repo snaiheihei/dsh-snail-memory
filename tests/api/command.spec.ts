@@ -45,7 +45,7 @@ describe('/memory command', () => {
     const service = controller(async () => { calls += 1; return {} })
 
     for (const input of ['remember global Prefer concise answers', 'correct global memory-1 Prefer examples', 'forget global memory-1']) {
-      expect(await executeMemoryCommand(service, input, 'session-1')).toMatchObject({ kind: 'error', text: expect.stringMatching(/read-only aggregate/i) })
+      expect(await executeMemoryCommand(service, input, 'session-1')).toMatchObject({ kind: 'error', text: expect.stringMatching(/direct global writes.*promote/i) })
     }
     expect(calls).toBe(0)
   })

@@ -13,7 +13,7 @@
 3. 全局记忆与当前 workspace 记忆是两个独立的每会话开关；新会话均为 disabled，只允许 disabled → enable。
 4. “只加载一次”指每个会话、每一层只自动注入一次。enable 后的 refresh 是显式操作，可在 revision 变化时再次追加，不受自动注入次数限制。
 5. “摘要常驻”指已启用层的摘要和索引进入该会话派生历史；并非对所有新会话无条件注入。详情通过受限记忆读取工具或 UI 按需读取。
-6. 全局层保存跨 workspace 记忆和各 workspace 的索引引用、计数、revision 与摘要元数据，不复制所有 workspace 正文。默认不自动把 workspace 记忆晋升为全局记忆。
+6. 全局层是人工精选的独立权威记忆库。用户可从 workspace 详情显式 Promote，深复制索引与完整正文；副本与来源隔离，不动态聚合、不自动同步或批量晋升。
 7. Ungrouped 会话不创建隐式 workspace；默认只允许显式全局记忆，不自动蒸馏到全局层。
 8. UI token 数使用 dsh token-meter 的启发式估算并明确标注，不宣称等于 provider 计费值。
 9. 删除和忘记只修改 snail memory；不删除、替换或压缩原始 Session。已经注入的记忆快照仍是该会话历史，不做追溯撤回。
@@ -23,12 +23,12 @@
 
 | Module id | Responsibility | Depends on |
 |---|---|---|
-| `memory-store` | 全局/workspace 父索引驻留、版本化权威详情懒加载、大详情确定性分片、Markdown 摘要/详情/分片投影、全局 workspace 索引、revision、来源引用、Session 蒸馏游标、原子写、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
+| `memory-store` | 独立 Global/workspace 父索引驻留、事务内 Promote 深复制、版本化权威详情懒加载、大详情确定性分片、Markdown 摘要/详情/分片投影、独立 revision、来源引用、Session 蒸馏游标、原子写、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
 | `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、脱敏审计、失败关闭策略 | — |
-| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、dirty gate、scope 内整合、每日遗忘清理、显式记住/纠正/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
+| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、workspace/Global 独立 dirty gate 与 scope 内整合、仅 workspace 每日遗忘清理、显式记住/纠正/Promote/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
 | `memory-context` | 每会话单层 enable latch、自动一次性注入、refresh revision、排队与提交对账、时效提醒、摘要索引渲染、受限详情读取、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
 | `memory-api` | Host Service Definition、插件自有同源 HTTP RPC、人类命令与 UI 命令、权限和参数校验、结构化错误、读写状态与统计投影 | `memory-store`, `memory-lifecycle`, `memory-context` |
-| `memory-web` | Composer 两组 enable/refresh 控件、Memory sidebar 入口、双 tab、条目与注入 token 统计、删除确认、状态恢复、locale 与交互反馈 | `memory-api` |
+| `memory-web` | Composer 单层 enable/refresh 控件、Memory sidebar 入口、Global/Workspaces/Settings 三 tab、条目与注入 token 统计、workspace Promote、两类 scope 删除确认、独立 Global 整合设置、状态恢复、locale 与交互反馈 | `memory-api` |
 
 建设顺序：`memory-store` 与 `memory-safety` 并行 → `memory-lifecycle` 与 `memory-context` 并行 → `memory-api` → `memory-web`。
 
@@ -45,14 +45,14 @@
 - `state.v2.json` 只保存父索引、Session 与运行状态；`detail-data/<id>/<revision>.json` 保存当前父索引指向的不可变详情。启动、list、enable 和 refresh 不加载详情正文，store.read 按 id/revision 异步读取目标记录。
 - v1 仅在可写启动时迁移：详情记录与详情投影完整就绪后发布 v2，成功后才删除 v1；只读 Host 对未迁移 v1 使用兼容读取。新详情和投影先于父状态切换，旧详情世代在发布后清理。
 - 投影事务通过只含父 id 的持久 pending intent 恢复：提交前失败回到当前父状态对应投影，提交后失败保留 committed 结果并在重启或后续事务重试；writer 本地读取与写入串行，只读 Host 读取时刷新父状态。
-- 全局整合在各自 scope 内去重、合并、修正冲突和清理过期结论，同时更新全局核心摘要与 workspace 引用索引；跨 scope 晋升默认需要显式意图。
+- workspace 与 Global 各自在 scope 内整合去重、合并和修正冲突；跨 scope 晋升只能由用户显式 Promote，副本后续不自动同步。
 
 ### 生命周期
 
 - 仅 `user/message` 且 `source.kind === 'user'` 的消息计为有效用户轮；注入、调度和 runtime context 不计数。
 - 第 10 个有效用户轮对应的 turn 以 `completed` 结束后安排轻量 Review； aborted/error turn 不触发。
 - dsh 没有统一 session-end：使用真正 idle 的 debounce、`runMaintenance()`、dispose 和 workspace stop 信号组合触发；不得把 `session/event` 的 fire-and-forget 通知当作异步事务提交。
-- 会话蒸馏和全局整合分开。全局整合最多每 6 小时一次且仅在 dirty 时运行；每日清理独立调度。
+- 会话蒸馏只写 Session owner workspace。workspace dirty 默认 20 小时后逐项目整合，Global dirty 默认 7 天后独立整合；每日 retention 只清理 workspace。
 - 调度状态持久化 `nextRunAt`、dirty、running intent 和完成游标；全插件只保留一个必要 timer，重启后恢复到期任务。
 - Review、Idle、Stop 共享每 Session 的 `lastEventSeq + offset` 蒸馏游标。完整 turn 优先按边界入批，超大 turn/消息按确定性片内位置续批；Review 一次一批，Idle/Stop 一次最多两批，首次加载不自动 backfill。
 - 候选安全处理、写入/去重完成后才推进游标；模型/解析/存储失败不推进。记忆已写而游标未写时允许同批重试，以稳定 ID、内容去重、sourceRefs 合并和整合降低重复。
@@ -80,7 +80,7 @@
 
 - Composer 中全局和 workspace 两层分别提供 enable 与 refresh；新会话 disabled，enable 后不可逆，refresh 仅在该层 enabled 后可用。
 - enable/latch 与已提交注入状态由 Host 权威恢复；localStorage 只可作显示缓存，不作为唯一事实源。
-- Memory 页面使用现有 `sidebar.panellist` 与同 key `main` slot，不修改 shell；包含“总记忆索引”和“当前 workspace 索引”两个 tab。
+- Memory 页面使用现有 `sidebar.panellist` 与同 key `main` slot，不修改 shell；包含独立 Global、Workspaces 和 Settings 三个 tab，workspace 详情可 Promote，Global 与 workspace 条目均可独立删除。
 - 条目数统计所选 tab 的当前有效条目；注入 token 统计当前 Session 已提交快照的累计估算，并区分最近快照估算。
 - 删除操作只调用 memory API，不调用 Session 删除、压缩或 surface replacement。
 

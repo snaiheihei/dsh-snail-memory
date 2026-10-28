@@ -245,6 +245,127 @@ describe('LifecycleScheduler', () => {
     await restarted.dispose()
   })
 
+  it('schedules workspace and global consolidation independently and hot-updates only the global delay', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 20,
+      globalConsolidationCooldownDays: 7,
+      retentionSweepHours: 1_000,
+      run: async kind => { runs.push(kind) },
+    })
+    await scheduler.start()
+    await scheduler.markDirty()
+    await scheduler.markGlobalDirty()
+
+    expect(store.getMeta()).toMatchObject({
+      dirty: true,
+      nextConsolidationAt: '2026-10-26T20:00:00.000Z',
+      globalDirty: true,
+      nextGlobalConsolidationAt: '2026-11-02T00:00:00.000Z',
+    })
+    await scheduler.updateGlobalConsolidationCooldownDays(2)
+    expect(store.getMeta().nextConsolidationAt).toBe('2026-10-26T20:00:00.000Z')
+    expect(store.getMeta().nextGlobalConsolidationAt).toBe('2026-10-28T00:00:00.000Z')
+
+    await vi.advanceTimersByTimeAsync(20 * 3_600_000)
+    await scheduler.drain()
+    expect(runs).toEqual(['consolidate'])
+    expect(store.getMeta()).toMatchObject({ dirty: false, globalDirty: true })
+
+    await vi.advanceTimersByTimeAsync(28 * 3_600_000)
+    await scheduler.drain()
+    expect(runs).toEqual(['consolidate', 'global-consolidate'])
+    expect(store.getMeta()).toMatchObject({
+      dirty: false,
+      globalDirty: false,
+      lastGlobalConsolidationAt: '2026-10-28T00:00:00.000Z',
+      nextGlobalConsolidationAt: null,
+    })
+    await scheduler.dispose()
+  })
+
+  it('retries global consolidation without dirtying or rescheduling workspace consolidation', async () => {
+    const store = await openStore()
+    let failures = 1
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 20,
+      globalConsolidationCooldownDays: 7,
+      retentionSweepHours: 1_000,
+      run: async kind => {
+        runs.push(kind)
+        if (kind === 'global-consolidate' && failures-- > 0) throw new Error('model unavailable')
+      },
+    })
+    await scheduler.start()
+    await scheduler.markGlobalDirty()
+    await vi.advanceTimersByTimeAsync(7 * 24 * 3_600_000)
+    await scheduler.drain()
+
+    expect(runs).toEqual(['global-consolidate'])
+    expect(store.getMeta()).toMatchObject({
+      dirty: false,
+      nextConsolidationAt: null,
+      globalDirty: true,
+      nextGlobalConsolidationAt: '2026-11-09T00:00:00.000Z',
+      lastError: 'Global memory consolidation failed',
+    })
+
+    await scheduler.dispose()
+    const restarted = new LifecycleScheduler(store, {
+      globalConsolidationCooldownDays: 7,
+      run: async kind => { runs.push(kind) },
+    })
+    await restarted.start()
+    await vi.advanceTimersByTimeAsync(7 * 24 * 3_600_000)
+    await restarted.drain()
+
+    expect(runs).toEqual(['global-consolidate', 'global-consolidate'])
+    expect(store.getMeta()).toMatchObject({ dirty: false, globalDirty: false, lastError: null })
+    await restarted.dispose()
+  })
+
+  it('keeps Global changes scheduled when they arrive during an older consolidation run', async () => {
+    const store = await openStore()
+    let releaseRun!: () => void
+    let markRunStarted!: () => void
+    const runStarted = new Promise<void>(resolve => { markRunStarted = resolve })
+    const runGate = new Promise<void>(resolve => { releaseRun = resolve })
+    const scheduler = new LifecycleScheduler(store, {
+      globalConsolidationCooldownDays: 7,
+      retentionSweepHours: 1_000,
+      run: async kind => {
+        if (kind !== 'global-consolidate') return
+        markRunStarted()
+        await runGate
+      },
+    })
+    await scheduler.start()
+    await scheduler.markGlobalDirty()
+    const advancing = vi.advanceTimersByTimeAsync(7 * 24 * 3_600_000)
+    await runStarted
+
+    await store.upsert({
+      scope: { kind: 'global' },
+      category: 'preference',
+      summary: 'Promoted during consolidation',
+      detail: 'This change still needs a later consolidation.',
+      sourceRefs: [],
+      lastVerifiedAt: '2026-11-02T00:00:00.000Z',
+    })
+    await scheduler.markGlobalDirty()
+    releaseRun()
+    await advancing
+    await scheduler.drain()
+
+    expect(store.getMeta()).toMatchObject({
+      globalDirty: true,
+      nextGlobalConsolidationAt: '2026-11-09T00:00:00.000Z',
+    })
+    await scheduler.dispose()
+  })
+
   it('runs retention on the persisted daily schedule and drains before dispose', async () => {
     const store = await openStore()
     const runs: string[] = []

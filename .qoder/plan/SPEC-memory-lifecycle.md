@@ -1,12 +1,12 @@
 # Spec: memory-lifecycle
 
-> 2026-10-27 修订：自动蒸馏、整合和保留期只处理 workspace；global 是动态只读聚合，旧 global 条目不参与后台维护。以 `SPEC-global-aggregate-memory.md` 为当前契约。
+> 2026-10-28 独立 Global 修订：Review/Idle/Stop 和 retention 仍只处理 workspace；Global 由人工 Promote 建立，使用独立 `globalDirty`、默认 7 天 consolidation 和独立持久 intent，不继承 workspace 的 20 小时计时。
 >
 > 2026-10-27 长历史覆盖修订：Review/Idle/Stop 共享按 Session 持久化的事件游标，顺序处理后续批次，不再重复截取转录开头。
 
 ## Objective
 
-实现显式记忆操作和自动记忆生命周期：每 15 个有效用户轮轻量 Review、60 分钟空闲或结束蒸馏、dirty 时最多每 20 小时 scope 内整合、每 24 小时遗忘清理。
+实现显式记忆操作和自动记忆生命周期：每 15 个有效用户轮轻量 Review、60 分钟空闲或结束蒸馏、workspace dirty 默认 20 小时后 scope 内整合、独立 Global dirty 默认 7 天后整合、每 24 小时 workspace 遗忘清理。
 
 ## Tech Stack
 
@@ -39,8 +39,9 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 
 - `reviewEveryUserTurns = 15`；仅真实 `source.kind === 'user'`，且所在 turn `completed` 后触发。
 - `idleDelayMinutes = 60`；新活动取消旧 idle timer，dispose 不再启动 maintenance。
-- `consolidationCooldownHours = 20`；dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
-- Settings 页可调整上述三项、`snapshotTokenBudget` 和五类 `retentionDays`；`settings.v1.json` 原子持久化并优先于启动默认值，旧文件缺少新增字段时补用对应默认值。保存后保留轮计数、重排已有 idle intent 和 dirty/consolidation 计划，只读 Host 拒绝更新。
+- `consolidationCooldownHours = 20`；workspace dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
+- `globalConsolidationCooldownDays = 7`；独立 Global dirty、intent、成功、失败与重试不清理或重排 workspace 状态。
+- Settings 页可调整上述四项、`snapshotTokenBudget` 和五类 `retentionDays`；`settings.v1.json` 原子持久化并优先于启动默认值，旧文件缺少新增字段时补用对应默认值。保存后保留轮计数，分别重排已有 idle intent、workspace 与 Global dirty/consolidation 计划，只读 Host 拒绝更新。
 - Workspaces 页从完整 WorkspaceRegistry 选择任意已注册 workspace 并读取其索引，不以当前 Session 或已有记忆引用为限。
 - `retentionSweepHours = 24`。
 - 首次加载只恢复已有记忆、调度和注入状态，不自动遍历并蒸馏全部历史 Session；历史回填不是默认生命周期任务。
@@ -62,6 +63,12 @@ pending?.count += 1
 
 任务以持久 intent + idempotency key 串行执行；post-commit 事件只负责观察，不承担写事务。LLM 失败保留 dirty 和可重试状态，不伪造成功。
 
+## Concurrency Boundaries
+
+- 整合候选关联模型调用前的条目快照，写前重新读取并核对条目 revision；模型等待期间已删除或已纠正的条目不得接受旧候选。
+- 整合和 Scheduler 成功收尾都必须核对调用前的 next consolidation 时间；运行期间新 Promote/Delete 建立的 dirty 与重排计划不得被旧任务清除。
+- 上述防护尚未形成完整条件写事务：`store.read()` 与 `store.upsert()` 之间仍存在小的删除/纠正交错窗口。后续应在 Store 同一写事务内校验 expected revision，或提供等价原子条件写，不能宣称该竞态已完全关闭。
+
 ## Testing Strategy
 
 - 注入、schedule、runtime-context 不计有效轮；aborted/error 不触发 Review。
@@ -76,6 +83,8 @@ pending?.count += 1
 - 完整 turn 边界、超大 turn/消息片内恢复、长会话中段和尾部覆盖、Session/workspace 隔离；游标-only 提交不推进 scope revision、不设置 dirty、不生成注入快照。
 - 删除单条和全部记忆后所有 Session 游标保持不变，后续入口不重新蒸馏已处理范围，也不恢复已删条目。
 - 验证整合不跨 scope 自动晋升，不修改 Session。
+- Global 默认 7 天冷却、独立 dirty/intent/成功/失败/重试和热更新，以及与 workspace 20 小时计划的隔离。
+- 慢模型期间删除或纠正后旧候选不写回；旧整合及 Scheduler 任务不清除运行期间新 Promote/Delete 建立的 Global dirty 和重排计划。
 
 ## Boundaries
 

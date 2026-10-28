@@ -40,24 +40,23 @@ afterEach(async () => {
 })
 
 describe('snail_memory_read', () => {
-  it('reads a global entry through its source workspace', async () => {
+  it('reads an independent global entry by id without a source workspace', async () => {
     const { store, context, agent, tool, exec } = await setup()
     const entry = await store.upsert({
-      scope: { kind: 'workspace', workspaceId: 'workspace-1' as never },
-      category: 'project-convention', summary: 'Workspace detail', detail: 'Complete workspace detail',
+      scope: { kind: 'global' },
+      category: 'project-convention', summary: 'Global detail', detail: 'Complete global detail',
       sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
     })
     await context.enable(agent, 'global')
 
-    expect(await tool.execute({ layer: 'global', memory_id: entry.id }, exec)).toEqual({ found: false })
-    expect(await tool.execute({ layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1' }, exec))
-      .toMatchObject({ found: true, detail: 'Complete workspace detail' })
+    expect(await tool.execute({ layer: 'global', memory_id: entry.id }, exec))
+      .toMatchObject({ found: true, detail: 'Complete global detail' })
   })
 
   it('keeps small detail reads compatible and rejects chunk ids for them', async () => {
     const { store, context, agent, tool, exec } = await setup()
     const entry = await store.upsert({
-      scope: { kind: 'workspace', workspaceId: 'workspace-1' as never },
+      scope: { kind: 'global' },
       category: 'preference',
       summary: 'Small memory',
       detail: 'Complete small detail',
@@ -66,9 +65,9 @@ describe('snail_memory_read', () => {
     })
     await context.enable(agent, 'global')
 
-    const result = await tool.execute({ layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1' }, exec) as ReadResult
-    const withChunk = await tool.execute({ layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1', chunk_id: 'part-001' }, exec) as ReadResult
-    const withEmptyChunk = await tool.execute({ layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1', chunk_id: '' }, exec) as ReadResult
+    const result = await tool.execute({ layer: 'global', memory_id: entry.id }, exec) as ReadResult
+    const withChunk = await tool.execute({ layer: 'global', memory_id: entry.id, chunk_id: 'part-001' }, exec) as ReadResult
+    const withEmptyChunk = await tool.execute({ layer: 'global', memory_id: entry.id, chunk_id: '' }, exec) as ReadResult
 
     expect(result).toMatchObject({ found: true, detail: 'Complete small detail' })
     expect(withChunk).toEqual({ found: false })
@@ -79,7 +78,7 @@ describe('snail_memory_read', () => {
     const { store, context, agent, tool, exec } = await setup()
     const detail = `${'a'.repeat(4_000)}${'b'.repeat(4_000)}${'c'.repeat(500)}`
     const entry = await store.upsert({
-      scope: { kind: 'workspace', workspaceId: 'workspace-1' as never },
+      scope: { kind: 'global' },
       category: 'long-term-decision',
       summary: 'Large memory',
       detail,
@@ -89,9 +88,9 @@ describe('snail_memory_read', () => {
 
     expect(await tool.execute({ layer: 'global', memory_id: entry.id }, exec)).toEqual({ found: false })
     await context.enable(agent, 'global')
-    const manifest = await tool.execute({ layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1' }, exec) as ReadResult
+    const manifest = await tool.execute({ layer: 'global', memory_id: entry.id }, exec) as ReadResult
     const manifestText = tool.output.render(
-      { layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1' },
+      { layer: 'global', memory_id: entry.id },
       manifest as unknown as Parameters<typeof tool.output.render>[1],
     ).map(block => block.type === 'text' ? block.text : '').join('\n')
 
@@ -102,11 +101,11 @@ describe('snail_memory_read', () => {
     expect(manifestText).toContain('part-001')
     expect(manifestText).not.toContain('a'.repeat(100))
 
-    const selected = await tool.execute({ layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1', chunk_id: 'part-002' }, exec) as ReadResult
+    const selected = await tool.execute({ layer: 'global', memory_id: entry.id, chunk_id: 'part-002' }, exec) as ReadResult
     expect(selected).toMatchObject({ found: true, chunkId: 'part-002', detail: 'b'.repeat(4_000) })
     expect(selected.chunks).toBeUndefined()
     expect(selected.detail).not.toContain('a')
     expect(selected.detail).not.toContain('c')
-    expect(await tool.execute({ layer: 'global', memory_id: entry.id, workspace_id: 'workspace-1', chunk_id: 'part-999' }, exec)).toEqual({ found: false })
+    expect(await tool.execute({ layer: 'global', memory_id: entry.id, chunk_id: 'part-999' }, exec)).toEqual({ found: false })
   })
 })

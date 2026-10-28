@@ -151,7 +151,7 @@ describe('projection and detail publication', () => {
     failure.indexProjection = false
     const reopened = await MemoryStore.open({ root, heartbeatMs: 60_000 })
     stores.push(reopened)
-    expect(await readFile(join(root, 'global', 'INDEX.md'), 'utf8')).toContain('Committed before index')
+    expect(await readFile(join(root, 'workspaces', 'workspace-1', 'INDEX.md'), 'utf8')).toContain('Committed before index')
     await expect(readFile(reopened.paths.projectionPending, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 

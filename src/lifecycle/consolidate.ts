@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto'
 import { prepareMemoryCandidate } from '../safety/policy.js'
 import type { MemoryStore } from '../store/store.js'
 import type { MemoryEntry, MemoryScope, MemorySourceRef } from '../store/types.js'
-import { memoryId, workspaceId } from '../store/types.js'
+import { memoryId } from '../store/types.js'
 import { invokeAuxiliaryModel, type AuxiliaryModel } from './llm.js'
 
 export interface ConsolidateOptions {
   readonly model?: AuxiliaryModel
   readonly provider?: string
   readonly modelName?: string
+  readonly scope?: MemoryScope
   readonly now?: () => Date
   readonly signal?: AbortSignal
   readonly onChange?: (scope: MemoryScope, entries: readonly MemoryEntry[]) => Promise<void> | void
@@ -33,8 +34,11 @@ async function fullEntries(store: MemoryStore, scope: MemoryScope): Promise<Memo
 export async function consolidateMemories(store: MemoryStore, options: ConsolidateOptions): Promise<number> {
   if (!options.model || !options.provider || !options.modelName) throw new Error('No auxiliary model route is available')
   const now = options.now?.() ?? new Date()
-  const scopes: MemoryScope[] = store.list({ kind: 'global' }).workspaces
-    .map(ref => ({ kind: 'workspace' as const, workspaceId: workspaceId(ref.workspaceId) }))
+  const initialMeta = store.getMeta()
+  const consolidationSchedule = options.scope?.kind === 'global'
+    ? initialMeta.nextGlobalConsolidationAt
+    : initialMeta.nextConsolidationAt
+  const scopes: MemoryScope[] = options.scope ? [options.scope] : store.workspaceScopes()
   let written = 0
   for (const scope of scopes) {
     const entries = await fullEntries(store, scope)
@@ -64,10 +68,14 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
     })
     const changed: MemoryEntry[] = []
     for (const candidate of parsed.candidates) {
-      const existing = candidate.id ? await store.read(scope, candidate.id) : (await fullEntries(store, scope)).find(entry =>
-        entry.category === candidate.category && entry.summary.toLowerCase() === candidate.summary.toLowerCase())
+      const snapshot = candidate.id
+        ? entries.find(entry => entry.id === candidate.id)
+        : entries.find(entry => entry.category === candidate.category
+          && entry.summary.toLowerCase() === candidate.summary.toLowerCase())
       // An id absent from this scope may belong to another scope; never move it.
-      if (candidate.id && !existing) continue
+      if (candidate.id && !snapshot) continue
+      const existing = snapshot ? await store.read(scope, snapshot.id) : undefined
+      if (snapshot && (!existing || existing.revision !== snapshot.revision)) continue
       const id = existing?.id ?? generatedId(scope, candidate.category, candidate.summary.trim())
       const refs = memoryRefs([...(existing?.sourceRefs ?? []), ...(candidate.sourceRefs ?? [])])
       if (existing && existing.summary === candidate.summary.trim() && existing.detail === candidate.detail.trim()
@@ -93,9 +101,17 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
     if (changed.length) await options.onChange?.(scope, changed)
   }
   await store.updateMeta(meta => {
-    meta.dirty = false
-    meta.lastConsolidationAt = now.toISOString()
-    meta.nextConsolidationAt = null
+    if (options.scope?.kind === 'global') {
+      if (meta.nextGlobalConsolidationAt === consolidationSchedule) {
+        meta.globalDirty = false
+        meta.lastGlobalConsolidationAt = now.toISOString()
+        meta.nextGlobalConsolidationAt = null
+      }
+    } else if (meta.nextConsolidationAt === consolidationSchedule) {
+      meta.dirty = false
+      meta.lastConsolidationAt = now.toISOString()
+      meta.nextConsolidationAt = null
+    }
     meta.lastError = null
   })
   return written

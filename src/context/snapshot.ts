@@ -62,22 +62,13 @@ export function renderSnapshot(input: SnapshotInput): string {
   let kept = 0
   for (const entry of input.index.entries) {
     const ageDays = Math.max(0, Math.floor((input.now.getTime() - Date.parse(entry.lastVerifiedAt)) / DAY_MS))
-    const source = input.layer === 'global' && entry.scope.kind === 'workspace' ? ` [workspace:${entry.scope.workspaceId}]` : ''
-    const line = `- [${entry.category}] [${ageDays} 天前]${source} [${entry.id}] ${entry.summary}`
+    const line = `- [${entry.category}] [${ageDays} 天前] [${entry.id}] ${entry.summary}`
     if (input.maxTokens !== undefined && estimateTokens([...lines, line].join('\n')) > input.maxTokens) break
     lines.push(line)
     kept += 1
   }
   if (input.index.entries.length === 0) lines.push('- （当前无记忆条目）')
   if (kept < input.index.entries.length) lines.push(`- （另有 ${input.index.entries.length - kept} 条因注入预算省略，可按 id 按需读取）`)
-  if (input.layer === 'global' && input.index.workspaces.length > 0) {
-    lines.push('', '## Workspace 索引', '')
-    for (const workspace of input.index.workspaces) {
-      lines.push(`- ${workspace.workspaceId}: ${workspace.entryCount} 条，revision ${workspace.revision}，updated ${workspace.updatedAt}`)
-    }
-  }
-  lines.push('', input.layer === 'global'
-    ? '详情仅在确有需要时通过 snail_memory_read 按 workspace_id + id 读取。'
-    : '详情仅在确有需要时通过 snail_memory_read 按 id 读取。')
+  lines.push('', '详情仅在确有需要时通过 snail_memory_read 按 id 按需读取。')
   return `${lines.join('\n')}\n`
 }

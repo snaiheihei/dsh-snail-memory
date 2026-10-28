@@ -1,6 +1,6 @@
 import { access, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { entriesForScope, revisionForScope, workspaceIndexRefs } from './aggregate.js'
+import { entriesForScope, revisionForScope } from './aggregate.js'
 import type { MemoryEntry, MemoryScope, StoreState } from './types.js'
 import { workspaceId } from './types.js'
 import type { StorePaths } from './paths.js'
@@ -28,7 +28,7 @@ function sourceLabel(entry: { readonly scope: MemoryScope }): string {
 function indexMarkdown(state: StoreState, scope: MemoryScope): string {
   const entries = entriesForScope(state, scope)
   const lines = [
-    scope.kind === 'global' ? '# Snail Memory — 全局聚合索引' : `# Snail Memory — ${scope.workspaceId}`,
+    scope.kind === 'global' ? '# Snail Memory — 全局独立索引' : `# Snail Memory — ${scope.workspaceId}`,
     '',
     `Revision: ${revisionForScope(state, scope)}`,
     '',
@@ -41,12 +41,6 @@ function indexMarkdown(state: StoreState, scope: MemoryScope): string {
     lines.push(`- [${escapeText(entry.summary)}](${detailPrefix}/${target}) — ${entry.category}${sourceLabel(entry)}; verified ${entry.lastVerifiedAt}; revision ${entry.revision}`)
   }
   if (entries.length === 0) lines.push('- （无条目）')
-  if (scope.kind === 'global') {
-    lines.push('', '## Workspace 索引', '')
-    for (const workspace of workspaceIndexRefs(state)) {
-      lines.push(`- [${workspace.workspaceId}](../workspaces/${workspace.workspaceId}/INDEX.md) — ${workspace.entryCount} 条；revision ${workspace.revision}；updated ${workspace.updatedAt}`)
-    }
-  }
   return `${lines.join('\n')}\n`
 }
 

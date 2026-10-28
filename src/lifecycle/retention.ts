@@ -31,8 +31,7 @@ export function isExpired(entry: MemoryIndexEntry, now: Date, retentionDays: Mem
 
 export async function retentionSweep(store: MemoryStore, options: RetentionOptions = {}): Promise<MemoryId[]> {
   const now = options.now?.() ?? new Date()
-  const scopes: MemoryScope[] = store.list({ kind: 'global' }).workspaces
-    .map(ref => ({ kind: 'workspace' as const, workspaceId: ref.workspaceId }))
+  const scopes: MemoryScope[] = store.workspaceScopes()
   const removed: MemoryId[] = []
   for (const scope of scopes) {
     const ids: MemoryId[] = []

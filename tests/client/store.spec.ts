@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { MemoryClientStore } from '../../client/src/store.js'
 import type { MemorySettings } from '../../src/contract.js'
-import { deferred, FakeRpc, GLOBAL_SCOPE, memoryIndex, sessionState } from './fixtures.js'
+import { deferred, ENTRY, FakeRpc, GLOBAL_SCOPE, memoryIndex, sessionState, WORKSPACE_SCOPE } from './fixtures.js'
 
 const DEFAULT_RETENTION_DAYS = {
   'environment-fact': 30,
@@ -83,12 +83,28 @@ describe('MemoryClientStore', () => {
     expect(remove).toHaveBeenCalledWith('focus', expect.any(Function))
   })
 
+  it('promotes a workspace memory and refreshes tracked indexes', async () => {
+    const rpc = new FakeRpc()
+      .on('list', ({ scope }) => memoryIndex(scope))
+      .on('promote', () => ({ id: ENTRY.id, created: true }))
+    const store = new MemoryClientStore(rpc)
+    await store.loadIndex(GLOBAL_SCOPE)
+    await store.loadIndex(WORKSPACE_SCOPE)
+    const before = rpc.count('list')
+
+    await expect(store.promote(WORKSPACE_SCOPE, ENTRY.id)).resolves.toEqual({ id: ENTRY.id, created: true })
+
+    expect(rpc.calls.find(call => call.method === 'promote')?.payload).toEqual({ scope: WORKSPACE_SCOPE, id: ENTRY.id })
+    expect(rpc.count('list')).toBe(before + 2)
+  })
+
   it('does not let an older settings read overwrite a successful save', async () => {
     const pending = deferred<MemorySettings>()
     const updated = {
       reviewEveryUserTurns: 4,
       idleDelayMinutes: 2,
       consolidationCooldownHours: 8,
+      globalConsolidationCooldownDays: 3,
       snapshotTokenBudget: 800,
       retentionDays: { ...DEFAULT_RETENTION_DAYS, troubleshooting: 90 },
     }
@@ -103,6 +119,7 @@ describe('MemoryClientStore', () => {
       reviewEveryUserTurns: 15,
       idleDelayMinutes: 60,
       consolidationCooldownHours: 20,
+      globalConsolidationCooldownDays: 7,
       snapshotTokenBudget: 1_200,
       retentionDays: DEFAULT_RETENTION_DAYS,
     })
