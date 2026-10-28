@@ -94,6 +94,27 @@ describe('MemoryPage', () => {
     expect(rpc.count('remove')).toBe(0)
   })
 
+  it('opens details in a modal overlay and supports Escape and outside dismissal', async () => {
+    const rpc = readyRpc()
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    const trigger = await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' })
+    fireEvent.click(trigger)
+    const dialog = await screen.findByRole('dialog', { name: 'Use pnpm workspaces' })
+
+    expect(dialog.parentElement?.classList.contains('snail-memory-detail-backdrop')).toBe(true)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Use pnpm workspaces' })).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+
+    fireEvent.click(trigger)
+    const reopened = await screen.findByRole('dialog', { name: 'Use pnpm workspaces' })
+    fireEvent.pointerDown(reopened)
+    expect(screen.getByRole('dialog', { name: 'Use pnpm workspaces' })).toBeTruthy()
+    fireEvent.pointerDown(reopened.parentElement!)
+    expect(screen.queryByRole('dialog', { name: 'Use pnpm workspaces' })).toBeNull()
+  })
+
   it('requires confirmation before deleting a workspace memory only', async () => {
     const rpc = readyRpc()
     const store = new MemoryClientStore(rpc)

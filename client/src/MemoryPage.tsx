@@ -42,6 +42,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const [deleting, setDeleting] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const detailRequest = useRef(0)
+  const detailTrigger = useRef<HTMLElement | null>(null)
   const mounted = useRef(true)
   const state = sessionId === undefined ? undefined : store.getSession(sessionId)
   const workspaces = store.getWorkspaces()
@@ -91,9 +92,10 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     setTab(next)
   }
 
-  const openDetails = async (entry: MemoryIndexEntry): Promise<void> => {
+  const openDetails = async (entry: MemoryIndexEntry, trigger: HTMLElement): Promise<void> => {
     const request = ++detailRequest.current
     const readOnly = tab === 'global'
+    detailTrigger.current = trigger
     setDetail({ scope: entry.scope, id: entry.id, summary: entry.summary, readOnly })
     setConfirming(false)
     setNotice(null)
@@ -117,7 +119,24 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     detailRequest.current += 1
     setDetail(null)
     setConfirming(false)
+    detailTrigger.current?.focus()
   }
+
+  useEffect(() => {
+    if (detail === null) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeDetails()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [detail, deleting])
 
   const remove = async (): Promise<void> => {
     if (detail === null || deleting) return
@@ -200,7 +219,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
                 {entry.sourceRefs.length > 0 && (
                   <p>{t('sources')}: {entry.sourceRefs.map(ref => `${ref.sessionId}${ref.eventSeqs === undefined ? '' : ` (${t('events')} ${ref.eventSeqs.join(', ')})`}`).join('; ')}</p>
                 )}
-                <button type="button" aria-label={`${t('viewDetails')} ${entry.summary}`} onClick={() => { void openDetails(entry) }}>{t('details')}</button>
+                <button type="button" aria-label={`${t('viewDetails')} ${entry.summary}`} onClick={event => { void openDetails(entry, event.currentTarget) }}>{t('details')}</button>
               </li>
             ))}
           </ul>
@@ -222,24 +241,26 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
         </>}
       </div>
       {detail !== null && (
-        <div className="snail-memory-detail" role="dialog" aria-modal="true" aria-labelledby="snail-memory-detail-title">
-          <h2 id="snail-memory-detail-title">{detail.summary}</h2>
-          {detail.entry === undefined && detail.error === undefined && <p role="status">{t('loading')}</p>}
-          {detail.error !== undefined && <p role="alert">{detail.error}</p>}
-          {detail.entry !== undefined && <>
-            <p>{t('category')}: {t(CATEGORY_COPY[detail.entry.category])}</p>
-            <p>{t('updatedAt')}: {detail.entry.updatedAt}</p>
-            <pre>{detail.entry.detail}</pre>
-          </>}
-          {confirming && <p role="alert">{t('deleteConfirmation')}</p>}
-          <div className="snail-memory-actions">
-            {confirming ? <>
-              <button type="button" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
-              <button type="button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
-            </> : <>
-              {!detail.readOnly && <button type="button" disabled={detail.entry === undefined} onClick={() => setConfirming(true)}>{t('delete')}</button>}
-              <button type="button" autoFocus onClick={closeDetails}>{t('close')}</button>
+        <div className="snail-memory-detail-backdrop" onPointerDown={event => { if (event.target === event.currentTarget) closeDetails() }}>
+          <div className="snail-memory-detail" role="dialog" aria-modal="true" aria-labelledby="snail-memory-detail-title">
+            <h2 id="snail-memory-detail-title">{detail.summary}</h2>
+            {detail.entry === undefined && detail.error === undefined && <p role="status">{t('loading')}</p>}
+            {detail.error !== undefined && <p role="alert">{detail.error}</p>}
+            {detail.entry !== undefined && <>
+              <p>{t('category')}: {t(CATEGORY_COPY[detail.entry.category])}</p>
+              <p>{t('updatedAt')}: {detail.entry.updatedAt}</p>
+              <pre>{detail.entry.detail}</pre>
             </>}
+            {confirming && <p role="alert">{t('deleteConfirmation')}</p>}
+            <div className="snail-memory-actions">
+              {confirming ? <>
+                <button type="button" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
+                <button type="button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
+              </> : <>
+                {!detail.readOnly && <button type="button" disabled={detail.entry === undefined} onClick={() => setConfirming(true)}>{t('delete')}</button>}
+                <button type="button" autoFocus onClick={closeDetails}>{t('close')}</button>
+              </>}
+            </div>
           </div>
         </div>
       )}

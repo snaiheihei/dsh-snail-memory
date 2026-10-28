@@ -9,6 +9,12 @@ describe('memory styles', () => {
     expect(MEMORY_STYLES).toContain('overflow-wrap: anywhere')
   })
 
+  it('keeps popover controls on the primary line and feedback on a full-width secondary line', () => {
+    expect(MEMORY_STYLES).toContain('grid-template-columns: minmax(0, 1fr) auto')
+    expect(MEMORY_STYLES).toContain('.snail-memory-row > .snail-memory-feedback { grid-column: 1 / -1;')
+    expect(MEMORY_STYLES).toContain('.snail-memory-row + .snail-memory-row')
+  })
+
   it('injects one owned style element and removes it on cleanup', () => {
     const cleanup = installMemoryStyles(document)
     const style = document.head.querySelector('[data-snail-memory-styles]')
