@@ -33,7 +33,7 @@ describe('/memory command', () => {
     ])
   })
 
-  it('summarizes dirty workspaces and their earliest schedule instead of a shared dirty flag', async () => {
+  it('summarizes dirty workspaces and displays their earliest schedules in Beijing time', async () => {
     const service = controller(async method => {
       if (method === 'status') return {
         writable: true,
@@ -42,7 +42,7 @@ describe('/memory command', () => {
           later: { dirty: true, nextConsolidationAt: '2026-10-26T08:00:00.000Z', lastConsolidationAt: null },
           sooner: { dirty: true, nextConsolidationAt: '2026-10-26T06:00:00.000Z', lastConsolidationAt: null },
         },
-        nextRetentionAt: null,
+        nextRetentionAt: '2026-10-30T02:25:10.756Z',
       }
       return {}
     })
@@ -51,7 +51,7 @@ describe('/memory command', () => {
 
     expect(result).toEqual({
       kind: 'success',
-      text: 'Snail Memory: writable; dirty workspaces=2; next workspace consolidation=2026-10-26T06:00:00.000Z; next cleanup=not scheduled',
+      text: 'Snail Memory: writable; dirty workspaces=2; next workspace consolidation=2026-10-26 14:00:00 +08:00; next cleanup=2026-10-30 10:25:10 +08:00',
     })
   })
 

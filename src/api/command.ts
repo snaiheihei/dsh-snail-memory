@@ -2,12 +2,18 @@ import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { CorrectRequest, MemoryStatus, ScopeRequest, WriteRequest } from '../contract.js'
 import type { MemoryEntry, MemoryScope } from '../store/types.js'
 import { memoryId, workspaceId } from '../store/types.js'
+import { formatBeijingTime } from '../time.js'
 import type { MemoryController } from './controller.js'
 import { safeError } from './errors.js'
 
 export type MemoryCommandResult = CommandResult
 
 const USAGE = 'Usage: /memory status | remember workspace <text> | correct workspace <id> <text> | forget workspace <id>'
+
+function formatScheduleTime(value: string | null | undefined): string {
+  if (value === null || value === undefined) return 'not scheduled'
+  return formatBeijingTime(value)
+}
 
 function scope(value: string | undefined): MemoryScope | undefined {
   if (value === 'global') return { kind: 'global' }
@@ -32,7 +38,7 @@ export async function executeMemoryCommand(
       const workspaceSchedules = Object.values(status.workspaceConsolidation).filter(consolidation => consolidation.dirty)
       const nextConsolidationAt = workspaceSchedules.map(consolidation => consolidation.nextConsolidationAt)
         .filter((value): value is string => value !== null).sort()[0]
-      return { kind: 'success', text: `Snail Memory: ${status.writable ? 'writable' : 'read-only'}; dirty workspaces=${workspaceSchedules.length}; next workspace consolidation=${nextConsolidationAt ?? 'not scheduled'}; next cleanup=${status.nextRetentionAt ?? 'not scheduled'}` }
+      return { kind: 'success', text: `Snail Memory: ${status.writable ? 'writable' : 'read-only'}; dirty workspaces=${workspaceSchedules.length}; next workspace consolidation=${formatScheduleTime(nextConsolidationAt)}; next cleanup=${formatScheduleTime(status.nextRetentionAt)}` }
     }
     let target = scope(layer)
     if (!target || !rest) return { kind: 'error', text: USAGE }

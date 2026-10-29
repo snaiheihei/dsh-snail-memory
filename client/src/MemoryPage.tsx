@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { MemoryEntry, MemoryIndexEntry, MemoryScope, WorkspaceId } from '../../src/store/types.js'
+import { formatBeijingTime } from '../../src/time.js'
 import type { MemoryCopyKey, MemoryTranslator } from './locale.js'
 import type { MemoryClientStore } from './store.js'
 
@@ -228,7 +229,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               <li className="snail-memory-entry" key={`${entry.scope.kind}:${entry.scope.kind === 'workspace' ? entry.scope.workspaceId : ''}:${entry.id}`}>
                 <h2>{entry.summary}</h2>
                 <p>{t(CATEGORY_COPY[entry.category])}</p>
-                <small>{t('updatedAt')}: {entry.updatedAt} · {t('revision')} {entry.revision}</small>
+                <small>{t('updatedAt')}: {formatBeijingTime(entry.updatedAt)} · {t('revision')} {entry.revision}</small>
                 {entry.sourceRefs.length > 0 && (
                   <p>{t('sources')}: {entry.sourceRefs.map(ref => `${ref.sessionId}${ref.eventSeqs === undefined ? '' : ` (${t('events')} ${ref.eventSeqs.join(', ')})`}`).join('; ')}</p>
                 )}
@@ -247,7 +248,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
             {detail.error !== undefined && <p role="alert">{detail.error}</p>}
             {detail.entry !== undefined && <>
               <p>{t('category')}: {t(CATEGORY_COPY[detail.entry.category])}</p>
-              <p>{t('updatedAt')}: {detail.entry.updatedAt}</p>
+              <p>{t('updatedAt')}: {formatBeijingTime(detail.entry.updatedAt)}</p>
               <pre>{detail.entry.detail}</pre>
             </>}
             {confirming && <p role="alert">{t('deleteConfirmation')}</p>}
