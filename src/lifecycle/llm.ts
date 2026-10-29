@@ -123,6 +123,13 @@ export function parseCandidateResponse(text: string, maxDetailChars = 16_000): P
   return { candidates, rejected }
 }
 
+function withActivityCategory(error: unknown, activityCategory: string): Error {
+  const wrapped = new Error(error instanceof Error ? error.message : String(error)) as Error & { activityCategory: string }
+  wrapped.activityCategory = activityCategory
+  Object.defineProperty(wrapped, 'cause', { value: error, configurable: true, writable: true })
+  return wrapped
+}
+
 async function invokeAuxiliaryModelInner(options: AuxiliaryCallOptions): Promise<ParsedCandidates> {
   const outputBudget = options.maxOutputChars ?? 64_000
   let text = ''
@@ -141,12 +148,18 @@ async function invokeAuxiliaryModelInner(options: AuxiliaryCallOptions): Promise
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   })) {
     if (chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
-    if (text.length > outputBudget) throw new Error('Model output exceeds the JSON candidate budget')
+    if (text.length > outputBudget) {
+      throw withActivityCategory(new Error('Model output exceeds the JSON candidate budget'), 'model-output-invalid')
+    }
   }
-  return parseCandidateResponse(text, options.maxDetailChars)
+  try {
+    return parseCandidateResponse(text, options.maxDetailChars)
+  } catch (error) {
+    throw withActivityCategory(error, 'model-output-invalid')
+  }
 }
 
-export async function invokeAuxiliaryModel(options: AuxiliaryCallOptions): Promise<ParsedCandidates> {
+async function invokeAuxiliaryModelWithTimeout(options: AuxiliaryCallOptions): Promise<ParsedCandidates> {
   if (options.timeoutMs === undefined) return invokeAuxiliaryModelInner(options)
   let timer: ReturnType<typeof setTimeout> | undefined
   const controller = new AbortController()
@@ -165,6 +178,19 @@ export async function invokeAuxiliaryModel(options: AuxiliaryCallOptions): Promi
   } finally {
     if (timer) clearTimeout(timer)
     options.signal?.removeEventListener('abort', abort)
+  }
+}
+
+export async function invokeAuxiliaryModel(options: AuxiliaryCallOptions): Promise<ParsedCandidates> {
+  try {
+    return await invokeAuxiliaryModelWithTimeout(options)
+  } catch (error) {
+    if ((error as { activityCategory?: unknown } | null)?.activityCategory !== undefined) throw error
+    const message = error instanceof Error ? error.message : ''
+    const category = (error as { name?: unknown } | null)?.name === 'AbortError' || /aborted|cancelled/i.test(message)
+      ? 'operation-aborted'
+      : 'model-request-failed'
+    throw withActivityCategory(error, category)
   }
 }
 

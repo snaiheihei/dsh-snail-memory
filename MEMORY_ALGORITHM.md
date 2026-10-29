@@ -1,6 +1,6 @@
 # Snail Memory：记忆算法、设计技巧与演进
 
-本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-29 的持久游标顺序蒸馏、大详情分片、父索引驻留、详情懒加载、独立 Global 记忆库和条目级 rank 使用反馈实现为基线。
+本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-29 的持久游标顺序蒸馏、大详情分片、父索引驻留、详情懒加载、独立 Global 记忆库、条目级 rank 使用反馈和生命周期活动调度日志实现为基线。
 
 文中严格区分三类机制：
 
@@ -158,6 +158,24 @@ pending key 仍是 kind，但每个值包含 `{ id, kind, createdAt }`。新 int
 - 两类整合和保留期失败分别按各自周期重试。
 - 卸载停止新 timer，但等待已经进入队列的工作 drain。
 - 错误状态只保存稳定类别，不保存可能包含路径、提示词或秘密的异常正文。
+
+### 4.5 用非权威活动历史还原一次任务
+
+`state.v2.json` 只表达当前 pending、dirty 和最近调度结果，事务 `audit.v1.jsonl` 只表达存储提交，二者都不能完整回答“某次 Review 处理了哪一批、为什么跳过、失败后重试到了哪里”。因此插件另行追加 `$DSH_HOME/snail_memory/logs/lifecycle.v1.jsonl`，记录以下七类事件：
+
+```text
+intent-created → run-started → batch-completed（每实际蒸馏批次）
+                             → run-succeeded | run-skipped | run-failed
+                             → retry-scheduled（仅实际建立新代重试时）
+```
+
+同一持久 intent ID 串联一次运行；`retry-scheduled` 通过原 intentId、retryIntentId 和 retryAt 指向新代任务。自动到期才落入 pending 的 consolidation/retention 也先记录 intent-created，暂停期间暂存、随后成功提交的 deferred intent 同样只在持久建立后记录。idle 新活动只刷新既有 intent 时间，不重复追加 intent-created。
+
+Scheduler 统一记录六类 operation：Review、Idle、Stop、workspace consolidation、Global consolidation 和 retention。业务层提供结构化结果，保留原有 `runIntent() → { written }` 兼容接口；每批记录 written、rejected 和 `{ lastEventSeq, offset }`，运行收尾记录耗时、批次、累计 written、processed/hasMore 和最后游标。无 workspace owner、没有新事件、到期 workspace 已 clean 分别形成 `workspace-unassigned`、`no-new-events`、`workspace-clean` 跳过；clean 跳过不执行模型任务，也不记录 run-started。
+
+`run-succeeded` 或业务型 `run-skipped` 只在业务运行和权威调度状态收尾成功后记录，避免模型已返回但状态提交失败时误报成功。失败仅保存 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`store-readonly`、`operation-aborted`、`operation-failed` 之一；不保存异常正文。活动文件逐字段白名单重建记录，对话、prompt、summary/detail、sourceRefs、模型原始响应和额外异常字段都不能落盘。
+
+文件 sink 使用独立 Promise 队列串行 append，默认当前文件达到 1 MiB 后轮转，保留当前文件及最多 `.1`、`.2`、`.3` 三个历史代际。它是 best-effort 诊断而非第二事实源：写入失败只发出脱敏告警，不改变记忆、游标或调度结果。Scheduler dispose 先 flush，插件卸载再 close；首版直接读取 JSONL 排查，不增加 UI 或 RPC。
 
 ## 5. 蒸馏与确定性去重
 
@@ -370,7 +388,9 @@ Web 管理页仍读取父完整详情供人查看；分片限制只针对模型�
 
 ### 10.2 日志与审计最小化
 
-审计只记录时间、操作和 revision 等元数据，不写 summary、detail、snapshot、sourceRefs 正文或异常原文。错误对外使用稳定类别，避免把内部路径、提示词和秘密带入 UI 或日志。
+事务审计只记录时间、操作和 revision 等元数据，不写 summary、detail、snapshot、sourceRefs 正文或异常原文。生命周期活动历史同样采用显式字段白名单：只保留调度身份、耗时、批次、计数、游标位置、跳过原因、稳定错误分类和重试时间，不记录对话、prompt、记忆正文、模型原始响应或异常 message；即使调用方附加额外字段，sink 也会先重建记录再序列化。错误对外使用稳定类别，避免把内部路径、提示词和秘密带入 UI 或日志。
+
+activity 与 audit 的问题域不同：audit 证明“哪次存储事务提交了”，activity 还原“哪次生命周期任务被建立、执行、跳过、成功、失败或重试”。二者都不是记忆正文或 Session 的替代品；activity 写失败不能改变业务结果。
 
 安全策略目前由 Controller、Lifecycle 和模型解析路径执行，而不是 `MemoryStore.upsert` 自身的强制不变量。新增生产写入入口时必须复用同一安全策略，不能假设 Store 会自动脱敏。
 
@@ -384,6 +404,8 @@ detail-data/<id>/<revision>.json     不可变权威详情；父索引的 revisi
 details/<id>.md                      小详情可读投影
 details/<id>/part-NNN.md             大详情分片可读投影
 global/、workspaces/                 INDEX.md 与 MEMORY.md 索引投影
+logs/lifecycle.v1.jsonl             非权威生命周期活动历史；默认 1 MiB 轮转，另留 .1/.2/.3
+audit.v1.jsonl                      无正文存储事务审计
 ```
 
 Host 启动只读取 `state.v2.json` 到 `MemoryStore`。`list()`、`enable()` 和 `refresh()` 都消费这份内存父索引；只有 `read()`、生命周期中确需正文的整合/去重，以及 UI/工具的详情请求才读取目标详情记录。因此详情懒加载减少的是启动读取、JSON 解析和常驻内存，不改变既有模型召回方式。
@@ -445,6 +467,10 @@ LLM 适合提炼、同义合并和冲突解释，不适合承担权限、事务�
 ### 12.9 把使用反馈与内容事实、召回顺序分开
 
 直接让模型给任意记忆加分会产生两类问题：它可能给从未进入上下文的条目刷分，也可能让高分条目更常注入并继续得分。当前设计用 committed 快照的实际 memoryIds 限定资格，用 Session + injection + memory 回执限定次数，再以 Store 原子事务同时写 rank 和回执。rank 只进入父索引和 Web 本地排序，不进入内容 revision、生命周期或召回排序。这样保留了“哪些记忆实际有帮助”的管理信号，同时避免把主观反馈伪装成内容验证或自动排序真值。
+
+### 12.10 让诊断可追踪，但不让诊断参与事务
+
+当前 pending/dirty 只能回答“现在还剩什么”，audit 只能回答“存储是否提交”，都无法还原一次生命周期任务的经历。独立 activity JSONL 用 intent ID 补足逐次运行历史，但刻意不进入 Store 事务：如果日志写失败也回滚记忆，诊断反而会成为新的单点故障；如果把运行历史塞回权威状态，又会扩大每次状态快照和恢复复杂度。取舍是以字段白名单、序列 append、大小轮转和 best-effort 换取可排查性，同时保持 `state.v2.json` 唯一权威。
 
 ## 13. 演进过程
 
@@ -578,6 +604,16 @@ Web 列表和详情显示 rank，Client 复制索引后按 rank、内容 updated
 
 新增回归覆盖默认与旧状态恢复、三种 outcome、预算外/未提交/错误 scope 拒绝、重启幂等、新 injection 再反馈、原子副作用边界、工具正文最小化、蒸馏过滤和 UI 稳定排序。最终全量自动化结果为 31 个测试文件、242 条测试，并通过 typecheck、lint、build 和 `git diff --check`；首次全量运行有一个既有跨 workspace refresh 用例在并行 I/O 负载下达到 5 秒超时，隔离运行 448ms 通过，未改代码后完整复验全部通过。真实 Host/UI/模型验收不在本轮执行范围内，也未安装到真实 Host、重启用户进程或创建 git commit。
 
+### 阶段十五：从当前调度状态演进为逐次活动历史
+
+此前只能从 `state.v2.json` 看到当前 pending/dirty 和最近稳定错误，从事务 audit 看到存储提交，无法直接还原一次蒸馏或整合经历了哪些批次、为何跳过、何时成功以及失败后的新代重试。本轮新增独立 `logs/lifecycle.v1.jsonl`，以持久 intent ID 关联 `intent-created`、`run-started`、`batch-completed`、`run-succeeded`、`run-skipped`、`run-failed` 和 `retry-scheduled`，覆盖 Review/Idle/Stop、workspace/Global consolidation 与 retention。
+
+Scheduler 成为统一埋点边界：idle debounce 不反复记录已有 intent；clean workspace 只记录跳过；成功或业务跳过在权威调度状态收尾后记录；失败仅保存稳定分类，实际建立新代 retry 时才记录 retryIntentId/retryAt。业务层新增结构化详细结果并保留原 `runIntent() → { written }` 接口，逐批 written/rejected/cursor 可追踪但不包含转录或记忆正文。
+
+活动 sink 逐字段白名单重建 JSONL，独立串行 append，默认 1 MiB 轮转并保留三个历史代际；日志和告警失败均不影响业务，卸载时 drain/close。首版不增加 UI/RPC，不修改 `state.v2.json`、Session、记忆算法或持久格式。差异复核额外发现 idle debounce 换 ID 会使建立与运行记录断链，回归断言先复现后，已改为同代刷新保留原 intent ID。
+
+聚焦自动化已实际通过 5 个测试文件、65 项测试；最终全量自动化为 32 个测试文件、254 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过；变更范围高置信私钥、云密钥、令牌与 Bearer 模式扫描无命中。真实 Host/UI/模型验收不在本轮执行范围内，也未安装到真实 Host、重启用户进程或创建 git commit。
+
 ## 14. 当前边界与后续演进方向
 
 以下是当前限制或候选方向，不是已经实现的能力：
@@ -606,6 +642,7 @@ Web 列表和详情显示 rank，Client 复制索引后按 rank、内容 updated
 | 版本化权威详情与按需读取 | `src/store/records.ts`、`src/store/store.ts` |
 | 大详情切分与 Markdown 投影 | `src/store/chunks.ts`、`src/store/projections.ts` |
 | 有效轮与生命周期调度 | `src/lifecycle/counters.ts`、`src/lifecycle/scheduler.ts` |
+| 白名单活动历史、结构化批次结果与 JSONL 轮转 | `src/lifecycle/activity.ts`、`src/lifecycle/service.ts` |
 | 蒸馏转录投影、turn 组批与片内游标 | `src/runtime.ts` |
 | 蒸馏、整合、遗忘 | `src/lifecycle/distill.ts`、`src/lifecycle/consolidate.ts`、`src/lifecycle/retention.ts` |
 | 辅助模型调用与输出校验 | `src/lifecycle/llm.ts` |

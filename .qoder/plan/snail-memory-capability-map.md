@@ -24,8 +24,8 @@
 | Module id | Responsibility | Depends on |
 |---|---|---|
 | `memory-store` | 独立 Global/workspace 父索引驻留、条目 rank、事务内 Promote 深复制、实际渲染 ID 与反馈回执、原子反馈写、版本化权威详情懒加载、大详情确定性分片、Markdown 投影、独立 revision、来源引用、Session 蒸馏游标、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
-| `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、受限枚举反馈、脱敏审计、失败关闭策略 | — |
-| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、记忆读取/反馈结果过滤、workspace/Global 独立 dirty gate 与 scope 内整合、仅 workspace 每日遗忘清理、显式记住/纠正/Promote/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
+| `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、受限枚举反馈、脱敏审计与白名单活动日志、失败关闭策略 | — |
+| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、记忆读取/反馈结果过滤、workspace/Global 独立 dirty gate 与 scope 内整合、仅 workspace 每日遗忘清理、显式记住/纠正/Promote/忘记、持久调度与幂等意图、按 intent ID 关联的非权威活动历史 | `memory-store`, `memory-safety` |
 | `memory-context` | 每会话关闭/workspace/global 三态单选、唯一 active desired、自动快照与实际渲染 ID、跨 workspace enable/refresh revision、排队与提交对账、时效与反馈提醒、受限详情读取、committed 资格反馈工具、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
 | `memory-api` | Host Service Definition、插件自有同源 HTTP RPC、人类命令与 UI 命令、权限和参数校验、结构化错误、读写状态与统计投影 | `memory-store`, `memory-lifecycle`, `memory-context` |
 | `memory-web` | Composer 三态 enable/disable/refresh 控件、Memory sidebar 入口、Global/Workspaces/Settings 三 tab、rank/updatedAt/id 本地排序与展示、条目与注入 token 统计、workspace Promote、两类 scope 删除确认、独立 Global 整合设置、状态恢复、locale 与交互反馈 | `memory-api` |
@@ -54,6 +54,7 @@
 - dsh 没有统一 session-end：使用真正 idle 的 debounce、`runMaintenance()`、dispose 和 workspace stop 信号组合触发；不得把 `session/event` 的 fire-and-forget 通知当作异步事务提交。
 - 会话蒸馏只写 Session owner workspace。workspace dirty 默认 20 小时后逐项目整合，Global dirty 默认 7 天后独立整合；每日 retention 只清理 workspace。
 - 调度状态持久化以 kind 为 key 的 `pending = { id, kind, createdAt }`、workspace/Global dirty、各自 next/last consolidation、next/last retention 和最近稳定错误类别；每 Session 的蒸馏游标单独持久化。新 intent、重试和设置重排生成新 ID，旧任务只在当前 ID 匹配时收尾，不能删除或覆盖运行期间到达的新代 intent。全插件只保留一个必要 timer，重启后恢复到期任务，不持久化独立 running intent 或统一 nextRunAt 字段。
+- `logs/lifecycle.v1.jsonl` 提供独立、非权威的逐次活动历史，以 intent ID 关联任务建立、执行、逐批结果、成功、跳过、失败和 retryIntentId。成功只在权威调度状态收尾后记录；idle debounce 保留同代 ID，不重复记录已有 intent。默认 1 MiB 轮转、保留三个历史代际，写失败不影响业务，卸载 drain 并 close；首版无 UI/RPC。
 - Review、Idle、Stop 共享每 Session 的 `lastEventSeq + offset` 蒸馏游标。完整 turn 优先按边界入批，超大 turn/消息按确定性片内位置续批；Review 一次一批，Idle/Stop 一次最多两批，首次加载不自动 backfill。
 - 候选安全处理、写入/去重完成后才推进游标；模型/解析/存储失败不推进。记忆已写而游标未写时允许同批重试，以稳定 ID、内容去重、sourceRefs 合并和整合降低重复；重试输出变化时仍可能产生语义重复。
 - 转录投影按 tool callId 排除 `snail_memory_read` 和 `snail_memory_feedback` 的结果，普通工具证据保留；rank-only 更新不设置 dirty、不重排整合/保留期、不推进 revision 或游标，也不生成新快照。
@@ -74,7 +75,8 @@
 
 - 自动蒸馏默认只读取获准的 Session 内容，不遍历私密文件；显式记住也不能绕过扫描。
 - 扫描发生在候选记忆首次持久化之前，也发生在任何内容发送给辅助蒸馏模型之前；模型输出落盘前再次扫描。候选回扫覆盖完整原始 JSON 及所有字符串键/值，包含未消费的元数据和额外字段，不允许把秘密藏进 sourceRefs 等字段绕过检查。
-- 高置信密钥和私钥材料不进入记忆、错误日志或审计正文；无法安全判定的候选跳过并报告脱敏原因。超过 512 字符的赋值凭据、未闭合或超大 PEM 保守拒绝；finding 排序后的去重仅比较最后一个已接受项，避免随 finding 数平方增长，且重叠 reject 优先于 redact，不会被去重吞掉。
+- 高置信密钥和私钥材料不进入记忆、错误日志、事务审计或活动历史正文；无法安全判定的候选跳过并报告脱敏原因。超过 512 字符的赋值凭据、未闭合或超大 PEM 保守拒绝；finding 排序后的去重仅比较最后一个已接受项，避免随 finding 数平方增长，且重叠 reject 优先于 redact，不会被去重吞掉。
+- 活动 sink 逐字段白名单重建记录，只保存调度、批次、游标位置和稳定错误分类；对话、prompt、summary/detail、sourceRefs、模型原始响应、异常正文与调用方额外字段一律不序列化。日志故障只产生脱敏告警，不改变业务成败。
 - 旧记忆注入时附加：“这是若干天前的时点观察，不是实时状态；涉及代码行为、文件位置或系统状态时必须重新验证。”天数按来源最近验证时间计算。
 - 记忆内容标记为不可信参考数据，不授予其覆盖当前用户指令、系统指令或安全策略的能力。
 - 大于 8,000 字符的父详情确定性拆为每片至多 4,000 字符；主索引只保留父摘要。模型默认读取分片清单，指定 `chunk_id` 才读取单片，所有分片拼接必须无损还原正文。分片只控制单次模型可见量，不修改 Session 持久化或注入 revision 语义。

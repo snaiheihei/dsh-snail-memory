@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { MemoryStoreReadonlyError, type MemoryStore } from '../store/store.js'
 import type { LifecycleIntent } from '../store/types.js'
+import type {
+  LifecycleActivityRecord,
+  LifecycleActivitySink,
+  LifecycleErrorCategory,
+  LifecycleOperation,
+  LifecycleRunResult,
+} from './activity.js'
 
 export interface LifecycleSchedulerOptions {
   readonly idleDelayMinutes?: number
@@ -8,7 +15,39 @@ export interface LifecycleSchedulerOptions {
   readonly globalConsolidationCooldownDays?: number
   readonly retentionSweepHours?: number
   readonly now?: () => Date
-  readonly run: (kind: string) => Promise<void>
+  readonly activity?: LifecycleActivitySink
+  readonly run: (kind: string) => Promise<LifecycleRunResult | void>
+}
+
+function activityContext(kind: string): {
+  operation: LifecycleOperation
+  sessionId?: string
+  workspaceId?: string
+} {
+  const separator = kind.indexOf(':')
+  const operation = (separator < 0 ? kind : kind.slice(0, separator)) as LifecycleOperation
+  if (operation === 'review' || operation === 'idle' || operation === 'stop') {
+    return { operation, ...(separator < 0 ? {} : { sessionId: kind.slice(separator + 1) }) }
+  }
+  if (operation === 'consolidate' && separator >= 0) {
+    try {
+      return { operation, workspaceId: decodeURIComponent(kind.slice(separator + 1)) }
+    } catch {
+      return { operation }
+    }
+  }
+  return { operation }
+}
+
+function activityErrorCategory(error: unknown): LifecycleErrorCategory {
+  if (error instanceof MemoryStoreReadonlyError) return 'store-readonly'
+  const category = (error as { activityCategory?: unknown } | null)?.activityCategory
+  if (category === 'model-route-missing' || category === 'model-request-failed' || category === 'model-output-invalid'
+    || category === 'store-readonly' || category === 'operation-aborted' || category === 'operation-failed') return category
+  const message = error instanceof Error ? error.message : ''
+  if (message === 'No auxiliary model route is available') return 'model-route-missing'
+  if ((error as { name?: unknown } | null)?.name === 'AbortError' || /aborted|cancelled/i.test(message)) return 'operation-aborted'
+  return 'operation-failed'
 }
 
 /** Status exposes a stable category, never exception text that may contain paths or secrets. */
@@ -103,6 +142,7 @@ export class LifecycleScheduler {
       })
       for (const [kind, intent] of deferred) {
         if (this.deferredIntents.get(kind)?.id === intent.id) this.deferredIntents.delete(kind)
+        this.logActivity(intent, 'intent-created')
       }
     } catch (error) {
       this.started = false
@@ -158,23 +198,34 @@ export class LifecycleScheduler {
   async dispose(): Promise<void> {
     this.disposed = true
     await this.stop()
+    try {
+      await this.options.activity?.flush?.()
+    } catch {
+      // Activity history is diagnostic and never blocks disposal.
+    }
   }
 
   private async putIntent(kind: string, createdAt: string): Promise<void> {
     if (this.disposed) return
-    const intent: LifecycleIntent = { id: randomUUID(), kind, createdAt }
+    let intent: LifecycleIntent = { id: randomUUID(), kind, createdAt }
     if (!this.store.writable) {
       this.deferredIntents.set(kind, intent)
       return
     }
+    let previous: LifecycleIntent | undefined
     try {
-      await this.store.updateMeta(meta => { meta.pending[kind] = intent })
+      await this.store.updateMeta(meta => {
+        previous = meta.pending[kind]
+        if (previous !== undefined && kind.startsWith('idle:')) intent = { ...intent, id: previous.id }
+        meta.pending[kind] = intent
+      })
       if (this.deferredIntents.get(kind)?.id === intent.id) this.deferredIntents.delete(kind)
     } catch (error) {
       if (!(error instanceof MemoryStoreReadonlyError)) throw error
       this.deferredIntents.set(kind, intent)
       return
     }
+    if (previous === undefined || !kind.startsWith('idle:')) this.logActivity(intent, 'intent-created')
     this.schedule()
   }
 
@@ -215,11 +266,29 @@ export class LifecycleScheduler {
             delete current.pending[key]
           }
         })
+        this.logActivity(value, 'run-skipped', { skipReason: 'workspace-clean' })
         continue
       }
-      if (!due) await this.store.updateMeta(current => { current.pending[key] = value })
+      if (!due) {
+        await this.store.updateMeta(current => { current.pending[key] = value })
+        this.logActivity(value, 'intent-created')
+      }
+      const startedAt = this.now().getTime()
+      this.logActivity(value, 'run-started')
       try {
-        await this.options.run(value.kind)
+        const result: LifecycleRunResult = await this.options.run(value.kind) ?? {
+          written: 0,
+          batches: 0,
+          processed: true,
+        }
+        result.batchResults?.forEach((batch, index) => {
+          this.logActivity(value, 'batch-completed', {
+            batch: index + 1,
+            written: batch.written,
+            rejected: batch.rejected,
+            cursor: batch.cursor,
+          })
+        })
         await this.store.updateMeta(current => {
           if (current.pending[key]?.id === value.id) delete current.pending[key]
           current.lastError = null
@@ -239,7 +308,21 @@ export class LifecycleScheduler {
             current.nextRetentionAt = new Date(this.now().getTime() + this.retentionDelayMs).toISOString()
           }
         })
-      } catch {
+        const cursor = result.batchResults?.at(-1)?.cursor
+        this.logActivity(value, result.skipReason ? 'run-skipped' : 'run-succeeded', {
+          durationMs: Math.max(0, this.now().getTime() - startedAt),
+          batches: result.batches,
+          written: result.written,
+          processed: result.processed,
+          ...(result.hasMore === undefined ? {} : { hasMore: result.hasMore }),
+          ...(cursor === undefined ? {} : { cursor }),
+          ...(result.skipReason === undefined ? {} : { skipReason: result.skipReason }),
+        })
+      } catch (error) {
+        this.logActivity(value, 'run-failed', {
+          durationMs: Math.max(0, this.now().getTime() - startedAt),
+          error: activityErrorCategory(error),
+        })
         const delay = workspaceId !== undefined
           ? this.consolidationDelayMs
           : value.kind === 'global-consolidate'
@@ -251,15 +334,17 @@ export class LifecycleScheduler {
         const retryCreatedAt = workspaceId !== undefined || value.kind === 'global-consolidate' || value.kind === 'retention'
           ? retryAt
           : this.now().toISOString()
+        const retryKind = value.kind.startsWith('review:') || value.kind.startsWith('stop:')
+          ? `idle:${value.kind.slice(value.kind.indexOf(':') + 1)}`
+          : value.kind
+        let retryIntent: LifecycleIntent | undefined
         await this.store.updateMeta(current => {
           current.lastError = lifecycleErrorMessage(value.kind)
           if (current.pending[key]?.id === value.id) {
             delete current.pending[key]
-            const retryKind = value.kind.startsWith('review:') || value.kind.startsWith('stop:')
-              ? `idle:${value.kind.slice(value.kind.indexOf(':') + 1)}`
-              : value.kind
             if (retryKind === key || current.pending[retryKind] === undefined) {
-              current.pending[retryKind] = { id: randomUUID(), kind: retryKind, createdAt: retryCreatedAt }
+              retryIntent = { id: randomUUID(), kind: retryKind, createdAt: retryCreatedAt }
+              current.pending[retryKind] = retryIntent
             }
           }
           if (workspaceId !== undefined) {
@@ -273,9 +358,34 @@ export class LifecycleScheduler {
             current.nextRetentionAt = retryAt
           }
         })
+        if (retryIntent) {
+          this.logActivity(value, 'retry-scheduled', {
+            retryIntentId: retryIntent.id,
+            retryAt: new Date(this.dueAt(retryKind, retryCreatedAt)).toISOString(),
+          })
+        }
       }
     }
     this.schedule()
+  }
+
+  private logActivity(
+    intent: LifecycleIntent,
+    event: LifecycleActivityRecord['event'],
+    details: Partial<LifecycleActivityRecord> = {},
+  ): void {
+    try {
+      this.options.activity?.record({
+        formatVersion: 1,
+        time: this.now().toISOString(),
+        event,
+        intentId: intent.id,
+        ...activityContext(intent.kind),
+        ...details,
+      })
+    } catch {
+      // A diagnostic sink cannot change lifecycle execution or persistence.
+    }
   }
 
   private workspaceId(kind: string): string | undefined {

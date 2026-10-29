@@ -3,7 +3,7 @@ import { prepareMemoryCandidate } from '../safety/policy.js'
 import type { MemoryStore } from '../store/store.js'
 import type { MemoryEntry, MemoryScope, MemorySourceRef, WorkspaceId } from '../store/types.js'
 import { memoryId } from '../store/types.js'
-import { nextDistillationBatch, type TranscriptEvent } from '../runtime.js'
+import { nextDistillationBatch, type DistillationCursorPosition, type TranscriptEvent } from '../runtime.js'
 import { invokeAuxiliaryModel, type AuxiliaryModel } from './llm.js'
 
 export interface DistillOptions {
@@ -24,6 +24,7 @@ export interface DistillResult {
   readonly entries: readonly MemoryEntry[]
   readonly processed: boolean
   readonly hasMore: boolean
+  readonly cursor: DistillationCursorPosition
 }
 
 function stableId(scope: MemoryScope, category: string, summary: string) {
@@ -50,12 +51,16 @@ function mergeSourceRefs(existing: readonly MemorySourceRef[], incoming: readonl
 }
 
 export async function distillSession(store: MemoryStore, options: DistillOptions): Promise<DistillResult> {
-  if (!options.workspaceId) return { written: 0, rejected: 0, entries: [], processed: false, hasMore: false }
   const state = store.getSessionState(options.sessionId)
   const position = state.distillationCursor ?? { lastEventSeq: 0, offset: 0 }
+  if (!options.workspaceId) {
+    return { written: 0, rejected: 0, entries: [], processed: false, hasMore: false, cursor: position }
+  }
   const inputChars = options.kind === 'review' ? 24_000 : 48_000
   const batch = nextDistillationBatch(options.events, position, inputChars)
-  if (!batch.text) return { written: 0, rejected: 0, entries: [], processed: false, hasMore: batch.hasMore }
+  if (!batch.text) {
+    return { written: 0, rejected: 0, entries: [], processed: false, hasMore: batch.hasMore, cursor: batch.cursor }
+  }
   if (!options.model || !options.provider || !options.modelName) throw new Error('No auxiliary model route is available')
   const safe = prepareMemoryCandidate(batch.text, {
     source: 'session',
@@ -106,5 +111,5 @@ export async function distillSession(store: MemoryStore, options: DistillOptions
   await store.updateSessionState(options.sessionId, current => {
     current.distillationCursor = { ...batch.cursor, updatedAt: now.toISOString() }
   })
-  return { written, rejected: parsed.rejected, entries, processed: true, hasMore: batch.hasMore }
+  return { written, rejected: parsed.rejected, entries, processed: true, hasMore: batch.hasMore, cursor: batch.cursor }
 }

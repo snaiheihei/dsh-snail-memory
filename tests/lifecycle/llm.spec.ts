@@ -67,6 +67,22 @@ describe('auxiliary LLM calls and candidate parsing', () => {
     })).rejects.toThrow(/json/i)
   })
 
+  it('tags model request and output failures with stable activity categories', async () => {
+    await expect(invokeAuxiliaryModel({
+      model: { async prepareCall() { throw new Error('private provider diagnostic') } },
+      provider: 'test',
+      modelName: 'aux',
+      prompt: 'review',
+    })).rejects.toMatchObject({ activityCategory: 'model-request-failed', message: 'private provider diagnostic' })
+
+    await expect(invokeAuxiliaryModel({
+      model: { async prepareCall() { return { async *stream() {} } } },
+      provider: 'test',
+      modelName: 'aux',
+      prompt: 'review',
+    })).rejects.toMatchObject({ activityCategory: 'model-output-invalid' })
+  })
+
   it('times out a stalled model call', async () => {
     await expect(invokeAuxiliaryModel({
       model: { async prepareCall() { return { async *stream() {

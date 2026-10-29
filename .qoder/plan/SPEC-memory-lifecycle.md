@@ -1,5 +1,7 @@
 # Spec: memory-lifecycle
 
+> 2026-10-29 活动日志修订：新增独立、非权威的 `logs/lifecycle.v1.jsonl`，按持久 intent ID 追踪任务建立、执行、批次、成功、跳过、失败和重试；日志采用字段白名单、大小轮转与 best-effort 写入，不改变记忆状态或 Session。
+>
 > 2026-10-29 rank 反馈修订：`snail_memory_feedback` 与读取工具结果均从后续蒸馏转录中排除；rank-only 更新不触发 dirty、整合、保留期、revision、游标或新快照变化。
 >
 > 2026-10-28 数据与调度修订：整合来源由程序按输入快照汇集，模型 `id/supersedes` 仅可引用本次输入条目，完整候选回扫；生命周期 pending intent 增加持久 ID，旧任务不得清理或改写新代 intent。
@@ -29,7 +31,8 @@ npm run lint
 
 ```text
 src/lifecycle/counters.ts   → 有效用户轮与 completed turn 关联
-src/lifecycle/scheduler.ts  → nextRunAt、dirty、单 timer、重启恢复
+src/lifecycle/scheduler.ts  → nextRunAt、dirty、单 timer、重启恢复与活动状态流转
+src/lifecycle/activity.ts   → 白名单活动记录、结构化运行结果、JSONL 轮转与 flush/close
 src/lifecycle/settings.ts   → UI 设置校验、原子持久化与只读边界
 src/lifecycle/llm.ts        → 一次性辅助模型调用与 JSON 解析
 src/lifecycle/distill.ts    → 会话候选蒸馏、至少一次提交与游标推进
@@ -57,6 +60,17 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - Review/蒸馏的转录投影仅保留真实用户消息、助手消息和普通工具结果；通过 `tool/call.callId` 排除 `snail_memory_read` 与 `snail_memory_feedback` 的 `tool/result`，不按结果正文过滤，也不修改原始 Session。记忆详情和反馈回执因此不会成为下一批蒸馏证据，普通工具结果仍保留。
 - rank-only 反馈不是内容写入：不设置 workspace/Global dirty，不安排或重排 consolidation/retention，不推进条目或 scope revision，不修改 `updatedAt`、`lastVerifiedAt`、蒸馏游标，也不生成 desired/committed 新快照。
 - 注入索引默认上限 1,200 估算 token，可在 Settings 调整 `snapshotTokenBudget`；新值仅用于后续 Enable/Refresh 新快照，不改写历史快照。条目按 `updatedAt` 从新到旧逐条加入，下一条会使估算超预算时停止并报告剩余数量；rank 不参与该顺序，也没有独立的 800 token 核心摘要预算或“高置信”排序，固定头部和尾部说明也不计入该条目循环的硬上限。
+
+## Lifecycle Activity
+
+- 活动历史写入 `$DSH_HOME/snail_memory/logs/lifecycle.v1.jsonl`，不进入权威状态，不与事务 audit 混用，也不修改 dsh Session。首版通过文件直接排查，不新增 UI 或 RPC。
+- 六类 operation 为 `review`、`idle`、`stop`、`consolidate`、`global-consolidate`、`retention`；七类 event 为 `intent-created`、`run-started`、`batch-completed`、`run-succeeded`、`run-skipped`、`run-failed`、`retry-scheduled`。同一 intent ID 串联一次运行，retry-scheduled 另记录 retryIntentId 和真实 retryAt。
+- 白名单字段为 formatVersion/time/event/operation/intentId、可选 sessionId/workspaceId、durationMs、batch/batches、written/rejected、processed/hasMore、仅含 lastEventSeq/offset 的 cursor、skipReason、稳定 error 和重试元数据。不得记录对话、prompt、summary/detail、sourceRefs、模型原始响应、异常正文或秘密。
+- intent-created 只在 intent 成功持久建立后记录；已有 idle intent 的 debounce 刷新保留同代 intent ID，只更新 createdAt，不重复记录，确保建立与后续运行事件可串联；deferred intent 在 start 成功提交后记录。自动到期的 consolidation/retention 先持久 pending 再记录。
+- run-succeeded 和业务型 run-skipped 在业务运行及权威调度状态收尾成功后记录；无 owner、无新事件、clean workspace 分别使用 `workspace-unassigned`、`no-new-events`、`workspace-clean`。clean workspace 不调用 run，也不记录 run-started。
+- 每个实际蒸馏批次记录 batch-completed、written/rejected 和游标位置。失败只记录 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`store-readonly`、`operation-aborted`、`operation-failed`；只有实际创建新代 retry intent 才记录 retry-scheduled。
+- `MemoryLifecycleService.runIntentDetailed()` 提供结构化运行与逐批结果，既有 `runIntent() → { written }` 保持兼容。非蒸馏任务 batches 为 0，retention 的 written 为删除数，consolidation 的 written 为写入数。
+- 文件 sink 以独立 Promise 队列串行 append，默认单文件上限 1 MiB，保留当前文件加最多 `.1`、`.2`、`.3` 三个历史代际。写入与告警 best-effort，日志失败不得改变业务结果；Scheduler dispose 先 flush，插件卸载再 close。
 
 ## Code Style
 
@@ -96,12 +110,15 @@ pending?.count += 1
 - 慢模型期间删除或纠正后旧候选不写回；旧整合及 Scheduler 任务不清除运行期间新 Promote/Delete 建立的 Global dirty 和重排计划。
 - 模型伪造 sourceRefs 不落盘，sourceRefs/supersedes 元数据中的秘密导致完整候选拒绝；合并结果只汇集实际模型输入内目标与被取代条目的真实来源，快照外及被 64,000 字符预算截断的 id/supersedes 不写回、不删除条目、不贡献来源。
 - 旧 Review 成功时保留同 key 新 Review，旧 Review 失败时不覆盖新 Idle；重试、deferred 提交、热重排和旧 pending 无 ID 数据均保持代际与兼容语义。
+- 验证同一 intent 的 created/started/batch/succeeded 使用相同 ID，逐批 written/rejected/cursor、运行耗时和最终计数准确；两次 idle debounce 只产生一条 intent-created。
+- 验证 clean workspace、无 owner 和无新事件的 skipReason；失败只记录稳定分类，retry-scheduled 关联真实新 ID/到期时间且不包含异常正文。
+- 验证活动 sink 同步抛错、文件写入失败和告警回调失败均不改变 pending 清理、lastError 或记忆任务结果；JSONL 白名单、1 MiB/代际可配轮转、close drain 和 Host 卸载 close 均有回归。
 
 ## Boundaries
 
-- Always：先安全扫描；持久 intent 和事件游标；串行写；保留可重试失败；批处理成功后推进游标。
-- Ask first：改变频率默认值、增加自动 scope 晋升或新模型路由、启用显式历史 backfill。
-- Never：用 jobs-local 代替持久恢复；在 post-commit 回调里阻塞 Session；删除对话历史；用删除记忆按钮重置游标或恢复历史蒸馏。
+- Always：先安全扫描；持久 intent 和事件游标；串行写；保留可重试失败；批处理成功后推进游标；活动日志字段白名单和 best-effort。
+- Ask first：改变频率默认值、增加自动 scope 晋升或新模型路由、启用显式历史 backfill；把活动历史变成权威状态或新增外部日志服务。
+- Never：用 jobs-local 代替持久恢复；在 post-commit 回调里阻塞 Session；删除对话历史；用删除记忆按钮重置游标或恢复历史蒸馏；让日志写失败改判业务失败。
 
 ## Success Criteria
 
@@ -112,6 +129,7 @@ pending?.count += 1
 - 崩溃重启后已持久任务和游标不丢，游标从下一未处理位置继续；记忆已写而游标未提交时允许同批重放，相同候选依靠稳定 ID、内容比较和 sourceRefs 合并去重，但重试输出变化时仍可能出现语义重复，不承诺绝不重复调用模型或生成近义条目。
 - Review/Idle/Stop 最终可覆盖持续变长 Session 的中段和尾部，同时保持每次维护调用的批次与字符预算有界。
 - 记忆读取与反馈结果不进入后续蒸馏，rank-only 更新不触发任何生命周期内容维护或快照。
+- 可按 intent ID 从活动 JSONL 还原每次任务的建立、实际批次、成功/跳过/失败与重试链；日志不包含正文或异常原文，轮转、写入失败和卸载不影响权威记忆与调度状态。
 
 ## Open Questions
 

@@ -1,6 +1,7 @@
 import { CompletedTurnCounter, type LifecycleSessionEvent } from './counters.js'
 import { consolidateMemories } from './consolidate.js'
 import { distillSession } from './distill.js'
+import type { LifecycleActivitySink, LifecycleBatchResult, LifecycleRunResult } from './activity.js'
 import type { AuxiliaryModel } from './llm.js'
 import { LifecycleScheduler, lifecycleErrorMessage } from './scheduler.js'
 import { DEFAULT_MEMORY_SETTINGS } from './settings.js'
@@ -41,6 +42,7 @@ export interface MemoryLifecycleOptions {
   readonly globalConsolidationCooldownDays?: number | undefined
   readonly retentionSweepHours?: number | undefined
   readonly settings?: MemorySettingsStore
+  readonly activity?: LifecycleActivitySink
   readonly transcriptEvents?: (sessionId: string) => readonly TranscriptEvent[] | Promise<readonly TranscriptEvent[]>
   readonly resolveWorkspaceId?: (sessionId: string) => WorkspaceId | undefined
   readonly onChange?: (change: { kind: string; scope: MemoryScope; ids?: readonly MemoryId[] }) => void | Promise<void>
@@ -63,8 +65,9 @@ export class MemoryLifecycleService {
       consolidationCooldownHours: settings.consolidationCooldownHours,
       globalConsolidationCooldownDays: settings.globalConsolidationCooldownDays,
       ...(options.retentionSweepHours === undefined ? {} : { retentionSweepHours: options.retentionSweepHours }),
+      ...(options.activity === undefined ? {} : { activity: options.activity }),
       now: this.now,
-      run: async kind => { await this.runIntent(kind) },
+      run: kind => this.runIntentDetailed(kind),
     })
   }
 
@@ -116,7 +119,12 @@ export class MemoryLifecycleService {
     }
   }
 
-  runIntent(kind: string): Promise<{ written: number }> {
+  async runIntent(kind: string): Promise<{ written: number }> {
+    const result = await this.runIntentDetailed(kind)
+    return { written: result.written }
+  }
+
+  runIntentDetailed(kind: string): Promise<LifecycleRunResult> {
     const separator = kind.indexOf(':')
     const operation = separator < 0 ? kind : kind.slice(0, separator)
     const sessionId = separator >= 0 && (operation === 'review' || operation === 'idle' || operation === 'stop')
@@ -129,7 +137,7 @@ export class MemoryLifecycleService {
     return this.executeIntent(kind)
   }
 
-  private async executeIntent(kind: string, signal?: AbortSignal): Promise<{ written: number }> {
+  private async executeIntent(kind: string, signal?: AbortSignal): Promise<LifecycleRunResult> {
     const route = this.options.route?.()
     const selectedProvider = route?.provider ?? this.options.provider
     const selectedModel = route?.model ?? this.options.modelName
@@ -142,17 +150,22 @@ export class MemoryLifecycleService {
     try {
       if (operation === 'retention') {
         const removed = await this.sweepRetention()
-        return { written: removed.length }
+        return { written: removed.length, batches: 0, processed: true, batchResults: [] }
       }
       if (operation === 'consolidate') {
         if (separator >= 0) consolidationWorkspaceId = workspaceId(decodeURIComponent(kind.slice(separator + 1)))
         const scope: MemoryScope | undefined = consolidationWorkspaceId === undefined
           ? undefined
           : { kind: 'workspace', workspaceId: consolidationWorkspaceId }
-        return { written: await this.consolidateWithResult(scope, signal) }
+        return { written: await this.consolidateWithResult(scope, signal), batches: 0, processed: true, batchResults: [] }
       }
       if (operation === 'global-consolidate') {
-        return { written: await this.consolidateWithResult({ kind: 'global' }, signal) }
+        return {
+          written: await this.consolidateWithResult({ kind: 'global' }, signal),
+          batches: 0,
+          processed: true,
+          batchResults: [],
+        }
       }
       if (operation !== 'review' && operation !== 'idle' && operation !== 'stop') {
         throw new Error(`Unknown memory lifecycle intent: ${kind}`)
@@ -167,7 +180,11 @@ export class MemoryLifecycleService {
         }
       }
       const events = await this.options.transcriptEvents?.(sessionId) ?? []
+      if (state.workspaceId === undefined) {
+        return { written: 0, batches: 0, processed: false, batchResults: [], skipReason: 'workspace-unassigned' }
+      }
       let written = 0
+      const batchResults: LifecycleBatchResult[] = []
       const maxBatches = operation === 'review' ? 1 : 2
       for (let batch = 0; batch < maxBatches; batch += 1) {
         const result = await distillSession(this.store, {
@@ -175,14 +192,16 @@ export class MemoryLifecycleService {
           ...(selectedProvider === undefined ? {} : { provider: selectedProvider }),
           ...(selectedModel === undefined ? {} : { modelName: selectedModel }),
           sessionId,
-          ...(state.workspaceId === undefined ? {} : { workspaceId: state.workspaceId }),
+          workspaceId: state.workspaceId,
           events,
           kind: operation,
           now: this.now,
           ...(signal === undefined ? {} : { signal }),
         })
+        if (!result.processed) break
         written += result.written
-        if (result.written > 0 && state.workspaceId) {
+        batchResults.push({ written: result.written, rejected: result.rejected, cursor: result.cursor })
+        if (result.written > 0) {
           await this.scheduler.markDirty(state.workspaceId)
           await this.options.onChange?.({
             kind: 'distill',
@@ -190,9 +209,12 @@ export class MemoryLifecycleService {
             ids: result.entries.map(entry => entry.id),
           })
         }
-        if (!result.processed || !result.hasMore) break
+        if (!result.hasMore) break
       }
-      return { written }
+      if (batchResults.length === 0) {
+        return { written: 0, batches: 0, processed: false, batchResults, skipReason: 'no-new-events' }
+      }
+      return { written, batches: batchResults.length, processed: true, batchResults }
     } catch (error) {
       await this.store.updateMeta(meta => {
         meta.lastError = lifecycleErrorMessage(kind)

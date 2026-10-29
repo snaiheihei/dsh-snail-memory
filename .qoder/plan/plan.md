@@ -100,6 +100,16 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 - 已同步 memory-store/context/lifecycle/safety/web Spec、能力地图和记忆演化文档。最终全量自动化为 31 个测试文件、242 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过；首次全量运行有一个既有跨 workspace refresh 用例在并行 I/O 负载下达到 5 秒超时，隔离运行 448ms 通过，未改代码后完整复验全部通过。
 - 本轮未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit。
 
+### 生命周期活动调度日志增量（2026-10-29）
+
+- 新增插件自有、非权威的 append-only `logs/lifecycle.v1.jsonl`，与 `state.v2.json` 和事务 `audit.v1.jsonl` 分离；activity 追踪生命周期任务的建立与运行，audit 仍只回答存储事务是否提交。
+- Review、Idle、Stop、workspace/Global consolidation 和 retention 统一由 Scheduler 记录 `intent-created`、`run-started`、`batch-completed`、`run-succeeded`、`run-skipped`、`run-failed`、`retry-scheduled`；同一 intent ID 关联单次运行，重试记录新 retryIntentId 和实际到期时间。
+- 记录字段限为时间、操作、Session/workspace、耗时、批次、written/rejected、游标位置、processed/hasMore、跳过原因、稳定错误分类和重试元数据；不写对话、prompt、summary/detail、模型原始响应、异常原文或秘密。idle debounce 只在首次建立持久 intent 时记录，不为每次活动刷新刷日志。
+- `run-succeeded` 在业务运行和权威调度状态收尾后记录；无 owner、无新事件和 clean workspace 分别记录 `workspace-unassigned`、`no-new-events`、`workspace-clean`。保留 `runIntent() → { written }` 兼容接口，详细结构化结果供调度日志使用。
+- 文件 sink 使用串行 Promise 队列，默认单文件 1 MiB，保留当前文件加最多 `.1`、`.2`、`.3` 三个历史代际；写入 best-effort，日志故障不改变记忆任务结果，Scheduler dispose 先 flush，插件卸载最后 close。首版不提供 UI 或 RPC。
+- 差异复核发现 idle debounce 每次刷新曾更换 intent ID，导致唯一一条 intent-created 无法与实际运行记录串联；新增同一 ID 断言先复现失败，再让同代 idle 刷新保留原 ID，最终 created/started/succeeded 可完整关联。
+- 聚焦自动化已实际通过 5 个测试文件、65 项测试；最终全量自动化为 32 个测试文件、254 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过；变更范围高置信私钥、云密钥、令牌与 Bearer 模式扫描无命中。本轮未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit。
+
 ## 后续修改 Plan（2026-10-28）
 
 当前运行定案为单一 dsh Client、单 Host。以下事项明确后置，不属于本轮来源汇集、模型输出边界、安全扫描和 Scheduler intent 代际修复：

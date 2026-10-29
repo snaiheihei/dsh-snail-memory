@@ -13,6 +13,7 @@ import { MemoryController } from './api/controller.js'
 import { registerMemoryApi } from './api/index.js'
 import { MemoryContextService } from './context/service.js'
 import { registerMemoryFeedbackTool, registerMemoryReadTool } from './context/tool.js'
+import { LifecycleActivityFileSink } from './lifecycle/activity.js'
 import { MemoryLifecycleService } from './lifecycle/service.js'
 import { WriterLifecycleRuntime } from './lifecycle/scheduler.js'
 import { DEFAULT_MEMORY_SETTINGS, MemorySettingsStore } from './lifecycle/settings.js'
@@ -67,8 +68,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   const transcripts = new Map<string, readonly TranscriptEvent[]>()
   const configuredRoute = config.provider && config.model ? { provider: config.provider, model: config.model } : undefined
+  const activity = new LifecycleActivityFileSink({
+    file: join(root, 'logs', 'lifecycle.v1.jsonl'),
+    onError: () => { ctx.logger.warn('[snail-memory] Could not write lifecycle activity history') },
+  })
   const lifecycle = new MemoryLifecycleService(store, {
     settings,
+    activity,
     model: new DshAuxiliaryModel(ctx.llm),
     route: () => selectModelRoute(ctx.agents.list(), configuredRoute),
     resolveWorkspaceId: sessionId => resolveSessionWorkspace(ctx.workspaceRegistry.list(), sessionId),
@@ -167,6 +173,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     disposeFeedbackTool()
     await writerRuntime.dispose()
     await lifecycle.dispose()
+    await activity.close()
     await store.close()
   })
 }

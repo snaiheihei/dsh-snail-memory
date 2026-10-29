@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { LifecycleActivityRecord } from '../../src/lifecycle/activity.js'
 import { LifecycleScheduler, WriterLifecycleRuntime } from '../../src/lifecycle/scheduler.js'
 import { WriterLock } from '../../src/store/lock.js'
 import { emptyState, MemoryStore } from '../../src/store/store.js'
@@ -557,6 +558,128 @@ describe('LifecycleScheduler', () => {
     expect(store.getMeta().nextRetentionAt).toBe('2026-10-28T00:00:00.000Z')
     await store.close()
     expect(vi.getTimerCount()).toBe(0)
+  })
+  it('records one intent lifecycle with batch statistics and a shared intent id', async () => {
+    const store = await openStore()
+    const records: LifecycleActivityRecord[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      activity: { record: record => { records.push(record) } },
+      run: async () => {
+        vi.setSystemTime(new Date('2026-10-26T00:00:00.125Z'))
+        return {
+          written: 2,
+          batches: 1,
+          processed: true,
+          batchResults: [{ written: 2, rejected: 0, cursor: { lastEventSeq: 4, offset: 0 } }],
+        }
+      },
+    })
+    await scheduler.start()
+    await scheduler.requestReview('session-1')
+    await vi.advanceTimersByTimeAsync(0)
+    await scheduler.drain()
+
+    expect(records.map(record => record.event)).toEqual([
+      'intent-created', 'run-started', 'batch-completed', 'run-succeeded',
+    ])
+    expect(new Set(records.map(record => record.intentId)).size).toBe(1)
+    expect(records.at(-1)).toMatchObject({
+      operation: 'review', sessionId: 'session-1', durationMs: 125, batches: 1, written: 2,
+      cursor: { lastEventSeq: 4, offset: 0 },
+    })
+    expect(records[2]).toMatchObject({ event: 'batch-completed', batch: 1, written: 2 })
+    await scheduler.dispose()
+  })
+
+  it('does not log every idle debounce refresh as a new intent', async () => {
+    const store = await openStore()
+    const records: LifecycleActivityRecord[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      idleDelayMinutes: 15,
+      activity: { record: record => { records.push(record) } },
+      run: async () => ({ written: 0, batches: 0, processed: true }),
+    })
+    await scheduler.start()
+    await scheduler.requestIdle('session-1')
+    await scheduler.requestIdle('session-1')
+    await vi.advanceTimersByTimeAsync(15 * 60_000)
+    await scheduler.drain()
+
+    expect(records.filter(record => record.event === 'intent-created')).toHaveLength(1)
+    expect(records.map(record => record.event)).toEqual(['intent-created', 'run-started', 'run-succeeded'])
+    expect(new Set(records.map(record => record.intentId)).size).toBe(1)
+    await scheduler.dispose()
+  })
+
+  it('records stable failure and retry metadata without exception text', async () => {
+    const store = await openStore()
+    const records: LifecycleActivityRecord[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      activity: { record: record => { records.push(record) } },
+      run: async () => { throw new Error('private provider diagnostic') },
+    })
+    await scheduler.start()
+    await scheduler.requestReview('session-1')
+    await vi.advanceTimersByTimeAsync(0)
+    await scheduler.drain()
+
+    expect(records.map(record => record.event)).toEqual([
+      'intent-created', 'run-started', 'run-failed', 'retry-scheduled',
+    ])
+    expect(records.at(-2)).toMatchObject({ event: 'run-failed', error: 'operation-failed' })
+    expect(records.at(-1)).toMatchObject({
+      event: 'retry-scheduled',
+      retryIntentId: store.getMeta().pending['idle:session-1']?.id,
+      retryAt: '2026-10-26T01:00:00.000Z',
+    })
+    expect(JSON.stringify(records)).not.toContain('private provider diagnostic')
+    await scheduler.dispose()
+  })
+
+  it('logs a clean persisted workspace intent as skipped without executing it', async () => {
+    const store = await openStore()
+    const records: LifecycleActivityRecord[] = []
+    const run = vi.fn(async () => ({ written: 0, batches: 0, processed: true }))
+    await store.updateMeta(meta => {
+      meta.workspaceConsolidation.test_only = {
+        dirty: false, nextConsolidationAt: null, lastConsolidationAt: '2026-10-26T00:00:00.000Z',
+      }
+      meta.pending['consolidate:test_only'] = {
+        id: 'clean-intent', kind: 'consolidate:test_only', createdAt: '2026-10-26T00:00:00.000Z',
+      }
+    })
+    const scheduler = new LifecycleScheduler(store, {
+      retentionSweepHours: 1_000,
+      activity: { record: record => { records.push(record) } },
+      run,
+    })
+    await scheduler.start()
+    await vi.advanceTimersByTimeAsync(0)
+    await scheduler.drain()
+
+    expect(run).not.toHaveBeenCalled()
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      event: 'run-skipped', operation: 'consolidate', intentId: 'clean-intent',
+      workspaceId: 'test_only', skipReason: 'workspace-clean',
+    })
+    await scheduler.dispose()
+  })
+
+  it('does not turn a successful run into a failure when its activity sink throws', async () => {
+    const store = await openStore()
+    const scheduler = new LifecycleScheduler(store, {
+      activity: { record: () => { throw new Error('log write failed') } },
+      run: async () => ({ written: 1, batches: 1, processed: true }),
+    })
+    await scheduler.start()
+    await scheduler.requestReview('session-1')
+    await vi.advanceTimersByTimeAsync(0)
+    await scheduler.drain()
+
+    expect(store.getMeta().pending['review:session-1']).toBeUndefined()
+    expect(store.getMeta().lastError).toBeNull()
+    await scheduler.dispose()
   })
 })
 

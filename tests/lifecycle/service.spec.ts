@@ -214,6 +214,40 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getMeta().lastError).toBeNull()
   })
 
+  it('reports an unowned session as a structured skip', async () => {
+    const { service } = await setup([], undefined, undefined, () => undefined)
+
+    await expect(service.runIntentDetailed('idle:session-1')).resolves.toEqual({
+      written: 0,
+      batches: 0,
+      processed: false,
+      batchResults: [],
+      skipReason: 'workspace-unassigned',
+    })
+  })
+
+  it('reports each processed distillation batch with its cursor and final skip reason', async () => {
+    const owner = workspaceId('workspace-1')
+    const { service, store } = await setup([
+      '{"candidates":[{"category":"project-convention","summary":"Run focused tests","detail":"Run focused tests first."}]}',
+    ])
+    await store.updateSessionState('session-1', state => { state.workspaceId = owner })
+
+    await expect(service.runIntentDetailed('review:session-1')).resolves.toEqual({
+      written: 1,
+      batches: 1,
+      processed: true,
+      batchResults: [{ written: 1, rejected: 0, cursor: { lastEventSeq: 1, offset: 0 } }],
+    })
+    await expect(service.runIntentDetailed('review:session-1')).resolves.toEqual({
+      written: 0,
+      batches: 0,
+      processed: false,
+      batchResults: [],
+      skipReason: 'no-new-events',
+    })
+  })
+
   it('rejects secret candidates and does not invent consolidation work on model failure', async () => {
     const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
     const { service, store, events } = await setup([

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply } from '../../src/index.js'
+import { LifecycleActivityFileSink } from '../../src/lifecycle/activity.js'
 import { MemoryLifecycleService } from '../../src/lifecycle/service.js'
 import type { AuxiliaryModelCallConfig } from '../../src/lifecycle/llm.js'
 import { MemoryStore } from '../../src/store/store.js'
@@ -48,6 +49,28 @@ describe('lifecycle dsh runtime composition', () => {
     expect(routes[0]).toMatchObject({ provider: 'late-provider', model: 'late-model' })
     expect(maintenance).toEqual(['session-1'])
     await lifecycle.dispose()
+  })
+
+  it('closes the lifecycle activity sink during plugin disposal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-host-activity-'))
+    roots.push(root)
+    const close = vi.spyOn(LifecycleActivityFileSink.prototype, 'close')
+    const ctx = {
+      agents: { list: () => [], get: () => undefined },
+      commands: { register: () => () => {} },
+      llm: {},
+      tools: { register: () => () => {} },
+      webServer: { register: () => () => {} },
+      workspaceRegistry: { list: () => [] },
+      logger: { warn: () => {} },
+      on: () => () => {},
+      effect: (effect: () => () => void | Promise<void>) => { effects.push(effect()) },
+    } as unknown as Context
+
+    await apply(ctx, { dshHome: root })
+    await effects.splice(0)[0]?.()
+
+    expect(close).toHaveBeenCalledTimes(1)
   })
 
   it('retries the initial lifecycle start without unloading the plugin', async () => {

@@ -1,5 +1,7 @@
 # Spec: memory-store
 
+> 2026-10-29 活动日志修订：生命周期运行历史使用独立 `logs/lifecycle.v1.jsonl`，不进入 `state.v2.json`，也不与事务 `audit.v1.jsonl` 混用；活动日志不是权威状态，写失败不得改变已提交的记忆或调度结果。
+>
 > 2026-10-29 rank 反馈修订：父条目增加默认 0 的 `rank`；committed 快照保存实际渲染的 memory ID 和逐条目反馈回执，Store 以同一原子事务完成资格校验、rank 更新与幂等回执，且 rank-only 更新不触碰内容或生命周期状态。
 >
 > 2026-10-28 运行范围修订：当前定案为单一 dsh Client、单 Host。既有写锁、只读与接管逻辑保留为意外重复启动防护，但不据此宣称支持多 Host 共同写入；完整跨 Host 事务 fencing 暂缓。
@@ -60,6 +62,7 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - WriterLock 在持有锁时通过本代 FileHandle 续心跳，在未持有锁时按同一周期间隔重试。stale 回收必须核对 quarantine 中移出的原始锁内容，误移新锁时用硬链接恢复；锁缺失时恢复崩溃遗留的 quarantine，主锁仍存在时则把遗留 quarantine 作为过期残留清理，不得反复移走当前主锁。启动时仍新鲜、随后才 stale 的旧锁与启动时已 stale 的锁都必须可恢复；锁被正常释放后同样允许接管。晋升与 heartbeat 解耦，晋升前重新读取最新 v2（或兼容迁移 v1）、恢复 pending 投影，并在各共享写入阶段续租验权，完成后才发布 writable；活跃 writer 心跳有效时不得抢锁。Store 事务边界把可识别的所有权/fencing 异常统一转换为 `MemoryStoreReadonlyError`，普通 I/O 和编程错误仍按原类别抛出。writable 变化通知 Host 启停 lifecycle，首次及后续准备或启动失败都在当前可写期间自动重试；暂停、只读或验权竞争期间收到的新 intent 在可写启动后补持久化。`start()` 必须提交 deferred 快照，并且只清理该快照中已经持久化且当前值未变化的条目；提交期间新增或更新的 intent 必须保留到后续启动。卸载停止监控、重试并清理 timer。
 - 当前实现尚未把上述锁协议闭合为完整事务 fencing：Store transaction 只在开始时 `assertWritable()`，进行中的事务在锁所有权变化后仍可能发布旧 draft，覆盖继任 writer 已提交的父状态。后续需要 writer 代际和原子条件发布，并补进行中事务与 stale takeover 的交错测试；在此之前不能宣称旧 fencing token 在所有阶段都绝对不能提交。
 - `audit.v1.jsonl` 只记录操作、id、revision、时间和脱敏结果，不记录记忆正文、秘密或完整提示词。
+- `logs/lifecycle.v1.jsonl` 是生命周期活动历史，不是 Store 权威状态或事务审计。它按 intent ID 记录任务建立、执行、批次、成功、跳过、失败和重试元数据，默认 1 MiB 轮转并保留三个历史代际；activity 与 audit 各自使用独立序列写队列，activity 失败只产生脱敏告警，绝不回滚或改判已提交的记忆/调度状态。
 - `global/INDEX.md` 只包含独立 Global 条目，不包含 workspace 聚合引用；Promote 通过新 ID、独立版本化详情和 `promotedFrom` 深复制，不共享来源详情或分片所有权。
 - 每会话独立保存两个层的 `enabled`、`desired`、已提交 injection id/revision 和估算 token，以及唯一 `activeDesired` 和可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。
 - 新 desired/committed injection 保存 `memoryIds`，即该快照在 token 预算内实际渲染的父条目 ID，而不是完整索引或仅被读取的条目；旧记录可缺省，缺省时不授予反馈资格。committed injection 另保存 `feedback[memoryId] = outcome` 回执，使同一 Session + injectionId + memoryId 在重启后仍只能接受一次反馈；新 committed injection 可形成新的反馈机会。
@@ -129,7 +132,7 @@ async write(entry: MemoryEntry): Promise<void> {
 
 - Always：所有数据留在 snail_memory；原子写；单写者；删除只作用于本插件数据。
 - Ask first：改变持久格式、引入数据库、扩大可读取目录。
-- Never：修改 dsh 源码或 Session；把正文/秘密写进审计；用 workspace path 代替 WorkspaceId。
+- Never：修改 dsh 源码或 Session；把正文/秘密写进审计或活动日志；把活动日志当成权威状态；用 workspace path 代替 WorkspaceId。
 
 ## Success Criteria
 
