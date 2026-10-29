@@ -49,6 +49,10 @@ export interface LifecycleRunResult {
   readonly skipReason?: LifecycleSkipReason
 }
 
+export interface LifecycleIntentRunResult extends LifecycleRunResult {
+  readonly intentId: string
+}
+
 export interface LifecycleActivitySink {
   record(record: LifecycleActivityRecord): void
   flush?(): Promise<void>

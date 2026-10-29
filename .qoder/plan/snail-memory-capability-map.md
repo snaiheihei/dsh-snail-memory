@@ -25,10 +25,10 @@
 |---|---|---|
 | `memory-store` | 独立 Global/workspace 父索引驻留、条目 rank、事务内 Promote 深复制、实际渲染 ID 与反馈回执、原子反馈写、版本化权威详情懒加载、大详情确定性分片、Markdown 投影、独立 revision、来源引用、Session 蒸馏游标、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
 | `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、受限枚举反馈、脱敏审计与白名单活动日志、失败关闭策略 | — |
-| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、记忆读取/反馈结果过滤、workspace/Global 独立 dirty gate 与 scope 内整合、仅 workspace 每日遗忘清理、显式记住/纠正/Promote/忘记、持久调度与幂等意图、按 intent ID 关联的非权威活动历史 | `memory-store`, `memory-safety` |
+| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、记忆读取/反馈结果过滤、workspace/Global 独立 dirty gate 与 scope 内整合、当前 scope 手动立即整合与 Host 防重、仅 workspace 每日遗忘清理、显式记住/纠正/Promote/忘记、持久调度与幂等意图、按 intent ID 关联的非权威活动历史 | `memory-store`, `memory-safety` |
 | `memory-context` | 每会话关闭/workspace/global 三态单选、唯一 active desired、自动快照与实际渲染 ID、跨 workspace enable/refresh revision、排队与提交对账、时效与反馈提醒、受限详情读取、committed 资格反馈工具、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
 | `memory-api` | Host Service Definition、插件自有同源 HTTP RPC、人类命令与 UI 命令、权限和参数校验、结构化错误、读写状态与统计投影 | `memory-store`, `memory-lifecycle`, `memory-context` |
-| `memory-web` | Composer 三态 enable/disable/refresh 控件、Memory sidebar 入口、Global/Workspaces/Settings 三 tab、rank/updatedAt/id 本地排序与展示、条目与注入 token 统计、workspace Promote、两类 scope 删除确认、独立 Global 整合设置、状态恢复、locale 与交互反馈 | `memory-api` |
+| `memory-web` | Composer 三态 enable/disable/refresh 控件、Memory sidebar 入口、Global/Workspaces/Settings 三 tab、rank/updatedAt/id 本地排序与展示、条目与注入 token 统计、workspace Promote、两类 scope 删除确认、当前 scope 手动整合确认/busy/真实结果、独立 Global 整合设置、状态恢复、locale 与交互反馈 | `memory-api` |
 
 建设顺序：`memory-store` 与 `memory-safety` 并行 → `memory-lifecycle` 与 `memory-context` 并行 → `memory-api` → `memory-web`。
 
@@ -54,6 +54,7 @@
 - dsh 没有统一 session-end：使用真正 idle 的 debounce、`runMaintenance()`、dispose 和 workspace stop 信号组合触发；不得把 `session/event` 的 fire-and-forget 通知当作异步事务提交。
 - 会话蒸馏只写 Session owner workspace。workspace dirty 默认 20 小时后逐项目整合，Global dirty 默认 7 天后独立整合；每日 retention 只清理 workspace。
 - 调度状态持久化以 kind 为 key 的 `pending = { id, kind, createdAt }`、workspace/Global dirty、各自 next/last consolidation、next/last retention 和最近稳定错误类别；每 Session 的蒸馏游标单独持久化。新 intent、重试和设置重排生成新 ID，旧任务只在当前 ID 匹配时收尾，不能删除或覆盖运行期间到达的新代 intent。全插件只保留一个必要 timer，重启后恢复到期任务，不持久化独立 running intent 或统一 nextRunAt 字段。
+- Global 与选中的单个 workspace 可手动立即整合，clean scope 也允许；复用同 kind 持久 intent 与串行队列。Host 按 scope 防重并允许加入正在运行的自动任务，调用方等待目标 intent 的真实 written 或稳定失败，不等待全队列，不新增跨 scope 全部整合。
 - `logs/lifecycle.v1.jsonl` 提供独立、非权威的逐次活动历史，以 intent ID 关联任务建立、执行、逐批结果、成功、跳过、失败和 retryIntentId。成功只在权威调度状态收尾后记录；idle debounce 保留同代 ID，不重复记录已有 intent。默认 1 MiB 轮转、保留三个历史代际，写失败不影响业务，卸载 drain 并 close；首版无 UI/RPC。
 - Review、Idle、Stop 共享每 Session 的 `lastEventSeq + offset` 蒸馏游标。完整 turn 优先按边界入批，超大 turn/消息按确定性片内位置续批；Review 一次一批，Idle/Stop 一次最多两批，首次加载不自动 backfill。
 - 候选安全处理、写入/去重完成后才推进游标；模型/解析/存储失败不推进。记忆已写而游标未写时允许同批重试，以稳定 ID、内容去重、sourceRefs 合并和整合降低重复；重试输出变化时仍可能产生语义重复。
@@ -86,6 +87,7 @@
 - Composer 提供关闭/workspace/global 三态选择，workspace 可选择任意已注册项目；当前已启用层可 disable，refresh 仅在该层 enabled 后可用。重复启用相同选择幂等，切换层或项目只保留一个 active desired。
 - enable/active desired 与已提交注入状态由 Host 权威恢复；localStorage 只可作显示缓存，不作为唯一事实源。
 - Memory 页面使用现有 `sidebar.panellist` 与同 key `main` slot，不修改 shell；包含独立 Global、Workspaces 和 Settings 三个 tab，workspace 详情可 Promote，Global 与 workspace 条目均可独立删除。
+- 两个记忆 tab 均可确认后立即整合当前 scope；UI 显示 busy 与真实 written，成功后刷新索引。切换 tab、Session 或 workspace 作废旧响应，但不取消 Host 已接受的维护任务；整合结果不自动追加到当前对话。
 - 列表和详情展示 rank；Client 复制索引后按 rank 降序、内容 updatedAt 降序、id 升序排列，不修改 Host 数组。该视图排序不回写 Store，也不影响模型快照顺序。
 - 条目数统计所选 tab 的当前有效条目；注入 token 统计当前 Session 已提交快照的累计估算，并区分最近快照估算。
 - 删除操作只调用 memory API，不调用 Session 删除、压缩或 surface replacement。

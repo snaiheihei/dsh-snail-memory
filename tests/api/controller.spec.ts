@@ -226,6 +226,31 @@ describe('MemoryController', () => {
     await expect(controller.call('read', { scope: { kind: 'workspace', workspaceId: workspaceId('workspace-1') }, id: memoryId('missing') })).rejects.toMatchObject({ code: 'memory-not-found' })
   })
 
+  it('consolidates only the requested registered workspace or independent global scope', async () => {
+    const { store, context } = await setup()
+    const scopes: string[] = []
+    const controller = new MemoryController(store, context, {
+      resolveSession: () => undefined,
+      isWorkspace: id => id === 'workspace-1' || id === 'workspace-2',
+      consolidation: {
+        consolidateNow: async scope => {
+          scopes.push(scope.kind === 'global' ? 'global' : scope.workspaceId)
+          return { intentId: `intent-${scopes.length}`, written: 2, batches: 0, processed: true }
+        },
+      },
+    })
+
+    await expect(controller.call('consolidate', {
+      scope: { kind: 'workspace', workspaceId: workspaceId('workspace-2') },
+    })).resolves.toEqual({ intentId: 'intent-1', written: 2 })
+    await expect(controller.call('consolidate', { scope: { kind: 'global' } }))
+      .resolves.toEqual({ intentId: 'intent-2', written: 2 })
+    await expect(controller.call('consolidate', {
+      scope: { kind: 'workspace', workspaceId: workspaceId('unknown') },
+    })).rejects.toMatchObject({ code: 'workspace-not-found' })
+    expect(scopes).toEqual(['workspace-2', 'global'])
+  })
+
   it('uses the lifecycle write path so explicit changes enter maintenance scheduling', async () => {
     const { store, context } = await setup()
     const calls: string[] = []

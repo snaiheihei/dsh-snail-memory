@@ -1,5 +1,7 @@
 # Spec: memory-api
 
+> 2026-10-29 手动整合修订：新增 `consolidate(scope)` RPC，仅接受独立 Global 或已注册 workspace，经 Lifecycle Scheduler 执行并返回真实 `{ intentId, written }`；不提供“整合全部”或直接调用整合函数的旁路。
+>
 > 2026-10-28 独立 Global 修订：新增 Promote RPC；Global read/remove 接受独立 global scope，remember/correct 仍只允许 workspace。Global 列表不再聚合 workspace。
 
 ## Objective
@@ -38,6 +40,7 @@ tests/api/               → 路由、校验、错误和命令测试
 - `enable(sessionId, layer, workspaceId?)`：启用 Global 或指定已注册 workspace，返回 `MemoryOperationResult`；重复启用相同选择幂等，切换层或项目会建立新的唯一 active desired。workspace 参数只改变召回选择，不改变 Session 写入 owner。
 - `disable(sessionId)`：关闭两层并清除 active desired；`refresh(sessionId, layer)` 仅在当前已启用 scope revision 前进时创建新快照代，否则返回 up-to-date。
 - `list(scope)`：返回 `MemoryIndex = { scope, revision, entries, workspaces }`；条目数由 `entries.length` 派生，只读状态由 `status()` 单独获取。Global 只返回独立条目，当前 `workspaces` 聚合引用数组为空。
+- `consolidate(scope)`：立即整理独立 Global 或指定已注册 workspace，复用 `MemoryLifecycleService.consolidateNow()` 与 Scheduler 持久 intent；clean scope 也可执行。相同 scope 的重复请求由 Host 防重，调用方等待目标 intent 的真实完成结果，响应仅为 `{ intentId, written }`。未启动、只读、模型或存储失败均返回稳定错误，不把已排队当成已成功。
 - `read(scope, id)`、`remove(scope, id)`：UI 父记忆完整详情与删除；read 异步按需读取目标版本化详情记录，remove 返回 `{ removed }`，等价忘记且不接受 Session 参数。Global remove 只删除独立 Global 副本。remove 不读取、回退、重置或推进任何 Session `distillationCursor`，也不会使已处理历史重新蒸馏或恢复已删条目。大详情分片只约束模型工具读取，存储懒加载和分片都不改变管理 UI 的人类完整详情查看契约。
 - `promote(scope, id)`：从已注册 workspace 的源条目深复制到独立 Global，返回 `{ id, created }`；重复 Promote 幂等，不接受 global 来源。
 - `remember(input)`、`correct(input)`：显式立即写入；输入包含 workspace scope、category、summary、detail 和可选 source sessionId，correct 另含 id。直接 Global 写入不可用，Global 人工副本只能经 Promote 建立。
@@ -55,7 +58,7 @@ export type RpcResult<T> =
   | { ok: false; error: { code: string; message: string } }
 
 const routes = {
-  getSessionState, enable, disable, refresh, list, read, remove, promote,
+  getSessionState, enable, disable, refresh, list, consolidate, read, remove, promote,
   remember, correct, status, getSettings, updateSettings, listWorkspaces,
 } as const
 ```
@@ -67,6 +70,7 @@ const routes = {
 - 非白名单方法、GET、错误 content-type、大 body、无效 id、未知 workspace。
 - 只读 Host 写操作明确失败，读操作仍可用。
 - enable/remove 等幂等与错误响应，不包含内部路径或正文。
+- consolidate 只传递请求的 Global/已注册 workspace，拒绝未知 workspace；重复请求由 Host 防重，响应使用真实 intentId/written，失败不含模型或存储异常正文。
 - `/memory` 子命令语法、目标 scope、即时写入与状态输出。
 - 卸载后路由和命令不再可用。
 

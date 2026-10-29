@@ -98,6 +98,20 @@ describe('MemoryClientStore', () => {
     expect(rpc.count('list')).toBe(before + 2)
   })
 
+  it('consolidates the requested scope and refreshes its tracked index', async () => {
+    const rpc = new FakeRpc()
+      .on('list', ({ scope }) => memoryIndex(scope))
+      .on('consolidate', () => ({ intentId: 'intent-1', written: 2 }))
+    const store = new MemoryClientStore(rpc)
+    await store.loadIndex(WORKSPACE_SCOPE)
+    const before = rpc.count('list')
+
+    await expect(store.consolidate(WORKSPACE_SCOPE)).resolves.toEqual({ intentId: 'intent-1', written: 2 })
+
+    expect(rpc.calls.find(call => call.method === 'consolidate')?.payload).toEqual({ scope: WORKSPACE_SCOPE })
+    expect(rpc.count('list')).toBe(before + 1)
+  })
+
   it('does not let an older settings read overwrite a successful save', async () => {
     const pending = deferred<MemorySettings>()
     const updated = {

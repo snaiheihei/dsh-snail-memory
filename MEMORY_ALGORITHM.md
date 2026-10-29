@@ -156,6 +156,8 @@ pending key 仍是 kind，但每个值包含 `{ id, kind, createdAt }`。新 int
 - Review/Idle/Stop 只写 Session owner workspace，不改变 Global dirty 或调度；Review/Stop 失败后降级为 Idle 意图，空闲类任务按 60 分钟重试。
 - rank-only 反馈不属于内容写入，不设置任何 dirty、不创建或重排整合/保留期 intent、不推进游标，也不生成新快照；它只更新父条目 rank 和 committed 回执。
 - 两类整合和保留期失败分别按各自周期重试。
+- 手动 Consolidate 复用同一 Scheduler：目标为独立 Global 或当前选中的单个 workspace，不提供跨 scope 的“全部整合”。即使 scope 当前 clean，也把显式点击视为立即工作请求，持久建立或提前对应 kind 的 intent 后直接进入既有串行队列；这里的临时 dirty 只表达有待执行的整合工作，不代表刚发生了记忆写入。
+- 同一 scope 的重复手动请求共享同一 intent 和结果 Promise；若自动整合已经在运行，手动请求加入该运行而不另排一次。调用方只等待目标 intent：成功在权威 meta 收尾后返回 `{ intentId, written, ... }`，失败在重试状态持久化后返回稳定错误，不等待或 drain 其他 Session/scope 的任务。
 - 卸载停止新 timer，但等待已经进入队列的工作 drain。
 - 错误状态只保存稳定类别，不保存可能包含路径、提示词或秘密的异常正文。
 
@@ -230,6 +232,8 @@ Promote 只接受已注册 workspace 的来源条目。Store 在同一串行写�
 4. 确定性代码只接受经 64,000 字符预算截断后、实际发送给模型的输入快照中真实存在的候选 ID；`supersedes` 也去重并限制在同一输入快照，未知、被预算排除、快照外或指向目标自身的 ID 不生效，更不能用于跨 scope 移动或删除。
 5. 不采用模型返回的 `sourceRefs`。程序从现有目标与有效被取代条目的真实来源汇集并按 JSON 精确值去重，再写回新 revision、删除同 scope 中被取代的旧 ID；Global 写回保留 `promotedFrom`，目标条目已有 rank 经既有 upsert 保留，不把被取代条目的 rank 相加。
 6. 全部成功后只清理目标类的 dirty、pending 和下次整合时间，并记录对应的最近整合时间。
+
+手动按钮与自动到期共用上述同一条整合管线，RPC 不直接调用 `consolidateMemories()`。手动执行不读取当前对话、不推进任何 Session 蒸馏游标、不自动 Promote，也不把新索引追加进当前上下文；后续是否生成新快照仍由 Enable/Refresh 的 revision 规则决定。
 
 因此，“语义上是否重复、哪个结论更新”是模型判断；“是否允许写、能否跨 scope、如何持久化和删除”是程序判断。这个分工让语义能力可演进，同时把数据安全边界留在确定性代码中。
 

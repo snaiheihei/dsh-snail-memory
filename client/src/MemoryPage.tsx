@@ -41,8 +41,12 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [promoting, setPromoting] = useState(false)
+  const [consolidating, setConsolidating] = useState(false)
+  const [consolidationConfirming, setConsolidationConfirming] = useState(false)
+  const [consolidationFeedback, setConsolidationFeedback] = useState<{ kind: 'status' | 'alert'; text: string } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const detailRequest = useRef(0)
+  const consolidationRequest = useRef(0)
   const detailTrigger = useRef<HTMLElement | null>(null)
   const mounted = useRef(true)
   const state = sessionId === undefined ? undefined : store.getSession(sessionId)
@@ -66,13 +70,18 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     return () => {
       mounted.current = false
       detailRequest.current += 1
+      consolidationRequest.current += 1
     }
   }, [])
   useEffect(() => { void store.loadIndex(GLOBAL_SCOPE) }, [store])
   useEffect(() => {
     setNotice(null)
     setDetail(null)
+    setConsolidating(false)
+    setConsolidationConfirming(false)
+    setConsolidationFeedback(null)
     detailRequest.current += 1
+    consolidationRequest.current += 1
     if (sessionId !== undefined) void store.loadSession(sessionId)
   }, [sessionId, store])
   useEffect(() => {
@@ -87,8 +96,12 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
 
   const selectTab = (next: MemoryTab): void => {
     detailRequest.current += 1
+    consolidationRequest.current += 1
     setDetail(null)
     setConfirming(false)
+    setConsolidating(false)
+    setConsolidationConfirming(false)
+    setConsolidationFeedback(null)
     setNotice(null)
     setTab(next)
   }
@@ -171,6 +184,30 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     }
   }
 
+  const consolidate = async (): Promise<void> => {
+    if (scope === undefined || consolidating) return
+    const target = scope
+    const request = ++consolidationRequest.current
+    setConsolidating(true)
+    setConsolidationConfirming(false)
+    setConsolidationFeedback(null)
+    try {
+      const result = await store.consolidate(target)
+      if (mounted.current && consolidationRequest.current === request) {
+        setConsolidationFeedback({
+          kind: 'status',
+          text: t('consolidationCompleted').replace('{count}', String(result.written)),
+        })
+      }
+    } catch (reason) {
+      if (mounted.current && consolidationRequest.current === request) {
+        setConsolidationFeedback({ kind: 'alert', text: reason instanceof Error ? reason.message : String(reason) })
+      }
+    } finally {
+      if (mounted.current && consolidationRequest.current === request) setConsolidating(false)
+    }
+  }
+
   const revisions = state === undefined ? [] : [state.layers.global.committedRevision, state.layers.workspace.committedRevision]
     .filter((revision): revision is number => revision !== null)
   const latestRevision = revisions.length === 0 ? null : Math.max(...revisions)
@@ -209,8 +246,12 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               disabled={workspaces === undefined || workspaces.length === 0}
               onChange={event => {
                 detailRequest.current += 1
+                consolidationRequest.current += 1
                 setDetail(null)
                 setConfirming(false)
+                setConsolidating(false)
+                setConsolidationConfirming(false)
+                setConsolidationFeedback(null)
                 setNotice(null)
                 setWorkspaceSelection({ id: event.target.value as WorkspaceId, manual: true })
               }}
@@ -222,6 +263,24 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
           {tab === 'workspaces' && workspacesError !== undefined && <div role="alert">{workspacesError} <button type="button" onClick={() => { void store.loadWorkspaces() }}>{t('retry')}</button></div>}
           {tab === 'workspaces' && workspaces === undefined && workspacesError === undefined && <p role="status">{t('loading')}</p>}
           {tab === 'workspaces' && workspaces?.length === 0 ? <p>{t('noWorkspaces')}</p> : scope !== undefined && <>
+          <div className="snail-memory-consolidation">
+            <button
+              type="button"
+              disabled={consolidating}
+              onClick={() => {
+                setConsolidationFeedback(null)
+                setConsolidationConfirming(true)
+              }}
+            >
+              {consolidating ? t('consolidating') : t(tab === 'global' ? 'consolidateGlobal' : 'consolidateWorkspace')}
+            </button>
+            {consolidationConfirming && <>
+              <p role="alert">{t(tab === 'global' ? 'consolidateGlobalConfirmation' : 'consolidateWorkspaceConfirmation')}</p>
+              <button type="button" onClick={() => { void consolidate() }}>{t('confirmConsolidation')}</button>
+              <button type="button" onClick={() => setConsolidationConfirming(false)}>{t('cancel')}</button>
+            </>}
+            {consolidationFeedback !== null && <p role={consolidationFeedback.kind}>{consolidationFeedback.text}</p>}
+          </div>
           {indexError !== undefined && <div role="alert">{indexError} <button type="button" onClick={() => { void store.loadIndex(scope) }}>{t('retry')}</button></div>}
           {index === undefined && indexError === undefined && <p role="status">{t('loading')}</p>}
           {index !== undefined && entries.length === 0 && <p>{t(tab === 'global' ? 'emptyGlobal' : 'emptyWorkspace')}</p>}

@@ -1,13 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import { MemoryStoreReadonlyError, type MemoryStore } from '../store/store.js'
-import type { LifecycleIntent } from '../store/types.js'
+import type { LifecycleIntent, MemoryScope } from '../store/types.js'
 import type {
   LifecycleActivityRecord,
   LifecycleActivitySink,
   LifecycleErrorCategory,
+  LifecycleIntentRunResult,
   LifecycleOperation,
   LifecycleRunResult,
 } from './activity.js'
+
+interface ConsolidationRequest {
+  intentId: string
+  settled: boolean
+  readonly promise: Promise<LifecycleIntentRunResult>
+  readonly resolve: (result: LifecycleIntentRunResult) => void
+  readonly reject: (error: Error) => void
+}
 
 export interface LifecycleSchedulerOptions {
   readonly idleDelayMinutes?: number
@@ -68,6 +77,8 @@ export class LifecycleScheduler {
   private disposed = false
   private started = false
   private readonly deferredIntents = new Map<string, LifecycleIntent>()
+  private readonly consolidationRequests = new Map<string, ConsolidationRequest>()
+  private readonly activeConsolidations = new Map<string, string>()
   private readonly now: () => Date
 
   constructor(
@@ -155,6 +166,7 @@ export class LifecycleScheduler {
     this.started = false
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
+    this.rejectAllConsolidationRequests()
     await this.queue
   }
 
@@ -168,6 +180,24 @@ export class LifecycleScheduler {
 
   async requestDistill(sessionId: string): Promise<void> {
     await this.putIntent(`stop:${sessionId}`, this.now().toISOString())
+  }
+
+  requestConsolidation(scope: MemoryScope): Promise<LifecycleIntentRunResult> {
+    const kind = scope.kind === 'global' ? 'global-consolidate' : `consolidate:${encodeURIComponent(scope.workspaceId)}`
+    const existing = this.consolidationRequests.get(kind)
+    if (existing !== undefined) return existing.promise
+    if (!this.store.writable) return Promise.reject(new MemoryStoreReadonlyError())
+    if (!this.started || this.disposed) return Promise.reject(new Error(lifecycleErrorMessage(kind)))
+
+    const activeId = this.activeConsolidations.get(kind)
+    const intentId = activeId ?? this.store.getMeta().pending[kind]?.id ?? randomUUID()
+    let resolve!: (result: LifecycleIntentRunResult) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<LifecycleIntentRunResult>((res, rej) => { resolve = res; reject = rej })
+    const request: ConsolidationRequest = { intentId, settled: false, promise, resolve, reject }
+    this.consolidationRequests.set(kind, request)
+    if (activeId === undefined) void this.prepareConsolidation(kind, scope, request)
+    return promise
   }
 
   async markDirty(workspaceId: string): Promise<void> {
@@ -202,6 +232,40 @@ export class LifecycleScheduler {
       await this.options.activity?.flush?.()
     } catch {
       // Activity history is diagnostic and never blocks disposal.
+    }
+  }
+
+  private async prepareConsolidation(kind: string, scope: MemoryScope, request: ConsolidationRequest): Promise<void> {
+    const createdAt = this.now().toISOString()
+    let created = false
+    try {
+      await this.store.updateMeta(meta => {
+        // A flush may have claimed the automatic intent while this write was queued.
+        if (request.settled || this.activeConsolidations.has(kind) || !this.started || this.disposed) return
+        const previous = meta.pending[kind]
+        const intent: LifecycleIntent = { id: previous?.id ?? request.intentId, kind, createdAt }
+        request.intentId = intent.id
+        created = previous === undefined
+        meta.pending[kind] = intent
+        if (scope.kind === 'global') {
+          meta.globalDirty = true
+          meta.nextGlobalConsolidationAt = createdAt
+        } else {
+          const consolidation = meta.workspaceConsolidation[scope.workspaceId] ??= {
+            dirty: false,
+            nextConsolidationAt: null,
+            lastConsolidationAt: null,
+          }
+          consolidation.dirty = true
+          consolidation.nextConsolidationAt = createdAt
+        }
+      })
+      if (request.settled || this.consolidationRequests.get(kind) !== request) return
+      if (created) this.logActivity({ id: request.intentId, kind, createdAt }, 'intent-created')
+      // Manual work is already due; enqueue it directly instead of depending on a zero-delay timer turn.
+      this.enqueue()
+    } catch {
+      this.rejectConsolidation(kind, request.intentId)
     }
   }
 
@@ -273,8 +337,15 @@ export class LifecycleScheduler {
         await this.store.updateMeta(current => { current.pending[key] = value })
         this.logActivity(value, 'intent-created')
       }
+      const consolidation = workspaceId !== undefined || value.kind === 'global-consolidate'
+      if (consolidation) {
+        this.activeConsolidations.set(key, value.id)
+        const request = this.consolidationRequests.get(key)
+        if (request !== undefined && !request.settled) request.intentId = value.id
+      }
       const startedAt = this.now().getTime()
       this.logActivity(value, 'run-started')
+      let failed = false
       try {
         const result: LifecycleRunResult = await this.options.run(value.kind) ?? {
           written: 0,
@@ -318,7 +389,9 @@ export class LifecycleScheduler {
           ...(cursor === undefined ? {} : { cursor }),
           ...(result.skipReason === undefined ? {} : { skipReason: result.skipReason }),
         })
+        this.resolveConsolidation(key, value.id, { ...result, intentId: value.id })
       } catch (error) {
+        failed = true
         this.logActivity(value, 'run-failed', {
           durationMs: Math.max(0, this.now().getTime() - startedAt),
           error: activityErrorCategory(error),
@@ -364,9 +437,38 @@ export class LifecycleScheduler {
             retryAt: new Date(this.dueAt(retryKind, retryCreatedAt)).toISOString(),
           })
         }
+      } finally {
+        if (this.activeConsolidations.get(key) === value.id) this.activeConsolidations.delete(key)
+        // This runs after retry persistence, or when that persistence itself fails.
+        if (failed) this.rejectConsolidation(key, value.id)
       }
     }
     this.schedule()
+  }
+
+  private resolveConsolidation(kind: string, intentId: string, result: LifecycleIntentRunResult): void {
+    const request = this.consolidationRequests.get(kind)
+    if (request === undefined || request.settled || request.intentId !== intentId) return
+    request.settled = true
+    this.consolidationRequests.delete(kind)
+    request.resolve(result)
+  }
+
+  private rejectConsolidation(kind: string, intentId: string): void {
+    const request = this.consolidationRequests.get(kind)
+    if (request === undefined || request.settled || request.intentId !== intentId) return
+    request.settled = true
+    this.consolidationRequests.delete(kind)
+    request.reject(new Error(lifecycleErrorMessage(kind)))
+  }
+
+  private rejectAllConsolidationRequests(): void {
+    for (const [kind, request] of this.consolidationRequests) {
+      if (request.settled) continue
+      request.settled = true
+      this.consolidationRequests.delete(kind)
+      request.reject(new Error(lifecycleErrorMessage(kind)))
+    }
   }
 
   private logActivity(

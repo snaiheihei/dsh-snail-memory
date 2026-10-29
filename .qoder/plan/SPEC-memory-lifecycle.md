@@ -1,5 +1,7 @@
 # Spec: memory-lifecycle
 
+> 2026-10-29 手动整合修订：Global 与选中的 workspace 可通过 Scheduler 立即执行各自 scope 的 consolidation；复用持久 intent、串行队列、防重、真实结果、失败重试和活动日志，不新增直接整合通路。
+>
 > 2026-10-29 活动日志修订：新增独立、非权威的 `logs/lifecycle.v1.jsonl`，按持久 intent ID 追踪任务建立、执行、批次、成功、跳过、失败和重试；日志采用字段白名单、大小轮转与 best-effort 写入，不改变记忆状态或 Session。
 >
 > 2026-10-29 rank 反馈修订：`snail_memory_feedback` 与读取工具结果均从后续蒸馏转录中排除；rank-only 更新不触发 dirty、整合、保留期、revision、游标或新快照变化。
@@ -12,7 +14,7 @@
 
 ## Objective
 
-实现显式记忆操作和自动记忆生命周期：每 15 个有效用户轮轻量 Review、60 分钟空闲或结束蒸馏、workspace dirty 默认 20 小时后 scope 内整合、独立 Global dirty 默认 7 天后整合、每 24 小时 workspace 遗忘清理。
+实现显式记忆操作和自动记忆生命周期：每 15 个有效用户轮轻量 Review、60 分钟空闲或结束蒸馏、workspace dirty 默认 20 小时后 scope 内整合、独立 Global dirty 默认 7 天后整合、每 24 小时 workspace 遗忘清理；用户也可对独立 Global 或选中的单个 workspace 立即手动整合。
 
 ## Tech Stack
 
@@ -48,6 +50,7 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - `idleDelayMinutes = 60`；新活动刷新同 Session idle intent 的创建时间并重排唯一 timer，形成 debounce；dispose 不再启动新 maintenance，但会 drain 已进入队列的工作。
 - `consolidationCooldownHours = 20`；workspace dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
 - `globalConsolidationCooldownDays = 7`；独立 Global dirty、intent、成功、失败与重试不清理或重排 workspace 状态。
+- 手动 Consolidate 不受上述冷却等待限制，但仍通过同一 Scheduler。clean scope 也可执行：显式请求把对应 intent 提前并临时设置工作 gate，不表示刚写入了记忆。相同 scope 的重复调用共享同一 Promise/intent；运行中的自动任务可被手动调用加入，不重复执行。成功等待目标 intent 的权威 meta 收尾，失败等待重试持久化，不 `drain()` 整个队列。
 - Settings 页可调整上述四项、`snapshotTokenBudget` 和五类 `retentionDays`；`settings.v1.json` 原子持久化并优先于启动默认值，旧文件缺少新增字段时补用对应默认值。保存后保留当前进程内轮计数，分别重排已有 idle intent、workspace 与 Global dirty/consolidation 计划，只读 Host 拒绝更新。
 - Workspaces 页从完整 WorkspaceRegistry 选择任意已注册 workspace 并读取其索引，不以当前 Session 或已有记忆引用为限。
 - `retentionSweepHours = 24`。
@@ -90,6 +93,7 @@ pending?.count += 1
 - 整合成功以及 Scheduler 的 consolidation 成功/失败收尾会核对调用前的 next consolidation 时间；运行期间新 Promote/Delete 或设置热更新建立的 dirty 与重排计划不得被旧任务清除或覆盖。
 - 上述防护尚未形成完整条件写事务：`store.read()` 与 `store.upsert()` 之间仍存在小的删除/纠正交错窗口，`supersedes` 的 `read()` → `remove()` 也没有核对旧条目 revision，可能删除模型等待期间新纠正的版本。expected-revision 原子条件写/条件删除记入后续 Plan，不能宣称该竞态已完全关闭。
 - Scheduler 的 pending key 仍是 kind，但每个值有独立持久 ID。成功清理、失败重试、deferred 快照提交和设置热重排均按 ID 保护新代记录；旧任务运行期间到达的同 key 新 intent 必须保留。旧持久记录缺少 ID 时，读取阶段按 key 和 createdAt 补稳定兼容 ID。
+- 手动整合 waiter 绑定目标 kind 与运行 intent ID，不按按钮或 Client 身份防重。运行中的自动任务先于请求被标记 active，手动准备写入发现 active 后不得重排它；请求准备失败、Scheduler 停止或运行/收尾失败都必须 settle waiter，避免 RPC 永久等待。停止或只读切换可拒绝进程内等待者，已持久 intent 仍按既有重启恢复语义处理。
 
 ## Testing Strategy
 
@@ -107,6 +111,7 @@ pending?.count += 1
 - 删除单条和全部记忆后所有 Session 游标保持不变，后续入口不重新蒸馏已处理范围，也不恢复已删条目。
 - 验证整合不跨 scope 自动晋升，不修改 Session。
 - Global 默认 7 天冷却、独立 dirty/intent/成功/失败/重试和热更新，以及与 workspace 20 小时计划的隔离。
+- clean workspace 手动立即执行、重复手动请求共享同一 Promise/intent、加入正在运行的自动 Global 整合且不重复执行；成功返回目标 intent 的真实结果，失败在重试持久化后返回稳定错误。
 - 慢模型期间删除或纠正后旧候选不写回；旧整合及 Scheduler 任务不清除运行期间新 Promote/Delete 建立的 Global dirty 和重排计划。
 - 模型伪造 sourceRefs 不落盘，sourceRefs/supersedes 元数据中的秘密导致完整候选拒绝；合并结果只汇集实际模型输入内目标与被取代条目的真实来源，快照外及被 64,000 字符预算截断的 id/supersedes 不写回、不删除条目、不贡献来源。
 - 旧 Review 成功时保留同 key 新 Review，旧 Review 失败时不覆盖新 Idle；重试、deferred 提交、热重排和旧 pending 无 ID 数据均保持代际与兼容语义。
@@ -124,7 +129,7 @@ pending?.count += 1
 
 - 所有触发频率和边界符合默认值。
 - 自动蒸馏只写入当前已验证 workspace；Ungrouped 不自动写全局。
-- 整合在 scope 内去重、合并、修正冲突、删除过期结论并更新摘要/索引。
+- 整合在 scope 内去重、合并、修正冲突、删除过期结论并更新摘要/索引；手动入口可立即整理 clean 或 dirty 的指定 scope，Host 防重且不以排队冒充成功。
 - 显式 remember/correct/forget 无需等待 Review，立即持久化并广播变化。
 - 崩溃重启后已持久任务和游标不丢，游标从下一未处理位置继续；记忆已写而游标未提交时允许同批重放，相同候选依靠稳定 ID、内容比较和 sourceRefs 合并去重，但重试输出变化时仍可能出现语义重复，不承诺绝不重复调用模型或生成近义条目。
 - Review/Idle/Stop 最终可覆盖持续变长 Session 的中段和尾部，同时保持每次维护调用的批次与字符预算有界。

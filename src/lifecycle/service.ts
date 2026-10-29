@@ -1,7 +1,7 @@
 import { CompletedTurnCounter, type LifecycleSessionEvent } from './counters.js'
 import { consolidateMemories } from './consolidate.js'
 import { distillSession } from './distill.js'
-import type { LifecycleActivitySink, LifecycleBatchResult, LifecycleRunResult } from './activity.js'
+import type { LifecycleActivitySink, LifecycleBatchResult, LifecycleIntentRunResult, LifecycleRunResult } from './activity.js'
 import type { AuxiliaryModel } from './llm.js'
 import { LifecycleScheduler, lifecycleErrorMessage } from './scheduler.js'
 import { DEFAULT_MEMORY_SETTINGS } from './settings.js'
@@ -268,6 +268,10 @@ export class MemoryLifecycleService {
 
   consolidate(): Promise<number> {
     return this.consolidateWithResult()
+  }
+
+  consolidateNow(scope: MemoryScope): Promise<LifecycleIntentRunResult> {
+    return this.scheduler.requestConsolidation(scope)
   }
 
   retentionSweep(): Promise<MemoryId[]> {

@@ -1,5 +1,7 @@
 # Spec: memory-web
 
+> 2026-10-29 手动整合修订：Global 与 Workspaces tab 各提供当前 scope 的 Consolidate 入口；需确认，执行中显示 busy，完成后展示真实 written 并刷新索引，旧 tab/旧 workspace 的响应不得覆盖新选择。
+>
 > 2026-10-29 rank 反馈修订：Memory 页列表和详情展示 rank；列表在 Client 复制索引后按 rank、内容 updatedAt、id 排序，不修改 Host 数组，也不改变 Store 或模型快照的注入顺序。
 >
 > 2026-10-28 独立 Global 修订：Global tab 只显示人工 Promote 的独立条目并允许删除；workspace 详情弹窗增加 Promote，Settings 增加默认 7 天的 Global consolidation delay。全局不再显示 workspace 聚合条目和引用。
@@ -49,6 +51,7 @@ scripts/build-client.mjs      → 单文件 window.__ModuleLoader__ handoff
 - 条目列表与详情展示整数 rank。列表先复制 Host 返回的索引，再按 rank 降序、内容 `updatedAt` 降序、id 升序稳定排序；不得原地修改 RPC 数组。该排序只影响人类管理界面，不改变 `store.list()`、快照渲染或注入顺序。
 - 条目可查看摘要、分类、更新时间和详情；workspace 详情提供 Promote，Global 与 workspace 均允许删除且需确认。删除成功文案明确“未删除对话历史，已注入快照仍保留”；Promote 成功/已存在反馈不暗示后续自动同步。
 - 全局 tab 只展示独立 Global 条目，不显示来源 workspace 聚合列表；Settings 提供默认 7 天的 Global consolidation delay，与 workspace 20 小时设置分开保存。
+- Global 与 Workspaces tab 分别提供“整合全局记忆”和“整合当前 Workspace 记忆”按钮，只针对当前 scope，不提供“全部整合”。点击后先说明记忆可能合并、纠正或取代但不修改对话历史；确认后按钮显示 busy，成功展示 Host 实际 written 数并刷新当前跟踪索引，失败展示稳定错误。切换 tab、Session 或 workspace 会使旧请求反馈失效，但不能取消 Host 已接受的维护任务。
 - 无当前 Session owner workspace 时，Workspaces tab 仍可从完整注册表选择任意已注册项目并读取索引；只有没有可用注册项目或注册表加载失败时显示相应空态/错误。Ungrouped 不因此获得隐式写入 owner，Global tab 始终可独立使用。
 - token 一律标为“估算”，不得显示为 provider 精确 usage。
 
@@ -73,6 +76,7 @@ React 和 dsh 包全部 external；不打包第二份 React。所有异步更新
 - refresh 只在 enabled 后可用，同 revision 结果显示“已是最新”。
 - reload 时 RPC 状态覆盖空白本地状态并恢复召回选择；旧 session 响应不得覆盖新 session。
 - Global/Workspaces/Settings 三 tab、条目数、token 文案、无 owner 时的注册项目选择、详情、Promote、删除确认和设置保存。
+- 两类 Consolidate 按钮在确认前不调用 RPC；Global 与选中的 workspace 不串 scope，busy 后展示真实 written 并刷新索引；失败和切换 tab/workspace 后的旧响应均有回归。
 - Host 返回顺序与 UI 顺序不同时，验证 rank 降序、同 rank 的 updatedAt 降序和 id 稳定顺序；Host 原数组保持不变，列表与详情均显示 rank。
 - sidebar/main key 一致，Composer 和页面卸载后清理 listener/timer。
 - handoff 产物检查 external React、插件 id 和无裸 import。
@@ -87,7 +91,7 @@ React 和 dsh 包全部 external；不打包第二份 React。所有异步更新
 
 - 安装插件后 Composer 和左侧 Memory icon 均出现，无需手改宿主。
 - 所有指定操作可用且 reload/restart 后开关与召回项目一致；非当前项目和 Ungrouped 选择均可启用。
-- Memory 页 Global/Workspaces/Settings 三 tab、统计、详情、Promote、删除和设置保存完整可用。
+- Memory 页 Global/Workspaces/Settings 三 tab、统计、详情、Promote、删除和设置保存完整可用；两个记忆 tab 均可确认并手动整合当前 scope，反馈真实结果且不显示旧选择的 stale 响应。
 - 列表和详情显示 rank，UI 排序符合 rank/updatedAt/id 契约且不修改 Host 数据；Store 与快照顺序不受影响。
 - 390px 移动宽度无页面级横向溢出，按钮具有可访问名称。
 - Client 测试、typecheck 和 handoff build 通过。

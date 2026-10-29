@@ -1,8 +1,9 @@
 import type {
-  CorrectRequest, EnableRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, ScopeRequest, SessionRequest,
+  ConsolidateMemoryResult, CorrectRequest, EnableRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, ScopeRequest, SessionRequest,
   SessionStateView, WorkspaceView, WriteRequest, RpcPayload, RpcValue, RpcMethod,
 } from '../contract.js'
 import type { MemoryContextService, InjectionAgent, MemoryOperationResult } from '../context/service.js'
+import type { LifecycleIntentRunResult } from '../lifecycle/activity.js'
 import { pendingInjection, type MemoryStore } from '../store/store.js'
 import { workspaceId, type MemoryEntry, type MemoryId, type MemoryIndex, type MemoryScope, type PromoteMemoryResult, type UpsertMemoryInput, type WorkspaceId } from '../store/types.js'
 import { prepareMemoryCandidate } from '../safety/index.js'
@@ -22,12 +23,16 @@ export interface MemorySettingsLifecycle {
   getSettings(): MemorySettings
   updateSettings(settings: MemorySettings): Promise<MemorySettings>
 }
+export interface MemoryConsolidationLifecycle {
+  consolidateNow(scope: MemoryScope): Promise<LifecycleIntentRunResult>
+}
 
 export interface MemoryControllerOptions {
   readonly resolveSession: (sessionId: string) => ResolvedSession | undefined
   readonly isWorkspace?: (workspaceId: string) => boolean
   readonly lifecycle?: MemoryWriteLifecycle
   readonly settings?: MemorySettingsLifecycle
+  readonly consolidation?: MemoryConsolidationLifecycle
   readonly listWorkspaces?: () => readonly WorkspaceView[]
   readonly now?: () => Date
 }
@@ -52,6 +57,7 @@ export class MemoryController {
   call(method: 'enable', payload: EnableRequest): Promise<MemoryOperationResult>
   call(method: 'refresh', payload: LayerRequest): Promise<MemoryOperationResult>
   call(method: 'list', payload: ScopeRequest): Promise<MemoryIndex>
+  call(method: 'consolidate', payload: ScopeRequest): Promise<ConsolidateMemoryResult>
   call(method: 'read', payload: ReadRequest): Promise<MemoryEntry>
   call(method: 'remove', payload: ReadRequest): Promise<{ removed: boolean }>
   call(method: 'promote', payload: ReadRequest): Promise<PromoteMemoryResult>
@@ -70,6 +76,7 @@ export class MemoryController {
         case 'disable': return await this.disable((payload as SessionRequest).sessionId)
         case 'refresh': return await this.enable(payload as LayerRequest, true)
         case 'list': return this.list((payload as ScopeRequest).scope)
+        case 'consolidate': return await this.consolidate((payload as ScopeRequest).scope)
         case 'read': return await this.readMemory(payload as ReadRequest)
         case 'remove': return { removed: await this.forget(payload as ReadRequest) }
         case 'promote': return await this.promote(payload as ReadRequest)
@@ -132,6 +139,15 @@ export class MemoryController {
   private list(scope: MemoryScope): MemoryIndex {
     this.assertWorkspace(scope, true)
     return this.store.list(scope)
+  }
+
+  private async consolidate(scope: MemoryScope): Promise<ConsolidateMemoryResult> {
+    this.assertWorkspace(scope, true)
+    if (!this.options.consolidation) {
+      throw new MemoryApiError('invalid-operation', 'Manual memory consolidation is unavailable.', 409)
+    }
+    const result = await this.options.consolidation.consolidateNow(scope)
+    return { intentId: result.intentId, written: result.written }
   }
 
   private async readMemory(request: ReadRequest): Promise<MemoryEntry> {

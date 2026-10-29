@@ -105,6 +105,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     isWorkspace: id => ctx.workspaceRegistry.list().some(workspace => workspace.id === id),
     lifecycle,
     settings: lifecycle,
+    consolidation: lifecycle,
     listWorkspaces: () => ctx.workspaceRegistry.list().map(workspace => ({ id: workspaceId(workspace.id), title: workspace.title })),
   })
   const disposeApi = registerMemoryApi(ctx, controller)

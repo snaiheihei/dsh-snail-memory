@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryPage } from '../../client/src/MemoryPage.js'
 import { MemoryClientStore } from '../../client/src/store.js'
 import type { WorkspaceId } from '../../src/store/types.js'
-import { ENTRY, FakeRpc, GLOBAL_SCOPE, memoryIndex, sessionState, t, WORKSPACE_SCOPE } from './fixtures.js'
+import { deferred, ENTRY, FakeRpc, GLOBAL_SCOPE, memoryIndex, sessionState, t, WORKSPACE_SCOPE } from './fixtures.js'
 
 afterEach(cleanup)
 
@@ -23,6 +23,7 @@ function readyRpc() {
     .on('read', () => ENTRY)
     .on('remove', () => ({ removed: true }))
     .on('promote', () => ({ id: ENTRY.id, created: true }))
+    .on('consolidate', () => ({ intentId: 'intent-1', written: 2 }))
     .on('listWorkspaces', () => [
       { id: 'workspace-1' as WorkspaceId, title: 'First project' },
       { id: 'workspace-2' as WorkspaceId, title: 'Second project' },
@@ -67,6 +68,58 @@ describe('MemoryPage', () => {
     fireEvent.change(select, { target: { value: 'workspace-2' } })
     await waitFor(() => expect(rpc.calls.some(call => call.method === 'list'
       && JSON.stringify(call.payload).includes('workspace-2'))).toBe(true))
+  })
+
+  it('requires confirmation and reports the real result of global consolidation', async () => {
+    const rpc = readyRpc()
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Consolidate global memory' }))
+    expect(screen.getByText(/Consolidate global memory now\?/)).toBeTruthy()
+    expect(rpc.count('consolidate')).toBe(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm consolidation' }))
+
+    expect(await screen.findByText('Consolidation completed: 2 memories written.')).toBeTruthy()
+    expect(rpc.calls.find(call => call.method === 'consolidate')?.payload).toEqual({ scope: GLOBAL_SCOPE })
+  })
+
+  it('consolidates only the selected workspace after confirmation', async () => {
+    const rpc = readyRpc()
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
+    const select = await screen.findByRole('combobox', { name: 'Workspace' })
+    fireEvent.change(select, { target: { value: 'workspace-2' } })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Consolidate workspace memory' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm consolidation' }))
+
+    expect(await screen.findByText('Consolidation completed: 2 memories written.')).toBeTruthy()
+    expect(rpc.calls.find(call => call.method === 'consolidate')?.payload).toEqual({
+      scope: { kind: 'workspace', workspaceId: 'workspace-2' },
+    })
+  })
+
+  it('does not publish a stale consolidation result after switching tabs', async () => {
+    const consolidation = deferred<{ intentId: string; written: number }>()
+    const rpc = readyRpc().on('consolidate', () => consolidation.promise)
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Consolidate global memory' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm consolidation' }))
+    await waitFor(() => expect(rpc.count('consolidate')).toBe(1))
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
+    await screen.findByRole('combobox', { name: 'Workspace' })
+
+    await act(async () => {
+      consolidation.resolve({ intentId: 'intent-1', written: 2 })
+      await consolidation.promise
+    })
+
+    expect(screen.queryByText(/Consolidation completed:/)).toBeNull()
   })
 
   it('sorts a copied index by rank, updated time and id, and shows rank in list and details', async () => {

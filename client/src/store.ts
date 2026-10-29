@@ -1,4 +1,4 @@
-import type { MemorySettings, SessionStateView, WorkspaceView } from '../../src/contract.js'
+import type { ConsolidateMemoryResult, MemorySettings, SessionStateView, WorkspaceView } from '../../src/contract.js'
 import type { MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope, PromoteMemoryResult, WorkspaceId } from '../../src/store/types.js'
 import type { MemoryOperationResult, MemoryRpc } from './rpc.js'
 
@@ -191,6 +191,12 @@ export class MemoryClientStore {
 
   async promote(scope: MemoryScope, id: MemoryId): Promise<PromoteMemoryResult> {
     const result = await this.rpc.call('promote', { scope, id })
+    await this.notifyChanged()
+    return result
+  }
+
+  async consolidate(scope: MemoryScope): Promise<ConsolidateMemoryResult> {
+    const result = await this.rpc.call('consolidate', { scope })
     await this.notifyChanged()
     return result
   }

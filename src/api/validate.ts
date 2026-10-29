@@ -99,7 +99,8 @@ export function validatePayload(method: RpcMethod, payload: unknown): RpcPayload
         ...(input.workspaceId === undefined ? {} : { workspaceId: workspaceId(string(input.workspaceId, 'workspaceId')!) }),
       }
     }
-    case 'list': return { scope: scope(input.scope) }
+    case 'list':
+    case 'consolidate': return { scope: scope(input.scope) }
     case 'read':
     case 'remove':
     case 'promote': return { scope: scope(input.scope), id: memoryId(string(input.id, 'id')!) }

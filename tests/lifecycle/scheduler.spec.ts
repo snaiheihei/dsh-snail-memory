@@ -6,6 +6,7 @@ import type { LifecycleActivityRecord } from '../../src/lifecycle/activity.js'
 import { LifecycleScheduler, WriterLifecycleRuntime } from '../../src/lifecycle/scheduler.js'
 import { WriterLock } from '../../src/store/lock.js'
 import { emptyState, MemoryStore } from '../../src/store/store.js'
+import { workspaceId } from '../../src/store/types.js'
 
 const roots: string[] = []
 const stores: MemoryStore[] = []
@@ -679,6 +680,111 @@ describe('LifecycleScheduler', () => {
 
     expect(store.getMeta().pending['review:session-1']).toBeUndefined()
     expect(store.getMeta().lastError).toBeNull()
+    await scheduler.dispose()
+  })
+
+  it('runs manual workspace consolidation immediately even when the scope is clean', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      run: async kind => {
+        runs.push(kind)
+        return { written: 2, batches: 0, processed: true }
+      },
+    })
+    await scheduler.start()
+
+    const request = scheduler.requestConsolidation({ kind: 'workspace', workspaceId: workspaceId('test_only') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    await expect(request).resolves.toMatchObject({
+      intentId: expect.any(String), written: 2, batches: 0, processed: true,
+    })
+    expect(runs).toEqual(['consolidate:test_only'])
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({
+      dirty: false,
+      nextConsolidationAt: null,
+      lastConsolidationAt: '2026-10-26T00:00:00.000Z',
+    })
+    expect(store.getMeta().pending['consolidate:test_only']).toBeUndefined()
+    await scheduler.dispose()
+  })
+
+  it('shares one persistent intent and one run between duplicate manual requests', async () => {
+    const store = await openStore()
+    let releaseRun!: () => void
+    let markRunStarted!: () => void
+    const runStarted = new Promise<void>(resolve => { markRunStarted = resolve })
+    const runGate = new Promise<void>(resolve => { releaseRun = resolve })
+    const run = vi.fn(async () => {
+      markRunStarted()
+      await runGate
+      return { written: 1, batches: 0, processed: true }
+    })
+    const scheduler = new LifecycleScheduler(store, { run })
+    await scheduler.start()
+
+    const first = scheduler.requestConsolidation({ kind: 'global' })
+    const second = scheduler.requestConsolidation({ kind: 'global' })
+    expect(second).toBe(first)
+    const advancing = vi.advanceTimersByTimeAsync(0)
+    await runStarted
+    releaseRun()
+    await advancing
+
+    await expect(first).resolves.toMatchObject({ written: 1 })
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(store.getMeta().globalDirty).toBe(false)
+    expect(store.getMeta().pending['global-consolidate']).toBeUndefined()
+    await scheduler.dispose()
+  })
+
+  it('joins an active automatic consolidation without scheduling a duplicate run', async () => {
+    const store = await openStore()
+    let releaseRun!: () => void
+    let markRunStarted!: () => void
+    const runStarted = new Promise<void>(resolve => { markRunStarted = resolve })
+    const runGate = new Promise<void>(resolve => { releaseRun = resolve })
+    const run = vi.fn(async () => {
+      markRunStarted()
+      await runGate
+      return { written: 1, batches: 0, processed: true }
+    })
+    await store.updateMeta(meta => {
+      meta.globalDirty = true
+      meta.nextGlobalConsolidationAt = '2026-10-26T00:00:00.000Z'
+    })
+    const scheduler = new LifecycleScheduler(store, { run })
+    await scheduler.start()
+    const advancing = vi.advanceTimersByTimeAsync(0)
+    await runStarted
+
+    const request = scheduler.requestConsolidation({ kind: 'global' })
+    expect(store.getMeta().nextGlobalConsolidationAt).toBe('2026-10-26T00:00:00.000Z')
+    releaseRun()
+    await advancing
+
+    await expect(request).resolves.toMatchObject({ written: 1 })
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(store.getMeta().globalDirty).toBe(false)
+    await scheduler.dispose()
+  })
+
+  it('rejects the manual request with a stable error after scheduling a retry', async () => {
+    const store = await openStore()
+    const scheduler = new LifecycleScheduler(store, {
+      run: async () => { throw new Error('private provider diagnostic') },
+    })
+    await scheduler.start()
+
+    const request = scheduler.requestConsolidation({ kind: 'global' })
+    const assertion = expect(request).rejects.toMatchObject({ message: 'Global memory consolidation failed' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    await assertion
+    expect(store.getMeta().globalDirty).toBe(true)
+    expect(store.getMeta().pending['global-consolidate']).toBeDefined()
+    expect(store.getMeta().lastError).toBe('Global memory consolidation failed')
     await scheduler.dispose()
   })
 })

@@ -110,6 +110,16 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 - 差异复核发现 idle debounce 每次刷新曾更换 intent ID，导致唯一一条 intent-created 无法与实际运行记录串联；新增同一 ID 断言先复现失败，再让同代 idle 刷新保留原 ID，最终 created/started/succeeded 可完整关联。
 - 聚焦自动化已实际通过 5 个测试文件、65 项测试；最终全量自动化为 32 个测试文件、254 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过；变更范围高置信私钥、云密钥、令牌与 Bearer 模式扫描无命中。本轮未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit。
 
+### 手动 scope 整合增量（2026-10-29）
+
+- Global 与 Workspaces tab 分别提供当前独立 Global、当前下拉选择 workspace 的手动整合入口；点击后先确认可能合并、纠正和取代记忆但不会修改对话历史，执行中显示 busy，成功展示真实 `written`，失败展示稳定错误。
+- 手动请求复用 Scheduler 的 `consolidate:<workspaceId>` / `global-consolidate` 持久 intent、单 timer、串行队列、重试和活动日志；clean scope 也可显式执行。RPC 不直接调用 `consolidateMemories()`，Host 按 scope 共享等待 Promise，重复手动请求防重，并可加入正在运行的自动整合而不重复执行或重排其计划。
+- 调用方等待目标 intent 的真实结果而非 `drain()` 整个队列；成功在权威调度状态收尾后返回，失败在重试状态持久化后拒绝，Scheduler 停止会拒绝未完成的进程内等待者，避免 RPC 永久等待。
+- 新增白名单 `consolidate` RPC、ScopeRequest 校验和已注册 workspace 校验；Client 成功后刷新跟踪索引。UI 以请求代际防止旧 tab、Session 或 workspace 的响应覆盖新选择，切换视图不取消 Host 已接受的维护任务。
+- 手动整合不跨 scope、不自动 Promote，不读取或修改 Session、对话历史及蒸馏游标，不绕过秘密扫描、来源汇集和 revision 检查，也不自动追加新快照；仍由既有 enable/refresh 规则控制后续注入。
+- 已同步 lifecycle/API/Web Spec、能力地图和记忆演化文档。聚焦自动化实际通过 4 个测试文件、65 项测试；最终全量自动化为 32 个测试文件、263 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过。首次全量运行有一个既有 Store Promote 隔离用例在并行 I/O 负载下达到 5 秒超时，隔离运行 540ms 通过，未改代码后完整复验全部通过。
+- 最终差异复核未发现直接整合旁路或跨 scope 写入；高置信秘密模式扫描只命中既有合成安全测试样本，没有新增真实凭据。本轮未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit。
+
 ## 后续修改 Plan（2026-10-28）
 
 当前运行定案为单一 dsh Client、单 Host。以下事项明确后置，不属于本轮来源汇集、模型输出边界、安全扫描和 Scheduler intent 代际修复：

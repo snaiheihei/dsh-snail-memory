@@ -14,7 +14,7 @@ import type { MemoryOperationResult } from './context/service.js'
 
 export const RPC_ROUTE_PREFIX = '/snail-memory/rpc'
 export const RPC_METHODS = [
-  'getSessionState', 'enable', 'disable', 'refresh', 'list', 'read', 'remove', 'promote', 'remember', 'correct', 'status',
+  'getSessionState', 'enable', 'disable', 'refresh', 'list', 'consolidate', 'read', 'remove', 'promote', 'remember', 'correct', 'status',
   'getSettings', 'updateSettings', 'listWorkspaces',
 ] as const
 
@@ -33,6 +33,10 @@ export interface WriteRequest extends ScopeRequest {
   readonly sessionId?: string
 }
 export interface CorrectRequest extends WriteRequest { readonly id: MemoryId }
+export interface ConsolidateMemoryResult {
+  readonly intentId: string
+  readonly written: number
+}
 
 export interface SessionLayerView {
   readonly enabled: boolean
@@ -65,4 +69,4 @@ export interface WorkspaceView {
 }
 
 export type RpcPayload = SessionRequest | LayerRequest | EnableRequest | ScopeRequest | ReadRequest | WriteRequest | CorrectRequest | MemorySettings | Record<string, never>
-export type RpcValue = SessionStateView | MemoryOperationResult | MemoryIndex | MemoryEntry | { removed: boolean } | PromoteMemoryResult | MemoryStatus | MemorySettings | WorkspaceView[]
+export type RpcValue = SessionStateView | MemoryOperationResult | MemoryIndex | MemoryEntry | { removed: boolean } | PromoteMemoryResult | ConsolidateMemoryResult | MemoryStatus | MemorySettings | WorkspaceView[]
