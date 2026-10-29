@@ -12,7 +12,7 @@ import z from '@deepseek-ai/schemastery'
 import { MemoryController } from './api/controller.js'
 import { registerMemoryApi } from './api/index.js'
 import { MemoryContextService } from './context/service.js'
-import { registerMemoryReadTool } from './context/tool.js'
+import { registerMemoryFeedbackTool, registerMemoryReadTool } from './context/tool.js'
 import { MemoryLifecycleService } from './lifecycle/service.js'
 import { WriterLifecycleRuntime } from './lifecycle/scheduler.js'
 import { DEFAULT_MEMORY_SETTINGS, MemorySettingsStore } from './lifecycle/settings.js'
@@ -102,7 +102,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     listWorkspaces: () => ctx.workspaceRegistry.list().map(workspace => ({ id: workspaceId(workspace.id), title: workspace.title })),
   })
   const disposeApi = registerMemoryApi(ctx, controller)
-  const disposeTool = registerMemoryReadTool(ctx, memories)
+  const disposeReadTool = registerMemoryReadTool(ctx, memories)
+  const disposeFeedbackTool = registerMemoryFeedbackTool(ctx, memories)
 
   const prepareAgent = async (agent: Agent) => {
     const sessionId = agent.session.id
@@ -162,7 +163,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => async () => {
     disposeWritable()
     disposeApi()
-    disposeTool()
+    disposeReadTool()
+    disposeFeedbackTool()
     await writerRuntime.dispose()
     await lifecycle.dispose()
     await store.close()

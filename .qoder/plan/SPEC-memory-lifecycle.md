@@ -1,5 +1,7 @@
 # Spec: memory-lifecycle
 
+> 2026-10-29 rank 反馈修订：`snail_memory_feedback` 与读取工具结果均从后续蒸馏转录中排除；rank-only 更新不触发 dirty、整合、保留期、revision、游标或新快照变化。
+>
 > 2026-10-28 数据与调度修订：整合来源由程序按输入快照汇集，模型 `id/supersedes` 仅可引用本次输入条目，完整候选回扫；生命周期 pending intent 增加持久 ID，旧任务不得清理或改写新代 intent。
 >
 > 2026-10-28 独立 Global 修订：Review/Idle/Stop 和 retention 仍只处理 workspace；Global 由人工 Promote 建立，使用独立 `globalDirty`、默认 7 天 consolidation 和独立持久 intent，不继承 workspace 的 20 小时计时。
@@ -52,8 +54,9 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - Review/Idle/Stop 共享 `SessionMemoryState.distillationCursor`。游标以最后处理的稳定 `eventSeq` 为主身份，以该事件渲染文本内已消费的 UTF-16 `offset` 处理超大消息；完整 turn 能装入预算时不得拆分，超大 turn 再按事件顺序和片内 offset 分片。
 - 只有模型响应可解析、候选完成安全校验且写入/去重成功，或候选为空/被安全策略完整拒绝后，才通过主 MemoryStore 串行 writer 推进游标。路由缺失、请求失败/取消/超时、不可解析输出、输入拒绝或存储失败均保留原游标。
 - 记忆提交后、游标提交前崩溃允许重试同批；稳定 ID、内容去重、sourceRefs 合并和后续整合承担至少一次语义。不得先推进游标再调用模型或写记忆。
-- Review/蒸馏的转录投影仅保留真实用户消息、助手消息和普通工具结果；通过 `tool/call.callId` 排除 `snail_memory_read` 的 `tool/result`，不按结果正文过滤，也不修改原始 Session。
-- 注入索引默认上限 1,200 估算 token，可在 Settings 调整 `snapshotTokenBudget`；新值仅用于后续 Enable/Refresh 新快照，不改写历史快照。条目按 `updatedAt` 从新到旧逐条加入，下一条会使估算超预算时停止并报告剩余数量；没有独立的 800 token 核心摘要预算或“高置信”排序，固定头部和尾部说明也不计入该条目循环的硬上限。
+- Review/蒸馏的转录投影仅保留真实用户消息、助手消息和普通工具结果；通过 `tool/call.callId` 排除 `snail_memory_read` 与 `snail_memory_feedback` 的 `tool/result`，不按结果正文过滤，也不修改原始 Session。记忆详情和反馈回执因此不会成为下一批蒸馏证据，普通工具结果仍保留。
+- rank-only 反馈不是内容写入：不设置 workspace/Global dirty，不安排或重排 consolidation/retention，不推进条目或 scope revision，不修改 `updatedAt`、`lastVerifiedAt`、蒸馏游标，也不生成 desired/committed 新快照。
+- 注入索引默认上限 1,200 估算 token，可在 Settings 调整 `snapshotTokenBudget`；新值仅用于后续 Enable/Refresh 新快照，不改写历史快照。条目按 `updatedAt` 从新到旧逐条加入，下一条会使估算超预算时停止并报告剩余数量；rank 不参与该顺序，也没有独立的 800 token 核心摘要预算或“高置信”排序，固定头部和尾部说明也不计入该条目循环的硬上限。
 
 ## Code Style
 
@@ -83,7 +86,8 @@ pending?.count += 1
 - 五类保留期默认值、持久化与 RPC 校验；`0` 天关闭类别过期，自定义策略在下一次清理生效，显式过期时间优先。
 - 快照预算默认值、旧配置兼容、RPC/UI 保存，以及预算变更只影响后续新快照。
 - LLM 空输出、非 JSON、部分有效候选、秘密输出、超时和重试。
-- `snail_memory_read` 结果不进入蒸馏输入，普通工具结果继续保留。
+- `snail_memory_read` 与 `snail_memory_feedback` 结果不进入蒸馏输入，普通工具结果继续保留。
+- rank 反馈前后 dirty、pending、consolidation/retention 计划、条目与 scope revision、内容时间、游标及注入状态保持不变；反馈不触发辅助模型调用。
 - 顺序批次、三入口不重复、空候选/安全拒绝仍推进、路由/请求/解析/存储失败不推进、重启恢复和写入后游标未推进的重复窗口。
 - 完整 turn 边界、超大 turn/消息片内恢复、长会话中段和尾部覆盖、Session/workspace 隔离；游标-only 提交不推进 scope revision、不设置 dirty、不生成注入快照。
 - 删除单条和全部记忆后所有 Session 游标保持不变，后续入口不重新蒸馏已处理范围，也不恢复已删条目。
@@ -107,6 +111,7 @@ pending?.count += 1
 - 显式 remember/correct/forget 无需等待 Review，立即持久化并广播变化。
 - 崩溃重启后已持久任务和游标不丢，游标从下一未处理位置继续；记忆已写而游标未提交时允许同批重放，相同候选依靠稳定 ID、内容比较和 sourceRefs 合并去重，但重试输出变化时仍可能出现语义重复，不承诺绝不重复调用模型或生成近义条目。
 - Review/Idle/Stop 最终可覆盖持续变长 Session 的中段和尾部，同时保持每次维护调用的批次与字符预算有界。
+- 记忆读取与反馈结果不进入后续蒸馏，rank-only 更新不触发任何生命周期内容维护或快照。
 
 ## Open Questions
 

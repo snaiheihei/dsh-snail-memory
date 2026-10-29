@@ -23,12 +23,12 @@
 
 | Module id | Responsibility | Depends on |
 |---|---|---|
-| `memory-store` | 独立 Global/workspace 父索引驻留、事务内 Promote 深复制、版本化权威详情懒加载、大详情确定性分片、Markdown 摘要/详情/分片投影、独立 revision、来源引用、Session 蒸馏游标、原子写、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
-| `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、脱敏审计、失败关闭策略 | — |
-| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、workspace/Global 独立 dirty gate 与 scope 内整合、仅 workspace 每日遗忘清理、显式记住/纠正/Promote/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
-| `memory-context` | 每会话关闭/workspace/global 三态单选、唯一 active desired、自动快照、跨 workspace enable/refresh revision、排队与提交对账、时效提醒、摘要索引渲染、受限详情读取、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
+| `memory-store` | 独立 Global/workspace 父索引驻留、条目 rank、事务内 Promote 深复制、实际渲染 ID 与反馈回执、原子反馈写、版本化权威详情懒加载、大详情确定性分片、Markdown 投影、独立 revision、来源引用、Session 蒸馏游标、单写者 fencing、崩溃恢复、v1→v2 迁移、保留与删除原语 | — |
+| `memory-safety` | 私密来源准入、Host 侧密钥扫描与脱敏、模型输出回扫、不可信记忆提示、受限枚举反馈、脱敏审计、失败关闭策略 | — |
+| `memory-lifecycle` | 有效用户轮计数、轻量 Review、空闲/结束蒸馏、共享事件游标与有界顺序分批、至少一次提交、记忆读取/反馈结果过滤、workspace/Global 独立 dirty gate 与 scope 内整合、仅 workspace 每日遗忘清理、显式记住/纠正/Promote/忘记、持久调度与幂等意图 | `memory-store`, `memory-safety` |
+| `memory-context` | 每会话关闭/workspace/global 三态单选、唯一 active desired、自动快照与实际渲染 ID、跨 workspace enable/refresh revision、排队与提交对账、时效与反馈提醒、受限详情读取、committed 资格反馈工具、Session 可重建性与 KV Cache 纪律 | `memory-store`, `memory-safety` |
 | `memory-api` | Host Service Definition、插件自有同源 HTTP RPC、人类命令与 UI 命令、权限和参数校验、结构化错误、读写状态与统计投影 | `memory-store`, `memory-lifecycle`, `memory-context` |
-| `memory-web` | Composer 三态 enable/disable/refresh 控件、Memory sidebar 入口、Global/Workspaces/Settings 三 tab、条目与注入 token 统计、workspace Promote、两类 scope 删除确认、独立 Global 整合设置、状态恢复、locale 与交互反馈 | `memory-api` |
+| `memory-web` | Composer 三态 enable/disable/refresh 控件、Memory sidebar 入口、Global/Workspaces/Settings 三 tab、rank/updatedAt/id 本地排序与展示、条目与注入 token 统计、workspace Promote、两类 scope 删除确认、独立 Global 整合设置、状态恢复、locale 与交互反馈 | `memory-api` |
 
 建设顺序：`memory-store` 与 `memory-safety` 并行 → `memory-lifecycle` 与 `memory-context` 并行 → `memory-api` → `memory-web`。
 
@@ -39,7 +39,7 @@
 ### 分层与数据归属
 
 - 使用 `WorkspaceId` 作为目录和引用身份；canonical realpath 只用于归属校验，不作为记忆 id。
-- 每条记忆具有稳定 id、scope、五类固定标签、摘要、详情、创建/更新/最近验证时间、来源 Session/事件引用、revision 和必要的取代/过期元数据。
+- 每条记忆具有稳定 id、scope、五类固定标签、摘要、详情、创建/更新/最近验证时间、来源 Session/事件引用、revision、默认 0 的整数 rank 和必要的取代/过期元数据。rank 是使用反馈而非内容正确性；旧状态缺失或非法时恢复 0，内容纠正保留已有 ID 的 rank，Promote 副本从 0 开始。
 - 标签为：用户偏好、项目约定、环境事实、已验证的排障经验、重要的长期决策。
 - 普通更新采用原子发布；格式升级使用不可变世代和相邻迁移，不覆盖已提交的旧世代。
 - `state.v2.json` 只保存父索引、Session 与运行状态；`detail-data/<id>/<revision>.json` 保存当前父索引指向的不可变详情。启动、list、enable 和 refresh 不加载详情正文，store.read 按 id/revision 异步读取目标记录。
@@ -56,14 +56,17 @@
 - 调度状态持久化以 kind 为 key 的 `pending = { id, kind, createdAt }`、workspace/Global dirty、各自 next/last consolidation、next/last retention 和最近稳定错误类别；每 Session 的蒸馏游标单独持久化。新 intent、重试和设置重排生成新 ID，旧任务只在当前 ID 匹配时收尾，不能删除或覆盖运行期间到达的新代 intent。全插件只保留一个必要 timer，重启后恢复到期任务，不持久化独立 running intent 或统一 nextRunAt 字段。
 - Review、Idle、Stop 共享每 Session 的 `lastEventSeq + offset` 蒸馏游标。完整 turn 优先按边界入批，超大 turn/消息按确定性片内位置续批；Review 一次一批，Idle/Stop 一次最多两批，首次加载不自动 backfill。
 - 候选安全处理、写入/去重完成后才推进游标；模型/解析/存储失败不推进。记忆已写而游标未写时允许同批重试，以稳定 ID、内容去重、sourceRefs 合并和整合降低重复；重试输出变化时仍可能产生语义重复。
+- 转录投影按 tool callId 排除 `snail_memory_read` 和 `snail_memory_feedback` 的结果，普通工具证据保留；rank-only 更新不设置 dirty、不重排整合/保留期、不推进 revision 或游标，也不生成新快照。
 - 显式记住/纠正立即进入串行写链；忘记立即从父索引删除目标条目，并在同一写队列清理其权威详情和 Markdown 投影，不写 tombstone，不触碰 Session 或蒸馏游标。删除单条/全部记忆不会重置进度、重新蒸馏旧范围或恢复条目。
 
 ### 注入与可重建性
 
 - 不修改 system prompt 头部，不通过替换 surface node 0 更新记忆。
 - 记忆快照通过 `agent.inject()` 形成 synthetic `user/message`，以 `surfaceOp: 'append'` 进入模型历史；工具读取详情沿用现有 `tool/call` / `tool/result` 日志。
-- 快照正文包含注入 id、scope、索引 revision、生成时间和时效提醒，使已提交内容可从 Session 逐项重建。
+- 快照正文包含注入 id、scope、索引 revision、生成时间、时效提醒和克制使用反馈的说明，使已提交内容可从 Session 逐项重建。
 - enable、desired injection 与 committed injection 分开记录。`agent.inject()` 返回只表示排队，不表示已写入 Session；重启后以 Session 提交事实对账，避免丢注或重复注入。
+- desired/committed 保存 token 预算内实际渲染的 `memoryIds`。`snail_memory_feedback` 只接受 layer、memory_id 和 helpful/unhelpful/incorrect，由 Host 根据 Session、启用 layer、召回选择与 committed 清单校验资格；同一 Session + injection + memory 通过持久回执幂等，新 committed injection 可再次反馈。
+- rank 由 Store 专用事务原子更新：helpful +1，其余 -1；不得修改内容字段、条目/scope revision、内容时间、dirty、调度、游标或快照。第一版 rank 只改变 Web 管理列表顺序，不改变 Store 或快照注入顺序，避免“高分更常注入、更常得分”的循环。
 - refresh 把当前最新 revision 追加在已有上下文之后、下一次用户提问之前；revision 未变化时默认不重复追加并反馈“已是最新”。
 - 已提交快照永不改写。自动注入、refresh、系统提示更新和压缩对历史的影响分别记录 **KV Cache effect**。
 
@@ -81,6 +84,7 @@
 - Composer 提供关闭/workspace/global 三态选择，workspace 可选择任意已注册项目；当前已启用层可 disable，refresh 仅在该层 enabled 后可用。重复启用相同选择幂等，切换层或项目只保留一个 active desired。
 - enable/active desired 与已提交注入状态由 Host 权威恢复；localStorage 只可作显示缓存，不作为唯一事实源。
 - Memory 页面使用现有 `sidebar.panellist` 与同 key `main` slot，不修改 shell；包含独立 Global、Workspaces 和 Settings 三个 tab，workspace 详情可 Promote，Global 与 workspace 条目均可独立删除。
+- 列表和详情展示 rank；Client 复制索引后按 rank 降序、内容 updatedAt 降序、id 升序排列，不修改 Host 数组。该视图排序不回写 Store，也不影响模型快照顺序。
 - 条目数统计所选 tab 的当前有效条目；注入 token 统计当前 Session 已提交快照的累计估算，并区分最近快照估算。
 - 删除操作只调用 memory API，不调用 Session 删除、压缩或 surface replacement。
 

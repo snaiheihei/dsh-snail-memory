@@ -1,5 +1,7 @@
 # Spec: memory-store
 
+> 2026-10-29 rank 反馈修订：父条目增加默认 0 的 `rank`；committed 快照保存实际渲染的 memory ID 和逐条目反馈回执，Store 以同一原子事务完成资格校验、rank 更新与幂等回执，且 rank-only 更新不触碰内容或生命周期状态。
+>
 > 2026-10-28 运行范围修订：当前定案为单一 dsh Client、单 Host。既有写锁、只读与接管逻辑保留为意外重复启动防护，但不据此宣称支持多 Host 共同写入；完整跨 Host 事务 fencing 暂缓。
 >
 > 2026-10-28 独立 Global 修订：Global 从动态只读聚合改为独立权威 scope。workspace 详情可 Promote 深复制到 Global，副本以新 ID、独立详情和 `promotedFrom` 维护；重复 Promote 幂等，来源与副本更新/删除互不影响。以 `SPEC-global-aggregate-memory.md` 的当前独立 Global 契约为准。
@@ -45,7 +47,8 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 ## Data Contract
 
 - `MemoryScope` 为 `{ kind: 'global' }` 或 `{ kind: 'workspace', workspaceId }`；目录只使用 branded id 的字符串值。
-- `MemoryEntry` 包含 `id`、`scope`、`category`、`summary`、`detail`、`createdAt`、`updatedAt`、`lastVerifiedAt`、`revision`、`sourceRefs`，以及可选 `expiresAt`、`supersedes`、`promotedFrom`。
+- `MemoryEntry` 包含 `id`、`scope`、`category`、`summary`、`detail`、`createdAt`、`updatedAt`、`lastVerifiedAt`、`revision`、`sourceRefs`、整数 `rank`，以及可选 `expiresAt`、`supersedes`、`promotedFrom`。新条目和 Promote 新 Global 副本的 rank 为 0；已有 ID 的内容纠正和 consolidation 沿用目标 rank，不相加被取代条目的 rank。旧 v2 状态缺少 rank 或 rank 不是安全整数时恢复为 0，不升级格式版本。
+- rank 是条目级使用反馈，不是内容 revision、正确性或可信度。它保存在父索引中，列表和详情无需读取权威详情即可展示。
 - 五类 category 为 `preference`、`project-convention`、`environment-fact`、`troubleshooting`、`long-term-decision`。
 - `state.v2.json` 原子发布父索引、Session 和运行状态；父条目只保存摘要等元数据及 `detailChars`，不保存完整 `detail`。Host 启动只把这份父状态加载进内存，`list()`、`enable()` 和 `refresh()` 不读取详情记录。
 - `detail-data/<id>/<revision>.json` 保存父状态指向的不可变权威详情。`read()` 按 id 和 revision 异步读取目标记录并重新组成完整 `MemoryEntry`；不得为读取一个条目而加载全部详情。
@@ -59,8 +62,12 @@ tests/store/             → Temp 目录单元和崩溃恢复测试
 - `audit.v1.jsonl` 只记录操作、id、revision、时间和脱敏结果，不记录记忆正文、秘密或完整提示词。
 - `global/INDEX.md` 只包含独立 Global 条目，不包含 workspace 聚合引用；Promote 通过新 ID、独立版本化详情和 `promotedFrom` 深复制，不共享来源详情或分片所有权。
 - 每会话独立保存两个层的 `enabled`、`desired`、已提交 injection id/revision 和估算 token，以及唯一 `activeDesired` 和可选 `distillationCursor = { lastEventSeq, offset, updatedAt }`。游标只保存事件位置和提交时间，不保存转录正文、秘密或异常原文。
+- 新 desired/committed injection 保存 `memoryIds`，即该快照在 token 预算内实际渲染的父条目 ID，而不是完整索引或仅被读取的条目；旧记录可缺省，缺省时不授予反馈资格。committed injection 另保存 `feedback[memoryId] = outcome` 回执，使同一 Session + injectionId + memoryId 在重启后仍只能接受一次反馈；新 committed injection 可形成新的反馈机会。
+- `recordFeedback()` 必须在 Store 同一串行 transaction 内完成：按当前 Session 和启用 layer 推导 scope，从最新 committed 向前找到实际包含目标 memoryId 且召回 workspace 匹配的记录，检查回执，再同时更新父条目 rank 与该 committed 回执。`helpful` 为 +1，`unhelpful` 和 `incorrect` 为 -1；模型不能传 delta、reason、injectionId 或 workspace。
+- 未启用、目标未实际渲染进 committed 快照、条目不属于当前 scope 或已删除时分别拒绝；重复反馈返回 duplicate 且不再次改分。被 token 预算省略、仅出现在 desired/queued 或仅被 `snail_memory_read` 读取的条目均没有资格。
+- rank-only 事务不得修改 summary/detail/sourceRefs 等内容字段、条目内容 revision、scope revision、`updatedAt`、`lastVerifiedAt`、workspace/Global dirty、consolidation 调度、Session 蒸馏游标或注入快照；不得通过 `read() → upsert()` 实现。Store 总状态事务可正常前进，但不因此产生新详情世代或新快照。
 - Session `workspaceId` 是自动蒸馏与显式写入的 owner；可选 `selectedWorkspaceId` 是独立的 workspace 召回选择，只用于快照、refresh 和详情读取。enable 其他已注册项目不得改写 owner，Ungrouped 也不会因召回选择获得隐式写入归属。
-- workspace desired/committed 可保存 `workspaceId`，用于按召回项目分别进行 revision 对账和公共状态展示；global 及旧版 workspace 记录可缺省该字段，按兼容路径处理。不同 workspace 的 revision 不得跨项目取最大值。
+- workspace desired/committed 可保存 `workspaceId`，用于按召回项目分别进行 revision 对账、反馈资格和公共状态展示；global 及旧版 workspace 记录可缺省该字段，按兼容路径处理。不同 workspace 的 revision 不得跨项目取最大值。
 - 游标更新复用 `updateSessionState` 和主串行 transaction，因此同样经过 writer queue、`lock.assertOwner()`、原子状态发布和故障恢复。游标-only 更新不推进 scope revision、不设置 dirty、不创建 desired injection 或快照。
 - 生命周期 `meta.pending` 以 kind 为 key，值为 `LifecycleIntent = { id, kind, createdAt }`。ID 标识调度代际，供 Scheduler 条件收尾；旧 v2 状态缺少 ID 时，读取阶段补 `legacy:<key>:<createdAt>` 稳定兼容 ID，不要求用户手工迁移或删除状态。
 - MemoryEntry 删除与 Session 蒸馏游标是正交事实。单条/全部删除不得修改、重置或推进游标，不得使旧范围重新蒸馏，也不得恢复已删条目；只有宿主真实 Session 生命周期清理才可另议游标垃圾回收。
@@ -114,6 +121,9 @@ async write(entry: MemoryEntry): Promise<void> {
 - 注入父状态、详情记录、分片和索引写失败，验证提交前恢复旧投影、提交后返回 committed 结果、pending 在重开后恢复，以及本地 read/remove 串行和第二 Host 纠正/删除可见性。
 - 验证保留期清理只消费父索引，不读取 `detail-data`。
 - 验证旧 pending 记录恢复后获得稳定 intent ID，后续 Scheduler 可按 ID 区分新旧代际。
+- 验证新条目默认 rank 0、非法旧 rank 恢复 0、内容纠正保留 rank、Promote 副本 rank 0；三种 outcome 分别产生 +1/-1。
+- 验证反馈只接受当前 committed 快照实际渲染的 ID；desired/queued、预算省略、旧无 memoryIds、已删除或错误 scope 均拒绝。相同 Session + injection + memory 在重启前后幂等，新 committed injection 可再次反馈。
+- 验证 rank 与回执原子提交，且内容字段、条目/scope revision、内容时间、dirty、consolidation、游标和注入快照均不变化。
 
 ## Boundaries
 
@@ -128,6 +138,7 @@ async write(entry: MemoryEntry): Promise<void> {
 - 任意写失败不破坏最后一个已提交状态。
 - 忘记后 list/read 均不可取得条目，详情文件和分片目录被移除，审计无正文。
 - 大详情主索引不随分片数增长，投影与工具均可确定性重建，旧分片不残留。
+- rank 反馈只对已提交且实际渲染的条目生效，跨重启幂等；rank-only 更新不引发内容、revision、生命周期、游标或快照副作用。
 - 测试、typecheck、build 通过。
 
 ## Open Questions

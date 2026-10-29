@@ -1,10 +1,10 @@
 # Snail Memory：记忆算法、设计技巧与演进
 
-本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-28 的持久游标顺序蒸馏、大详情分片、父索引驻留、详情懒加载和独立 Global 记忆库实现为基线。
+本文说明 Snail Memory 当前实现的记忆算法、关键方案取舍和演进过程。描述以 dsh `0.2.1-rc.3` 树外插件及 2026-10-29 的持久游标顺序蒸馏、大详情分片、父索引驻留、详情懒加载、独立 Global 记忆库和条目级 rank 使用反馈实现为基线。
 
 文中严格区分三类机制：
 
-- **确定性算法**：计数、分片、ID 派生、revision、保留期、队列、提交对账等可重复验证的逻辑。
+- **确定性算法**：计数、分片、ID 派生、revision、rank 反馈资格与幂等、保留期、队列、提交对账等可重复验证的逻辑。
 - **模型语义算法**：从对话提炼候选、语义去重、冲突裁决和旧结论取代，由辅助 LLM 完成。
 - **宿主事实**：Session、turn、workspace 和模型历史归 dsh 所有，插件只通过公开扩展点读写获准的数据。
 
@@ -20,8 +20,9 @@ Snail Memory 解决的是单用户跨会话长期记忆，而不是再实现一�
 4. 所有模型可见内容都有普通 Session 消息或工具结果作为证据。
 5. 删除只影响目标 scope 的记忆，不删除、替换或压缩对话历史，也不影响来源或副本。
 6. 重启可恢复，当前仅支持单一 dsh Client、单 Host；写锁用于意外重复启动防护，秘密不进入长期记忆和审计正文。
+7. 模型可对实际使用的已注入条目给出有界使用反馈，帮助人工管理排序；反馈不能修改内容、制造生命周期任务或绕过提交资格。
 
-当前明确不采用向量数据库、embedding 召回或查询相关性排序，也不自动批量迁移、晋升或同步 workspace 记忆。Global 不是完整知识图谱或实时事实系统；旧记忆只是带来源时间的参考数据。
+当前明确不采用向量数据库、embedding 召回或查询相关性排序，也不自动批量迁移、晋升或同步 workspace 记忆。rank 不参与模型召回或快照排序，不表示记忆正确性。Global 不是完整知识图谱或实时事实系统；旧记忆只是带来源时间的参考数据。
 
 ## 2. 总体算法视图
 
@@ -53,11 +54,14 @@ workspace 详情 ── 人工 Promote 深复制 ──→ 独立 Global 条目
                                              │
                               默认 7 天后：仅 Global 语义整合
 
-两类 scope ──→ 父索引 JSON + 版本化详情 JSON + Markdown 投影
+两类 scope ──→ 父索引 JSON（含 rank）+ 版本化详情 JSON + Markdown 投影
                                              │
-                enable / refresh → 摘要索引快照 → append-only 注入
+                enable / refresh → 摘要索引快照 + 实际渲染 ID → append-only 注入
                                              │
                     snail_memory_read → 小详情 / 分片清单 / 单片
+                    snail_memory_feedback → committed 资格校验 → rank ±1 + 幂等回执
+
+Web 管理列表：rank 降序 → 内容 updatedAt 降序 → id；不改变 Store 或快照顺序
 ```
 
 这条链路中，模型负责“理解什么值得记、哪些语义相同”，程序负责“能写到哪里、何时写、是否已提交、如何恢复以及不能泄露什么”。
@@ -87,9 +91,11 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 ### 3.3 父记忆是唯一实体
 
-每条 `MemoryEntry` 包含稳定 ID、scope、类别、摘要、完整详情、创建/更新/最近验证时间、条目 revision、来源引用，以及可选的过期、取代和 `promotedFrom` 元数据。磁盘驻留时把它拆成父索引和版本化详情；`read()` 按 id/revision 读取详情后重新组成同一逻辑实体。
+每条 `MemoryEntry` 包含稳定 ID、scope、类别、摘要、完整详情、创建/更新/最近验证时间、条目 revision、来源引用、整数 `rank`，以及可选的过期、取代和 `promotedFrom` 元数据。磁盘驻留时把它拆成父索引和版本化详情；`read()` 按 id/revision 读取详情后重新组成同一逻辑实体。
 
-主索引不包含 `detail`，内部另存 `detailChars` 用于详情形态和完整性校验，不会把分片变成独立记忆。全局索引、workspace 索引、模型快照和 Web 管理页都围绕同一个父条目工作。
+rank 默认 0，是条目级使用反馈而不是内容评分：新条目和 Promote 新 Global 副本从 0 开始，已有 ID 的内容纠正及 consolidation 保留目标 rank，不相加被取代条目的 rank。旧 v2 状态缺失 rank 或值不是安全整数时恢复为 0，无需格式 v3。
+
+主索引不包含 `detail`，但包含 rank，因此列表和详情展示无需读取正文；内部另存 `detailChars` 用于详情形态和完整性校验，不会把分片变成独立记忆。全局索引、workspace 索引、模型快照和 Web 管理页都围绕同一个父条目工作。
 
 ## 4. 生命周期触发算法
 
@@ -118,7 +124,7 @@ WorkspaceId 是逻辑身份，canonical realpath 只用于归属校验，不作�
 
 管理页的 Settings 可以调整 `reviewEveryUserTurns`、`idleDelayMinutes`、`consolidationCooldownHours`、`globalConsolidationCooldownDays`、`snapshotTokenBudget` 和五类 `retentionDays`。默认值分别为 15 轮、60 分钟、workspace 20 小时和 Global 7 天，快照预算默认为 1,200 估算 token，保留期默认值见 3.2。所有值持久化到 `$DSH_HOME/snail_memory/settings.v1.json`，启动配置只作为文件缺失时的默认值；旧文件缺少新增字段时补用对应默认值，已显式保存的其他值保持不变。Settings 当前使用独立的 Promise 写队列和原子文件替换，只在写入开始时检查 `store.writable`，不进入 MemoryStore 主状态事务，也没有在发布前再次执行 writer fencing；因此只读 Host 会拒绝更新，但锁所有权在写入期间变化时仍存在 stale writer 覆盖设置的已知窗口。保存成功后立即更新运行中的计数器和调度器：当前进程内已有有效轮计数保留，已有 idle intent 按新延迟重新计算到期时间，workspace 与 Global 各自已有的 dirty/consolidation 计划分别按新的小时或天间隔从当前时间重排；保留期策略则由下一次每日清理读取。快照预算由两类 scope 共用，在后续 Enable/Refresh 创建新快照时读取，不改写已经生成的 desired 或已注入 Session 的历史快照。
 
-蒸馏读取的是 Session 事件的确定性投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情的能力不变。
+蒸馏读取的是 Session 事件的确定性投影，不是原始 Session 的无差别副本。投影保留真实用户消息、助手消息和普通工具结果；其中 `snail_memory_read` 与 `snail_memory_feedback` 的 `tool/result` 通过 `tool/call.callId` 精确识别并排除，避免已保存的记忆详情或反馈回执再次成为蒸馏输入，普通工具结果仍作为工程证据保留。过滤只影响发给辅助模型的转录，原始 Session 中的工具调用与结果保持完整，模型当次按需读取详情和提交反馈的能力不变。
 
 每个 Session 的可选 `distillationCursor` 只保存：
 
@@ -148,6 +154,7 @@ pending key 仍是 kind，但每个值包含 `{ id, kind, createdAt }`。新 int
 - 两类整合都只在各自 dirty 且到期时运行，成功清理、失败重试和设置热更新不互相清除或重排对方状态。
 - 保留期清理默认每 24 小时运行，只枚举 workspace scope。
 - Review/Idle/Stop 只写 Session owner workspace，不改变 Global dirty 或调度；Review/Stop 失败后降级为 Idle 意图，空闲类任务按 60 分钟重试。
+- rank-only 反馈不属于内容写入，不设置任何 dirty、不创建或重排整合/保留期 intent、不推进游标，也不生成新快照；它只更新父条目 rank 和 committed 回执。
 - 两类整合和保留期失败分别按各自周期重试。
 - 卸载停止新 timer，但等待已经进入队列的工作 drain。
 - 错误状态只保存稳定类别，不保存可能包含路径、提示词或秘密的异常正文。
@@ -193,7 +200,7 @@ memoryId = SHA256(scopeKey + NUL + category + NUL + normalizedSummary)
 
 Promote 只接受已注册 workspace 的来源条目。Store 在同一串行写事务中按 `promotedFrom = { workspaceId, id }` 查重、读取来源当前权威详情、生成新的 Global ID，并完整写入新详情世代和投影；UI 禁用按钮只改善交互，不能替代 Host 幂等。
 
-副本保留类别、摘要、正文、sourceRefs 和内容时间语义，但获得自己的 createdAt/updatedAt/revision；来源 `supersedes` 不复制，避免产生跨 scope 悬空引用。重复或并发 Promote 在副本仍存在时返回同一个 ID，不推进 revision、不设置 dirty；删除副本后再次显式 Promote 则允许创建新副本。Promote 不修改 Session、蒸馏游标或来源条目，后续来源 correction、retention、supersedes 和删除也不会自动同步到副本。
+副本保留类别、摘要、正文、sourceRefs 和内容时间语义，但获得自己的 createdAt/updatedAt/revision，rank 始终从 0 开始；来源 `supersedes` 不复制，避免产生跨 scope 悬空引用。重复或并发 Promote 在副本仍存在时返回同一个 ID，不推进 revision、不设置 dirty；删除副本后再次显式 Promote 则允许创建新副本。Promote 不修改 Session、蒸馏游标或来源条目，后续来源 correction、retention、supersedes、rank 反馈和删除也不会自动同步到副本。
 
 ## 6. 整合与冲突裁决
 
@@ -203,7 +210,7 @@ Promote 只接受已注册 workspace 的来源条目。Store 在同一串行写�
 2. 逐条装入最多 64,000 字符的模型输入；达到预算后停止加入更老条目。
 3. 要求模型在当前 scope 内合并重复、修正冲突、淘汰旧结论，返回 candidates 和可选 `id/supersedes`。
 4. 确定性代码只接受经 64,000 字符预算截断后、实际发送给模型的输入快照中真实存在的候选 ID；`supersedes` 也去重并限制在同一输入快照，未知、被预算排除、快照外或指向目标自身的 ID 不生效，更不能用于跨 scope 移动或删除。
-5. 不采用模型返回的 `sourceRefs`。程序从现有目标与有效被取代条目的真实来源汇集并按 JSON 精确值去重，再写回新 revision、删除同 scope 中被取代的旧 ID；Global 写回保留 `promotedFrom`。
+5. 不采用模型返回的 `sourceRefs`。程序从现有目标与有效被取代条目的真实来源汇集并按 JSON 精确值去重，再写回新 revision、删除同 scope 中被取代的旧 ID；Global 写回保留 `promotedFrom`，目标条目已有 rank 经既有 upsert 保留，不把被取代条目的 rank 相加。
 6. 全部成功后只清理目标类的 dirty、pending 和下次整合时间，并记录对应的最近整合时间。
 
 因此，“语义上是否重复、哪个结论更新”是模型判断；“是否允许写、能否跨 scope、如何持久化和删除”是程序判断。这个分工让语义能力可演进，同时把数据安全边界留在确定性代码中。
@@ -235,11 +242,11 @@ workspace 自动过期判断：
 
 当前召回策略是“所选层摘要索引 + 按 ID 精确读取”：
 
-1. Store 按 `updatedAt` 新到旧排列，ID 作为稳定次序兜底；Global 只枚举独立 Global 父索引，不汇总 workspace。
-2. enable 或 refresh 时渲染所选层摘要索引。
+1. Store 按 `updatedAt` 新到旧排列，ID 作为稳定次序兜底；Global 只枚举独立 Global 父索引，不汇总 workspace，rank 不改变该顺序。
+2. enable 或 refresh 时渲染所选层摘要索引，并单独记录预算内实际渲染的 memory ID 清单。
 3. Global 快照只包含预算内的独立 Global 摘要，不包含 workspace 引用统计；两类快照都不读取或注入完整详情。
 4. 模型确有需要时调用 `snail_memory_read`，提供已启用 layer 和父 memory ID；Store 此时才按当前 scope 的 id/revision 异步读取目标权威详情记录，Global 不再要求来源 `workspace_id`。
-5. 小详情直接返回；大详情先返回分片清单，再按 chunk ID 读取单片。
+5. 小详情直接返回；大详情先返回分片清单，再按 chunk ID 读取单片。模型只有在实际采用某条记忆，或明确发现其无帮助/不正确时，才按 8.5 的约束提交反馈，不因注入或读取本身评分。
 
 每条快照记忆带类别、ID、摘要和“若干天前”的时点提示，并明确它是不可信参考数据，不能覆盖当前用户、系统或安全指令。
 
@@ -251,7 +258,7 @@ Token 使用启发式估算：
 estimatedTokens(text) = ceil(text.length / 4) + 8
 ```
 
-默认摘要条目预算为 1,200 估算 token，可通过 Settings 的 `snapshotTokenBudget` 调整并持久化，workspace 与 Global 共用该值。Context 在每次 Enable/Refresh 创建新快照时读取当前值；已有 desired 和已注入 Session 的历史快照保持不变。超限后停止加入后续条目，并提示还有条目可按 ID 读取。该估算不是 provider 的精确计费值；固定头和尾部说明也不属于当前条目循环的硬上限。
+默认摘要条目预算为 1,200 估算 token，可通过 Settings 的 `snapshotTokenBudget` 调整并持久化，workspace 与 Global 共用该值。Context 在每次 Enable/Refresh 创建新快照时读取当前值；已有 desired 和已注入 Session 的历史快照保持不变。超限后停止加入后续条目，并提示还有条目可按 ID 读取。只有真正加入快照的条目才写入 `memoryIds`，因此后续反馈资格与预算结果一致。该估算不是 provider 的精确计费值；固定头和尾部说明也不属于当前条目循环的硬上限。
 
 ### 8.3 关闭 / workspace / 全局三态单选
 
@@ -285,6 +292,33 @@ committed：记录 injectionId、revision、提交时间和估算 token
 - 已提交快照和 committed 历史永不 replace 或追溯改写，删除记忆也不撤回既有对话；token 统计只计算 committed，不把“按钮已点击”当成“模型已经看见”。
 
 快照始终作为 `source: snail-memory` 的用户消息追加到历史尾部，不改 system prompt 头部。这样既保留已有 KV Cache 前缀，也让模型可见内容可由 Session 重建。
+
+### 8.5 committed 使用反馈与 rank
+
+`snail_memory_feedback` 是受限的条目级反馈工具，只接受：
+
+```text
+layer：global | workspace
+memory_id：父记忆 ID
+outcome：helpful | unhelpful | incorrect
+```
+
+Session 由 Host 从工具执行上下文取得，workspace 由当前启用层和召回选择推导。模型不能传 Session、injectionId、workspace、任意 delta 或自由文本 reason。`helpful` 映射为 rank +1，`unhelpful` 与 `incorrect` 都映射为 -1；`incorrect` 不自动纠正、删除或保留条目，rank 也不等于内容正确性或可信度。
+
+反馈资格不是“索引里存在”或“模型曾读取”，而是目标 ID 确实渲染进当前 Session 对应 layer 的 committed 快照。Store 从最新 committed 向前查找包含该 ID 且召回 workspace 匹配的记录；仅 desired/queued、被 token 预算省略、旧记录没有 memoryIds、已删除或不属于当前 scope 都不能反馈。只有 post-commit 对账后的注入才提供资格，避免把排队当作模型已经看见。
+
+同一 `Session + injectionId + memoryId` 只接受一次反馈。committed injection 内持久化 `feedback[memoryId] = outcome` 回执，重复调用返回 duplicate 和当前 rank，重启后仍不重复计分；新的 committed injection 可以再次反馈。资格检查、rank 更新和回执写入位于同一 Store 串行事务，不能拆成 `read() → upsert()`。
+
+rank-only 事务保持以下不变量：
+
+- summary、detail、sourceRefs 等内容字段不变，不创建新详情世代。
+- 条目内容 revision 与 scope revision 不变，`updatedAt`、`lastVerifiedAt` 不变。
+- workspace/Global dirty、consolidation/retention 计划和蒸馏游标不变。
+- active desired、已注入快照和后续快照生成规则不变，Store 与快照仍按 updatedAt/id 排列。
+
+Web 管理页复制 Host 索引后按 rank 降序、内容 updatedAt 降序、id 升序显示，并在列表与详情中展示 rank。第一版刻意不让 rank 影响召回：若高分条目因此更常注入，就更容易继续获得反馈，会形成自我强化循环。当前 rank 更适合作为人工排查和整理线索，而不是自动质量裁决。
+
+反馈工具结果仍是普通 Session 工具事件，满足 model-visible means logged；结果只包含稳定 status 和可选 rank，不返回记忆正文，并在后续蒸馏投影中按 callId 排除。
 
 ## 9. 大详情分片算法
 
@@ -345,7 +379,7 @@ Web 管理页仍读取父完整详情供人查看；分片限制只针对模型�
 默认数据根为 `$DSH_HOME/snail_memory`。当前权威存储由父状态和其指向的详情世代组成，Markdown 只是投影：
 
 ```text
-state.v2.json                         父索引、Session、调度状态；不含完整 detail
+state.v2.json                         父索引（含 rank）、Session（含 memoryIds/反馈回执）、调度状态；不含完整 detail
 detail-data/<id>/<revision>.json     不可变权威详情；父索引的 revision 选择当前世代
 details/<id>.md                      小详情可读投影
 details/<id>/part-NNN.md             大详情分片可读投影
@@ -358,8 +392,8 @@ Host 启动只读取 `state.v2.json` 到 `MemoryStore`。`list()`、`enable()` �
 
 关键技巧：
 
-- 所有 CRUD、Session 状态、蒸馏游标和调度元数据进入同一串行写队列；游标复用 `updateSessionState` 的 `lock.assertOwner()`/fencing 与原子恢复边界，不新增独立写入队列。writer 的单条详情读取也进入该队列，避免读取与纠正、删除竞争。
-- 游标-only 事务只更新 Session 位置元数据：不推进记忆 scope revision、不设置 dirty、不创建 desired injection 或新快照，也不触发整合。
+- 所有 CRUD、rank 反馈、Session 状态、蒸馏游标和调度元数据进入同一串行写队列；游标复用 `updateSessionState` 的 `lock.assertOwner()`/fencing 与原子恢复边界，反馈复用主 transaction 校验 committed 资格并同时写 rank 与回执，不新增独立写入队列。writer 的单条详情读取也进入该队列，避免读取与纠正、删除竞争。
+- 游标-only 事务只更新 Session 位置元数据：不推进记忆 scope revision、不设置 dirty、不创建 desired injection 或新快照，也不触发整合。rank-only 事务同样不推进内容/scope revision、不设置 dirty、不改内容时间、不创建详情世代或快照。
 - 新详情先写入 `detail-data/<id>/<newRevision>.json`，对应详情 Markdown 也完整发布成功后，才原子切换 `state.v2.json`；这些步骤失败时父 revision 不前进。
 - 每次事务先持久化只含受影响父 id 的 `projection-pending.v1.json`。提交前失败按当前父状态尝试恢复旧投影，恢复本身失败时保留 intent；崩溃或提交后派生失败同样保留 intent，由下次可写启动或后续事务按父状态重建详情和索引、清理未引用记录，再删除 intent。
 - 父状态发布后立即更新内存，再写 INDEX/MEMORY 投影和清理旧详情世代。派生失败不能把内存回退到旧权威状态，也不能把已提交操作误报为未提交。
@@ -407,6 +441,10 @@ LLM 适合提炼、同义合并和冲突解释，不适合承担权限、事务�
 ### 12.8 用持久位置换取顺序覆盖，用重复窗口换取不丢历史
 
 固定前缀截取的实现最简单，但会让每次 Review/Idle/Stop 重复总结同一段历史，长会话中段和尾部永远没有输入机会。持久 eventSeq 游标把进度变成 Session 的权威元数据；片内 offset 又避免超大消息因无法整批装入而永久卡住。取舍是需要承受“记忆已写、游标未写”的崩溃重复窗口，并用幂等写入而不是先推进位置来控制它。
+
+### 12.9 把使用反馈与内容事实、召回顺序分开
+
+直接让模型给任意记忆加分会产生两类问题：它可能给从未进入上下文的条目刷分，也可能让高分条目更常注入并继续得分。当前设计用 committed 快照的实际 memoryIds 限定资格，用 Session + injection + memory 回执限定次数，再以 Store 原子事务同时写 rank 和回执。rank 只进入父索引和 Web 本地排序，不进入内容 revision、生命周期或召回排序。这样保留了“哪些记忆实际有帮助”的管理信号，同时避免把主观反馈伪装成内容验证或自动排序真值。
 
 ## 13. 演进过程
 
@@ -530,6 +568,16 @@ Global 新增独立 `globalDirty`、`nextGlobalConsolidationAt`、`lastGlobalCon
 
 本轮没有实现 Store expected-revision 条件写，也没有改变未显式修改元数据的现有保留语义；两者与完整跨 Host writer fencing 均列入后续 Plan。新增回归覆盖来源完整性、快照外及预算截断的 id/supersedes、元数据秘密、超限凭据、未闭合 PEM、重叠 reject 优先级、同 key 新旧 intent 交错及旧状态兼容。全量自动化结果为 31 个测试文件、217 条测试，并通过 typecheck、lint、build 和 `git diff --check`；未重新执行真实 Host/UI/模型验收，也未安装到真实 Host 或重启用户进程。
 
+### 阶段十四：从静态索引演进为 committed 使用反馈与人工 rank 排序
+
+本轮借鉴使用反馈思路，但没有让模型直接编辑记忆或自由调分。父条目新增默认 0 的整数 rank，模型通过 `snail_memory_feedback` 对实际采用或有具体负面观察的条目给出 helpful/unhelpful/incorrect；Host 将其确定性地映射为 +1/-1。工具不开放任意 delta、reason、Session、injection 或 workspace，结果不返回记忆正文。
+
+快照生成现在同时保存实际通过 token 预算的 memoryIds，并在 committed 时继续保留。反馈必须命中当前 Session 对应 layer 的 committed 清单；同一 Session + injection + memory 通过持久回执跨重启幂等，新 committed injection 可再次反馈。Store 专用事务同时校验资格、更新 rank 和写回执，内容字段、条目/scope revision、内容时间、dirty、调度、游标和快照均保持不动。read 与 feedback 两类工具结果都从后续蒸馏投影排除，普通工具结果保留。
+
+Web 列表和详情显示 rank，Client 复制索引后按 rank、内容 updatedAt、id 排序；Store 和模型快照仍按 updatedAt/id。这个取舍避免高分自我强化，也明确 rank 只是使用反馈而非正确性。旧状态非法或缺失 rank 自动恢复 0，内容纠正保留 rank，Promote 新副本从 0 开始，consolidation 不相加被取代条目的 rank。
+
+新增回归覆盖默认与旧状态恢复、三种 outcome、预算外/未提交/错误 scope 拒绝、重启幂等、新 injection 再反馈、原子副作用边界、工具正文最小化、蒸馏过滤和 UI 稳定排序。最终全量自动化结果为 31 个测试文件、242 条测试，并通过 typecheck、lint、build 和 `git diff --check`；首次全量运行有一个既有跨 workspace refresh 用例在并行 I/O 负载下达到 5 秒超时，隔离运行 448ms 通过，未改代码后完整复验全部通过。真实 Host/UI/模型验收不在本轮执行范围内，也未安装到真实 Host、重启用户进程或创建 git commit。
+
 ## 14. 当前边界与后续演进方向
 
 以下是当前限制或候选方向，不是已经实现的能力：
@@ -553,8 +601,8 @@ Global 新增独立 `globalDirty`、`nextGlobalConsolidationAt`、`lastGlobalCon
 
 | 主题 | 主要实现 |
 |---|---|
-| 数据模型、scope、Promote、revision、会话状态 | `src/store/types.ts`、`src/store/aggregate.ts`、`src/store/store.ts` |
-| 原子 JSON、锁与 fencing | `src/store/json.ts`、`src/store/lock.ts` |
+| 数据模型、scope、Promote、rank、反馈资格/回执、revision、会话状态 | `src/store/types.ts`、`src/store/aggregate.ts`、`src/store/store.ts` |
+| 原子 JSON、旧 rank 恢复、锁与 fencing | `src/store/json.ts`、`src/store/lock.ts` |
 | 版本化权威详情与按需读取 | `src/store/records.ts`、`src/store/store.ts` |
 | 大详情切分与 Markdown 投影 | `src/store/chunks.ts`、`src/store/projections.ts` |
 | 有效轮与生命周期调度 | `src/lifecycle/counters.ts`、`src/lifecycle/scheduler.ts` |
@@ -562,8 +610,9 @@ Global 新增独立 `globalDirty`、`nextGlobalConsolidationAt`、`lastGlobalCon
 | 蒸馏、整合、遗忘 | `src/lifecycle/distill.ts`、`src/lifecycle/consolidate.ts`、`src/lifecycle/retention.ts` |
 | 辅助模型调用与输出校验 | `src/lifecycle/llm.ts` |
 | 秘密扫描、脱敏与来源准入 | `src/safety/` |
-| 快照、提交对账与详情工具 | `src/context/snapshot.ts`、`src/context/service.ts`、`src/context/tool.ts` |
+| 快照、实际渲染 ID、提交对账、详情与反馈工具 | `src/context/snapshot.ts`、`src/context/service.ts`、`src/context/tool.ts` |
 | API 与显式操作 | `src/api/` |
+| Web rank 展示与本地排序 | `client/src/MemoryPage.tsx`、`client/src/locale.ts` |
 | 模块契约和演进记录 | `.qoder/plan/` |
 
 阅读实现时，建议先以 `.qoder/plan/snail-memory-capability-map.md` 建立模块边界，再按“store → lifecycle/context → API/Web”的顺序追踪。各 Spec 描述验收契约，本文解释这些契约为何形成以及当前算法如何协作。

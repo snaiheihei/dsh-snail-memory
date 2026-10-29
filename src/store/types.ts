@@ -42,6 +42,7 @@ export interface MemoryEntry {
   readonly updatedAt: string
   readonly lastVerifiedAt: string
   readonly revision: number
+  readonly rank: number
   readonly sourceRefs: readonly MemorySourceRef[]
   readonly promotedFrom?: MemoryPromotionSource
   readonly expiresAt?: string
@@ -52,6 +53,19 @@ export interface PromoteMemoryResult {
   readonly id: MemoryId
   readonly created: boolean
 }
+
+export type MemoryFeedbackOutcome = 'helpful' | 'unhelpful' | 'incorrect'
+
+export interface MemoryFeedbackInput {
+  readonly sessionId: string
+  readonly layer: MemoryLayer
+  readonly memoryId: MemoryId
+  readonly outcome: MemoryFeedbackOutcome
+}
+
+export type MemoryFeedbackResult =
+  | { readonly status: 'recorded' | 'duplicate'; readonly rank: number }
+  | { readonly status: 'disabled' | 'not-injected' | 'not-found' }
 
 export interface UpsertMemoryInput {
   readonly id?: MemoryId
@@ -88,6 +102,8 @@ export interface DesiredInjection {
   /** Absent for global snapshots and legacy workspace generations. */
   readonly workspaceId?: WorkspaceId
   readonly snapshot: string
+  /** Actual entries rendered within the token budget; absent in legacy generations. */
+  readonly memoryIds?: readonly MemoryId[]
   readonly createdAt: string
   readonly automatic: boolean
 }
@@ -97,6 +113,10 @@ export interface CommittedInjection {
   readonly revision: number
   /** Absent for global snapshots and legacy workspace commits. */
   readonly workspaceId?: WorkspaceId
+  /** Actual entries rendered within the token budget; absent in legacy commits. */
+  readonly memoryIds?: readonly MemoryId[]
+  /** One terminal feedback receipt per memory for this committed injection. */
+  readonly feedback?: Record<string, MemoryFeedbackOutcome>
   readonly tokens: number
   readonly committedAt: string
 }

@@ -50,6 +50,30 @@ function input(scope: MemoryScope, summary: string): UpsertMemoryInput {
   }
 }
 
+async function commitInjection(
+  store: MemoryStore,
+  scope: MemoryScope,
+  id: ReturnType<typeof memoryId>,
+  injectionId = 'injection-1',
+) {
+  await store.updateSessionState('session-1', state => {
+    const layer = scope.kind
+    if (scope.kind === 'workspace') {
+      state.workspaceId = scope.workspaceId
+      state.selectedWorkspaceId = scope.workspaceId
+    }
+    state.layers[layer].enabled = true
+    state.layers[layer].committed.push({
+      injectionId,
+      revision: 1,
+      ...(scope.kind === 'workspace' ? { workspaceId: scope.workspaceId } : {}),
+      memoryIds: [id],
+      tokens: 42,
+      committedAt: '2026-10-26T00:00:00.000Z',
+    })
+  })
+}
+
 afterEach(async () => {
   fileReads.length = 0
   fileReadControl.delayDetails = false
@@ -58,6 +82,130 @@ afterEach(async () => {
 })
 
 describe('MemoryStore', () => {
+  it('defaults rank to zero and preserves it across content corrections', async () => {
+    const store = await open(await tempRoot())
+    const scope: MemoryScope = { kind: 'global' }
+    const entry = await store.upsert(input(scope, 'Original convention'))
+    expect(entry.rank).toBe(0)
+    await commitInjection(store, scope, entry.id)
+    await store.recordFeedback({
+      sessionId: 'session-1', layer: 'global', memoryId: entry.id, outcome: 'helpful',
+    })
+
+    const corrected = await store.upsert({ ...input(scope, 'Corrected convention'), id: entry.id })
+
+    expect(corrected.rank).toBe(1)
+    expect(corrected.revision).toBeGreaterThan(entry.revision)
+  })
+
+  it('starts a promoted global copy at rank zero instead of copying source feedback', async () => {
+    const store = await open(await tempRoot())
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const source = await store.upsert(input(scope, 'Workspace convention'))
+    await commitInjection(store, scope, source.id)
+    await store.recordFeedback({
+      sessionId: 'session-1', layer: 'workspace', memoryId: source.id, outcome: 'helpful',
+    })
+
+    const promoted = await store.promote(scope, source.id)
+
+    expect((await store.read(scope, source.id))?.rank).toBe(1)
+    expect((await store.read({ kind: 'global' }, promoted.id))?.rank).toBe(0)
+  })
+
+  it.each([
+    ['helpful', 1],
+    ['unhelpful', -1],
+    ['incorrect', -1],
+  ] as const)('applies %s feedback without changing content or lifecycle metadata', async (outcome, delta) => {
+    const store = await open(await tempRoot())
+    const scope: MemoryScope = { kind: 'global' }
+    const entry = await store.upsert(input(scope, 'Feedback invariant'))
+    await commitInjection(store, scope, entry.id)
+    await store.updateSessionState('session-1', state => {
+      state.distillationCursor = {
+        lastEventSeq: 17,
+        offset: 23,
+        updatedAt: '2026-10-26T01:00:00.000Z',
+      }
+    })
+    const before = (await store.read(scope, entry.id))!
+    const beforeRevision = store.list(scope).revision
+    const beforeMeta = store.getMeta()
+    const beforeCursor = store.getSessionState('session-1').distillationCursor
+
+    const result = await store.recordFeedback({
+      sessionId: 'session-1', layer: 'global', memoryId: entry.id, outcome,
+    })
+
+    expect(result).toEqual({ status: 'recorded', rank: delta })
+    expect(await store.read(scope, entry.id)).toEqual({ ...before, rank: before.rank + delta })
+    expect(store.list(scope).revision).toBe(beforeRevision)
+    expect(store.getMeta()).toEqual(beforeMeta)
+    expect(store.getSessionState('session-1').distillationCursor).toEqual(beforeCursor)
+  })
+
+  it('accepts one feedback per Session, injection and memory across restarts', async () => {
+    const root = await tempRoot()
+    const first = await open(root)
+    const scope: MemoryScope = { kind: 'global' }
+    const entry = await first.upsert(input(scope, 'Restart-safe feedback'))
+    await commitInjection(first, scope, entry.id)
+
+    expect(await first.recordFeedback({
+      sessionId: 'session-1', layer: 'global', memoryId: entry.id, outcome: 'helpful',
+    })).toEqual({ status: 'recorded', rank: 1 })
+    expect(await first.recordFeedback({
+      sessionId: 'session-1', layer: 'global', memoryId: entry.id, outcome: 'incorrect',
+    })).toEqual({ status: 'duplicate', rank: 1 })
+    await first.close()
+
+    const second = await open(root)
+    expect(await second.recordFeedback({
+      sessionId: 'session-1', layer: 'global', memoryId: entry.id, outcome: 'helpful',
+    })).toEqual({ status: 'duplicate', rank: 1 })
+    await commitInjection(second, scope, entry.id, 'injection-2')
+    expect(await second.recordFeedback({
+      sessionId: 'session-1', layer: 'global', memoryId: entry.id, outcome: 'helpful',
+    })).toEqual({ status: 'recorded', rank: 2 })
+  })
+
+  it('rejects feedback without an enabled layer and a matching committed snapshot entry', async () => {
+    const store = await open(await tempRoot())
+    const globalScope: MemoryScope = { kind: 'global' }
+    const entry = await store.upsert(input(globalScope, 'Eligible only after commit'))
+    const feedback = {
+      sessionId: 'session-1', layer: 'global', memoryId: entry.id, outcome: 'helpful',
+    } as const
+
+    expect(await store.recordFeedback(feedback)).toEqual({ status: 'disabled' })
+    await store.updateSessionState('session-1', state => { state.layers.global.enabled = true })
+    expect(await store.recordFeedback(feedback)).toEqual({ status: 'not-injected' })
+    await store.updateSessionState('session-1', state => {
+      state.layers.global.committed.push({
+        injectionId: 'legacy-injection', revision: 1, tokens: 42,
+        committedAt: '2026-10-26T00:00:00.000Z',
+      })
+    })
+    expect(await store.recordFeedback(feedback)).toEqual({ status: 'not-injected' })
+    await store.remove(globalScope, entry.id)
+    await commitInjection(store, globalScope, entry.id, 'deleted-injection')
+    expect(await store.recordFeedback(feedback)).toEqual({ status: 'not-found' })
+  })
+
+  it('does not let a workspace layer feedback a global memory with the same id', async () => {
+    const store = await open(await tempRoot())
+    const globalScope: MemoryScope = { kind: 'global' }
+    const workspaceScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
+    const entry = await store.upsert(input(globalScope, 'Global only'))
+    await commitInjection(store, workspaceScope, entry.id)
+
+    expect(await store.recordFeedback({
+      sessionId: 'session-1', layer: 'workspace', memoryId: entry.id, outcome: 'helpful',
+    })).toEqual({ status: 'not-found' })
+    expect((await store.read(globalScope, entry.id))?.rank).toBe(0)
+  })
+
   it('lists only independent global entries and does not advance global revision for workspace writes', async () => {
     const store = await open(await tempRoot())
     const globalScope: MemoryScope = { kind: 'global' }

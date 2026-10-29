@@ -330,6 +330,26 @@ describe('MemoryContextService single-snapshot protocol', () => {
 })
 
 describe('MemoryContextService snapshots and detail reads', () => {
+  it('persists only rendered memory ids and carries them into the committed injection', async () => {
+    const { store, context, agent, claim, record } = await setup()
+    const omitted = await addGlobalMemory(store, `Omitted ${'x'.repeat(5_000)}`)
+    const rendered = await addGlobalMemory(store, 'Rendered memory')
+
+    await context.enable(agent, 'global')
+    const desired = context.getSessionState('session-1').layers.global.desired[0]!
+    expect(desired.memoryIds).toEqual([rendered.id])
+    expect(desired.snapshot).toContain(rendered.id)
+    expect(desired.snapshot).not.toContain(omitted.id)
+    expect(desired.snapshot).toContain('snail_memory_feedback')
+
+    const [message] = claim()
+    await preStep(context, agent, [message!, userMessage('use the rendered memory')])
+    record(message!)
+    await context.handleSessionEvent('session-1', { type: 'user/message', data: message! })
+
+    expect(context.getSessionState('session-1').layers.global.committed[0]?.memoryIds).toEqual([rendered.id])
+  })
+
   it('renders only independent global entries without workspace aggregate references', async () => {
     const { store, context, agent } = await setup()
     for (const [id, summary] of [[workspaceId('workspace-1'), 'First project rule'], [workspaceId('workspace-2'), 'Second project rule']] as const) {

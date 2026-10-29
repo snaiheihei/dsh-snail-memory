@@ -9,6 +9,8 @@ import { readDetailRecord, removeUnreferencedDetailRecords, writeDetailRecord } 
 import type {
   DesiredInjection,
   MemoryEntry,
+  MemoryFeedbackInput,
+  MemoryFeedbackResult,
   MemoryId,
   MemoryIndex,
   MemoryIndexEntry,
@@ -296,6 +298,7 @@ export class MemoryStore {
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
         revision,
+        rank: existing?.rank ?? 0,
         ...(existing?.promotedFrom === undefined ? {} : { promotedFrom: existing.promotedFrom }),
       }
       draft.entries = [...draft.entries.filter(candidate => candidate.id !== entry.id), storedEntry(entry)]
@@ -335,6 +338,7 @@ export class MemoryStore {
         updatedAt: timestamp,
         lastVerifiedAt: source.lastVerifiedAt,
         revision: this.nextScopeRevision(draft, { kind: 'global' }),
+        rank: 0,
         sourceRefs: structuredClone(source.sourceRefs),
         promotedFrom: { workspaceId: scope.workspaceId, id: source.id },
         ...(source.expiresAt === undefined ? {} : { expiresAt: source.expiresAt }),
@@ -357,6 +361,46 @@ export class MemoryStore {
       await writeDetailRecord(this.paths, entry)
       await writeDetailProjection(this.paths, entry)
     })  }
+
+  async recordFeedback(input: MemoryFeedbackInput): Promise<MemoryFeedbackResult> {
+    return this.transaction('memory/feedback', draft => {
+      const session = draft.sessions[input.sessionId]
+      const layer = session?.layers[input.layer]
+      if (!session || !layer?.enabled) return { status: 'disabled' }
+      const workspaceId = input.layer === 'workspace'
+        ? session.selectedWorkspaceId ?? session.workspaceId
+        : undefined
+      if (input.layer === 'workspace' && !workspaceId) return { status: 'not-injected' }
+      const scope: MemoryScope = input.layer === 'global'
+        ? { kind: 'global' }
+        : { kind: 'workspace', workspaceId: workspaceId! }
+      const entryIndex = draft.entries.findIndex(entry => entry.id === input.memoryId
+        && scopeKey(entry.scope) === scopeKey(scope))
+      if (entryIndex < 0) return { status: 'not-found' }
+      let committedIndex = -1
+      for (let index = layer.committed.length - 1; index >= 0; index -= 1) {
+        const candidate = layer.committed[index]!
+        const matches = candidate.memoryIds?.includes(input.memoryId) === true
+          && (scope.kind === 'global'
+            ? candidate.workspaceId === undefined
+            : (candidate.workspaceId ?? session.workspaceId) === scope.workspaceId)
+        if (!matches) continue
+        committedIndex = index
+        break
+      }
+      if (committedIndex < 0) return { status: 'not-injected' }
+      const committed = layer.committed[committedIndex]!
+      const currentRank = draft.entries[entryIndex]!.rank
+      if (committed.feedback?.[input.memoryId]) return { status: 'duplicate', rank: currentRank }
+      const rank = currentRank + (input.outcome === 'helpful' ? 1 : -1)
+      draft.entries[entryIndex] = { ...draft.entries[entryIndex]!, rank }
+      layer.committed[committedIndex] = {
+        ...committed,
+        feedback: { ...committed.feedback, [input.memoryId]: input.outcome },
+      }
+      return { status: 'recorded', rank }
+    })
+  }
 
   async remove(scope: MemoryScope, id: MemoryId): Promise<boolean> {
     return this.transaction('memory/forget', draft => {

@@ -1,5 +1,5 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { MemoryIndex, MemoryLayer, MemoryScope } from '../store/types.js'
+import type { MemoryId, MemoryIndex, MemoryLayer, MemoryScope } from '../store/types.js'
 
 const DAY_MS = 86_400_000
 const HEADER_PATTERN = /^<!-- snail-memory: (\{.*\}) -->\n/
@@ -42,7 +42,16 @@ export function snapshotMetadata(message: UserMessage): SnapshotMetadata | null 
   }
 }
 
+export interface RenderedSnapshot {
+  readonly snapshot: string
+  readonly memoryIds: readonly MemoryId[]
+}
+
 export function renderSnapshot(input: SnapshotInput): string {
+  return renderSnapshotWithIds(input).snapshot
+}
+
+export function renderSnapshotWithIds(input: SnapshotInput): RenderedSnapshot {
   const metadata: SnapshotMetadata = {
     injectionId: input.injectionId,
     layer: input.layer,
@@ -59,16 +68,22 @@ export function renderSnapshot(input: SnapshotInput): string {
     '## 核心摘要与索引',
     '',
   ]
-  let kept = 0
+  const memoryIds: MemoryId[] = []
   for (const entry of input.index.entries) {
     const ageDays = Math.max(0, Math.floor((input.now.getTime() - Date.parse(entry.lastVerifiedAt)) / DAY_MS))
     const line = `- [${entry.category}] [${ageDays} 天前] [${entry.id}] ${entry.summary}`
     if (input.maxTokens !== undefined && estimateTokens([...lines, line].join('\n')) > input.maxTokens) break
     lines.push(line)
-    kept += 1
+    memoryIds.push(entry.id)
   }
   if (input.index.entries.length === 0) lines.push('- （当前无记忆条目）')
-  if (kept < input.index.entries.length) lines.push(`- （另有 ${input.index.entries.length - kept} 条因注入预算省略，可按 id 按需读取）`)
-  lines.push('', '详情仅在确有需要时通过 snail_memory_read 按 id 按需读取。')
-  return `${lines.join('\n')}\n`
+  if (memoryIds.length < input.index.entries.length) {
+    lines.push(`- （另有 ${input.index.entries.length - memoryIds.length} 条因注入预算省略，可按 id 按需读取）`)
+  }
+  lines.push(
+    '',
+    '详情仅在确有需要时通过 snail_memory_read 按 id 按需读取。',
+    '使用反馈：仅在实际采用某条记忆，或明确发现其无帮助/不正确时调用 snail_memory_feedback；不要因注入或读取本身评分，也不要批量自评。',
+  )
+  return { snapshot: `${lines.join('\n')}\n`, memoryIds }
 }

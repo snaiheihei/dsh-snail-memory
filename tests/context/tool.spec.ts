@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createMemoryReadTool } from '../../src/context/tool.js'
+import { createMemoryFeedbackTool, createMemoryReadTool } from '../../src/context/tool.js'
 import { MemoryContextService } from '../../src/context/service.js'
 import { MemoryStore } from '../../src/store/store.js'
 
@@ -107,5 +107,49 @@ describe('snail_memory_read', () => {
     expect(selected.detail).not.toContain('a')
     expect(selected.detail).not.toContain('c')
     expect(await tool.execute({ layer: 'global', memory_id: entry.id, chunk_id: 'part-999' }, exec)).toEqual({ found: false })
+  })
+})
+
+describe('snail_memory_feedback', () => {
+  it('records enum feedback once per committed injection without exposing memory content', async () => {
+    const { store, context, agent, exec } = await setup()
+    const entry = await store.upsert({
+      scope: { kind: 'global' },
+      category: 'preference', summary: 'Useful memory', detail: 'Sensitive detail must not be returned',
+      sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    const omitted = await store.upsert({
+      scope: { kind: 'global' },
+      category: 'preference', summary: 'Not in this snapshot', detail: 'Not eligible',
+      sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    await context.enable(agent, 'global')
+    const desired = context.getSessionState('session-1').layers.global.desired[0]!
+    await store.updateSessionState('session-1', state => {
+      state.layers.global.committed.push({
+        injectionId: desired.injectionId,
+        revision: desired.revision,
+        memoryIds: [entry.id],
+        tokens: 42,
+        committedAt: '2026-10-26T00:00:00.000Z',
+      })
+      state.activeDesired = null
+    })
+    const tool = createMemoryFeedbackTool(context)
+
+    const recorded = await tool.execute({
+      layer: 'global', memory_id: entry.id, outcome: 'helpful',
+    }, exec)
+    const duplicate = await tool.execute({
+      layer: 'global', memory_id: entry.id, outcome: 'incorrect',
+    }, exec)
+    const rejected = await tool.execute({
+      layer: 'global', memory_id: omitted.id, outcome: 'helpful',
+    }, exec)
+
+    expect(recorded).toEqual({ status: 'recorded', rank: 1 })
+    expect(duplicate).toEqual({ status: 'duplicate', rank: 1 })
+    expect(rejected).toEqual({ status: 'not-injected' })
+    expect(JSON.stringify([recorded, duplicate, rejected])).not.toContain('Sensitive detail')
   })
 })

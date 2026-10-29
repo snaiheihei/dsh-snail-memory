@@ -5,6 +5,8 @@ import { activeInjection, type MemoryStore } from '../store/store.js'
 import type {
   DesiredInjection,
   MemoryEntry,
+  MemoryFeedbackOutcome,
+  MemoryFeedbackResult,
   MemoryId,
   MemoryIndex,
   MemoryLayer,
@@ -12,7 +14,7 @@ import type {
   SessionMemoryState,
   WorkspaceId,
 } from '../store/types.js'
-import { estimateTokens, renderSnapshot, snapshotMetadata, type SnapshotMetadata } from './snapshot.js'
+import { estimateTokens, renderSnapshotWithIds, snapshotMetadata, type SnapshotMetadata } from './snapshot.js'
 
 export interface InjectionInbox {
   readonly nextTurn: readonly UserMessage[]
@@ -235,6 +237,15 @@ export class MemoryContextService {
     return this.store.read(this.scopeFor(sessionId, layer), id)
   }
 
+  async recordFeedback(
+    sessionId: string,
+    layer: MemoryLayer,
+    id: MemoryId,
+    outcome: MemoryFeedbackOutcome,
+  ): Promise<MemoryFeedbackResult> {
+    return this.store.recordFeedback({ sessionId, layer, memoryId: id, outcome })
+  }
+
   private async commitInjection(
     sessionId: string,
     message: UserMessage,
@@ -256,6 +267,7 @@ export class MemoryContextService {
         injectionId: metadata.injectionId,
         revision: metadata.revision,
         ...(desired.workspaceId === undefined ? {} : { workspaceId: desired.workspaceId }),
+        ...(desired.memoryIds === undefined ? {} : { memoryIds: [...desired.memoryIds] }),
         tokens: estimateTokens(text ?? desired.snapshot),
         committedAt: this.now().toISOString(),
       })
@@ -285,7 +297,7 @@ export class MemoryContextService {
   ): DesiredInjection {
     const injectionId = randomUUID()
     const createdAt = this.now().toISOString()
-    const snapshot = renderSnapshot({
+    const rendered = renderSnapshotWithIds({
       injectionId,
       layer,
       scope,
@@ -298,7 +310,8 @@ export class MemoryContextService {
       injectionId,
       revision: index.revision,
       ...(scope.kind === 'workspace' ? { workspaceId: scope.workspaceId } : {}),
-      snapshot,
+      snapshot: rendered.snapshot,
+      memoryIds: rendered.memoryIds,
       createdAt,
       automatic,
     }

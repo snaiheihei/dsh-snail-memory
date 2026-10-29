@@ -41,6 +41,7 @@ export const ENTRY: MemoryEntry = {
   updatedAt: '2026-01-02T03:04:05.000Z',
   lastVerifiedAt: '2026-01-02T03:04:05.000Z',
   revision: 2,
+  rank: 0,
   sourceRefs: [{ sessionId: 'session-1', eventSeqs: [3, 4] }],
 }
 

@@ -1,5 +1,7 @@
 # Spec: memory-context
 
+> 2026-10-29 rank 反馈修订：快照记录实际渲染的 memory ID 并提供简短反馈提示；新增 `snail_memory_feedback`，只允许对已提交快照中实际出现的条目按 Session + injection + memory 幂等反馈。
+>
 > 2026-10-28 独立 Global 修订：global 快照与详情只读取独立 Global 条目，不再聚合或要求来源 workspace；三态单选、单 active desired 和跨 workspace 召回保持不变。
 >
 > 2026-10-28 跨 workspace 修订：workspace 召回可选择任意已注册项目；`selectedWorkspaceId` 与 Session 写入 owner 分离，refresh 按目标项目独立 revision 对账。
@@ -25,11 +27,11 @@ npm run lint
 
 ```text
 src/context/message-source.ts → snail-memory MessageSourceMap 合并
-src/context/snapshot.ts       → 摘要、索引、时效与不可信提示渲染
+src/context/snapshot.ts       → 摘要、实际渲染 ID、时效、不可信与反馈提示渲染
 src/context/injection.ts      → desired/queued/committed 对账
-src/context/service.ts        → enable、refresh、恢复和统计
-src/context/tool.ts           → snail_memory_read 受限详情与分片读取工具
-tests/context/                → latch、revision、顺序、恢复和分片读取测试
+src/context/service.ts        → enable、refresh、恢复、统计和反馈委托
+src/context/tool.ts           → snail_memory_read 详情/分片读取与 snail_memory_feedback 工具
+tests/context/                → latch、revision、顺序、恢复、分片读取和反馈资格测试
 ```
 
 ## Code Style
@@ -54,6 +56,8 @@ agent.inject(createUserMessage({
 - 新会话无状态即两层 disabled；关闭/workspace/global 为三态单选。每个 Session 同时最多一个 `activeDesired = { layer, injectionId }`，历史 desired 仅用于准入后的提交对账，不再都具有待注入资格。
 - enable(workspace) 可携带任意已注册 `workspaceId`，包括非 Session 所属项目；Ungrouped Session 也可显式选择已注册项目。`selectedWorkspaceId` 只决定 workspace 快照、refresh 和详情读取，原 `workspaceId` 仍是 Session 自动蒸馏与显式写入归属，召回选择不得覆盖它。
 - enable 原子持久化层选择、召回项目和 active desired，再尝试排队；只有重复选择当前层且 workspace 选择相同才幂等恢复，切换层或召回项目时按目标 scope 当前 revision 渲染新代，不能复用旧 automatic desired。
+- 快照渲染同时返回正文与 `memoryIds`，只有实际加入预算内快照的父条目才进入清单；被 token 预算停止的条目不得进入。commit 时把同一清单复制到 committed injection，旧记录缺省该字段时保持兼容但不授予反馈资格。
+- 快照尾部包含简短反馈说明：仅在实际采用某条记忆，或明确发现其无帮助/不正确时调用 `snail_memory_feedback`；不要因注入或读取本身评分，也不要批量自评。
 - refresh 仅在当前 scope revision 高于该 scope 最新 desired revision 时创建新代；不同 workspace 的 revision 分别对账，不得跨项目取最大值。同一发送前多次 refresh 只保留最新 active desired。disable 清除 active desired。
 - restore 先按 Session 中已提交的 Snail `user/message` 对账，再通过公开 `agent.inbox.replace/remove` 收敛未 claim 消息：保留一个 active 快照，移除 stale/duplicate 快照，缺少 active 时才 `agent.inject()`。普通用户和其他插件消息不得被修改。
 - `agent/pre-step` 必须先 `await next()`，再过滤最终 enter decision。每个 turn 最多准入一份与 active desired 匹配的 Snail 快照；已 claim 的 stale 快照在此拦截，新 active 等后续提交，不插入当前 decision。reject decision 原样返回。
@@ -62,6 +66,14 @@ agent.inject(createUserMessage({
 - 已提交快照和 committed 历史永不 replace 或追溯改写；忘记只影响未来快照和详情读取，也不改变蒸馏游标。
 - `snail_memory_read` 仅接受当前 Session 已启用 scope 和已知 MemoryId；workspace 层按 `selectedWorkspaceId` 读取，Global 层直接读取独立 Global 条目，均不开放任意路径。
 - `readDetail()` 异步按父索引中的 id/revision 读取目标权威详情记录；enable、refresh 和快照渲染只消费内存父索引，不预读完整详情。工具输出契约不因存储懒加载而改变。
+
+### 使用反馈契约
+
+- `snail_memory_feedback` 参数仅为 `layer`、`memory_id`、`outcome`，outcome 枚举为 `helpful | unhelpful | incorrect`；Session 从 `exec.agent` 获取，workspace 由 Host 当前召回选择推导。工具不接收任意 delta、reason、injectionId、workspace 或正文。
+- `helpful` 将 rank +1，`unhelpful` 与 `incorrect` 将 rank -1。`incorrect` 只是负反馈，不自动纠正或删除记忆，rank 也不表示内容已经验证为正确。
+- 只有目标 memoryId 实际出现在当前 Session 对应 layer 的 committed 快照中才可反馈；仅 desired/queued、被预算省略、仅被读取、旧无 memoryIds 的快照均返回 not-injected。未启用、目标不存在或不属于当前 scope 分别返回 disabled/not-found。
+- 同一 Session + injectionId + memoryId 只接受一次，重复返回 duplicate 和当前 rank；重启后仍由 committed 回执防重，新的 committed injection 可再次反馈。反馈结果只包含 status 和可选 rank，不返回记忆正文。
+- rank-only 更新走 Store 专用原子事务，不改变内容 revision、scope revision、内容时间、dirty、调度、游标、active desired 或快照顺序；Store 列表和模型召回继续按 updatedAt/id，只有 Web 管理列表按 rank 排序。
 
 ### 大详情读取契约
 
@@ -90,7 +102,9 @@ agent.inject(createUserMessage({
 - queued 后重启最多恢复一份；Session 已提交但 committed 尚未落盘的崩溃窗口不会重复注入；重复 session/event 幂等。
 - workspace 缺失/删除、未注册项目和详情工具越权。
 - 大详情默认清单无正文、指定单片无其他正文、未知分片未找到、未分片读取完全兼容。
-- 快照包含 revision、生成时间、天数提醒、不可信提示，且正文可重建。
+- 快照包含 revision、生成时间、天数提醒、不可信提示与反馈说明，且正文可重建。
+- desired/committed 只保存实际渲染的 memoryIds，预算省略条目不进入；反馈接受、重复、未注入、未启用、错误 scope、重启幂等和新 injection 再反馈均有覆盖。
+- 反馈工具结果不泄漏 summary/detail，rank 更新不改变注入和生命周期状态。
 - 验证估算 token 只统计已提交 injection。
 
 ## Boundaries
@@ -105,6 +119,7 @@ agent.inject(createUserMessage({
 - enable 后最新可用摘要只自动注入一次；跨 workspace 切换仍保持单 active，refresh 按当前项目独立 revision 对账。
 - 所有进入模型的记忆均表现为普通 Session 用户/工具事件。
 - 大详情默认读取不返回正文，单片读取只返回目标分片；未分片与越权行为无回归。
+- 反馈只能针对 committed 快照中实际渲染的条目，同一 injection 内幂等且重启可恢复；rank 不改变召回、刷新或快照注入顺序。
 - 无 system prompt 头部污染，无记忆删除或分片引起的对话修改。
 
 ## Open Questions

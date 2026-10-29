@@ -1,5 +1,7 @@
 # Spec: memory-safety
 
+> 2026-10-29 rank 反馈修订：反馈工具只接受枚举 outcome 与受限 ID，不开放自由文本 reason 或任意 delta；结果不返回记忆正文，并像其他模型可见工具结果一样保留在 Session、但从后续蒸馏输入排除。
+
 ## Objective
 
 在记忆候选进入持久化或辅助模型之前实施来源准入、秘密扫描、脱敏和不可信内容提示。安全模块无存储和 LLM 依赖，可独立测试。
@@ -41,6 +43,12 @@ export function sanitizeBeforeUse(input: string): SanitizedText {
 
 扫描器返回结构化 finding，不返回被检测秘密原文。扫描先执行总字符预算，正则必须避免灾难性回溯；局部脱敏长度上限不得成为绕扫手段。赋值凭据超过 512 字符、PEM 未闭合或超过块预算时生成 `reject` finding 并保守失败，拒绝异常使用实际 finding 类型且不保留秘密正文。候选 finding 按起点和长度排序后，只与最后一个已接受 finding 比较，去重过程为 O(F)；重叠的 `reject` 会取代已接受的 `redact`，拒绝语义不得被去重吞掉。
 
+## Feedback Boundary
+
+- `snail_memory_feedback` 只接受当前启用 layer、父 memory ID 和 `helpful | unhelpful | incorrect` 枚举；Host 从工具执行上下文取得 Session，模型不能指定 Session、injection、workspace 或任意 rank delta。
+- 工具不接收自由文本 reason，不返回 summary/detail/sourceRefs，只返回稳定 status 和可选 rank。`incorrect` 仅记录 -1 反馈，不自动纠正、删除或保留条目。
+- 工具调用和结果仍是普通 Session 证据，不建立隐藏反馈通道；后续蒸馏投影按 callId 排除其结果，避免反馈元数据自我强化。资格、幂等和原子更新由 Host Store 保证，不能依赖提示词或 UI 防刷。
+
 ## Testing Strategy
 
 - 覆盖私钥块、JWT、常见 API key、带密码 URL、Authorization header 和赋值形式 token。
@@ -51,6 +59,7 @@ export function sanitizeBeforeUse(input: string): SanitizedText {
 - 验证完整候选的原始 JSON、嵌套元数据、字符串键和额外字段均参与模型输出回扫，同时保留正文原始文本的检测能力。
 - 验证排序后的 finding 去重只检查最后一个已接受项，重叠私钥/凭据不会重复脱敏；Authorization 等较宽 redact 与超长凭据 reject 重叠时仍必须保守拒绝。
 - 验证任何 LLM 输入和持久化入口都调用同一安全策略。
+- 验证反馈工具拒绝 schema 外参数，输出不含记忆正文；工具结果保留在 Session 但不进入后续蒸馏转录。
 
 ## Boundaries
 
@@ -63,6 +72,7 @@ export function sanitizeBeforeUse(input: string): SanitizedText {
 - 高置信秘密以 `[REDACTED:<kind>]` 替代；私钥块、超限赋值凭据等不可安全局部处理的内容被拒绝，不因长度或未闭合边界而漏扫。
 - 自动蒸馏仅接受 Session 来源，显式记住也不能绕过扫描。
 - 注入文本包含不可信参考数据和按天数计算的时效提醒。
+- 反馈工具不引入自由文本或正文回传通道，结果有 Session 证据但不回流为蒸馏输入。
 - 测试不将样例秘密写入真实 snail_memory。
 
 ## Open Questions

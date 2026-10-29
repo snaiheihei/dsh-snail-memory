@@ -32,6 +32,31 @@ describe('writeJsonAtomic', () => {
 })
 
 describe('readState', () => {
+  it('defaults missing or invalid legacy ranks to zero without a format migration', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-json-'))
+    roots.push(root)
+    const path = join(root, 'state.v2.json')
+    const state = emptyState()
+    const timestamp = '2026-10-26T00:00:00.000Z'
+    const entry = {
+      scope: { kind: 'global' }, category: 'preference', summary: 'Legacy rank',
+      createdAt: timestamp, updatedAt: timestamp, lastVerifiedAt: timestamp,
+      revision: 1, sourceRefs: [], detailChars: 0,
+    }
+    await writeJsonAtomic(path, {
+      ...state,
+      entries: [
+        { ...entry, id: 'missing-rank' },
+        { ...entry, id: 'invalid-rank', rank: 'not-a-number' },
+      ],
+    })
+
+    const restored = await readState(path)
+
+    expect(restored?.formatVersion).toBe(2)
+    expect(restored?.entries.map(item => item.rank)).toEqual([0, 0])
+  })
+
   it('assigns a stable intent ID to legacy pending records', async () => {
     const root = await mkdtemp(join(tmpdir(), 'snail-memory-json-'))
     roots.push(root)

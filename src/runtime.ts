@@ -50,11 +50,11 @@ export interface DistillationBatch {
 }
 
 function projectTranscriptEvents(events: readonly TranscriptEvent[]): ProjectedTranscriptEvent[] {
-  const memoryReadCallIds = new Set(events.flatMap(event => {
+  const memoryToolNames = new Set(['snail_memory_read', 'snail_memory_feedback'])
+  const memoryToolCallIds = new Set(events.flatMap(event => {
     const data = record(event.data)
-    return event.type === 'tool/call' && data.name === 'snail_memory_read' && typeof data.callId === 'string'
-      ? [data.callId]
-      : []
+    return event.type === 'tool/call' && typeof data.name === 'string' && memoryToolNames.has(data.name)
+      && typeof data.callId === 'string' ? [data.callId] : []
   }))
   return events.flatMap(event => {
     if (!['user/message', 'assistant/message', 'tool/result'].includes(event.type)) return []
@@ -62,7 +62,7 @@ function projectTranscriptEvents(events: readonly TranscriptEvent[]): ProjectedT
     if (event.type === 'user/message' && record(data.source).kind !== 'user') return []
     if (event.type === 'tool/result') {
       const callId = record(record(data.message).source).callId
-      if (typeof callId === 'string' && memoryReadCallIds.has(callId)) return []
+      if (typeof callId === 'string' && memoryToolCallIds.has(callId)) return []
     }
     const text = textContent(event.type === 'user/message' ? data : data.message)
     if (!text) return []

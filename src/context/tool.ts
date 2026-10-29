@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { chunkMemoryDetail } from '../store/chunks.js'
-import { memoryId, type MemoryLayer } from '../store/types.js'
+import { memoryId, type MemoryFeedbackOutcome, type MemoryLayer } from '../store/types.js'
 import type { MemoryContextService } from './service.js'
 import { estimateTokens } from './snapshot.js'
 
@@ -84,6 +84,54 @@ export function createMemoryReadTool(memories: MemoryContextService) {
   })
 }
 
+export function createMemoryFeedbackTool(memories: MemoryContextService) {
+  return defineTool({
+    name: 'snail_memory_feedback',
+    description: 'Record one usage feedback for a memory from a committed snapshot. Use helpful only when the memory was actually applied; use unhelpful or incorrect for a concrete negative observation. Do not score merely because a snapshot was injected or read.',
+    parameters: {
+      layer: { type: 'string', required: true, enum: ['global', 'workspace'], description: 'Enabled memory layer containing the committed snapshot.' },
+      memory_id: { type: 'string', required: true, description: 'Memory id actually rendered in the committed snapshot.' },
+      outcome: { type: 'string', required: true, enum: ['helpful', 'unhelpful', 'incorrect'], description: 'Usage feedback; the plugin maps this to rank +1 or -1.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', required: true, enum: ['recorded', 'duplicate', 'disabled', 'not-injected', 'not-found'] },
+          rank: { type: 'integer' },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.status === 'recorded'
+          ? `Feedback recorded. Current rank: ${value.rank ?? 0}.`
+          : value.status === 'duplicate'
+            ? `Feedback was already recorded for this memory and snapshot. Current rank: ${value.rank ?? 0}.`
+            : value.status === 'disabled'
+              ? 'The selected memory layer is not enabled for this Session.'
+              : value.status === 'not-injected'
+                ? 'The memory was not present in a committed snapshot for this Session.'
+                : 'Memory not found in the selected layer.',
+      }],
+    },
+    async execute(args, exec) {
+      const sessionId = exec.agent?.session.id
+      if (!sessionId) return { status: 'disabled' as const }
+      return memories.recordFeedback(
+        sessionId,
+        args.layer as MemoryLayer,
+        memoryId(args.memory_id),
+        args.outcome as MemoryFeedbackOutcome,
+      )
+    },
+  })
+}
+
 export function registerMemoryReadTool(ctx: Context, memories: MemoryContextService): () => void {
   return ctx.tools.register(createMemoryReadTool(memories))
+}
+
+export function registerMemoryFeedbackTool(ctx: Context, memories: MemoryContextService): () => void {
+  return ctx.tools.register(createMemoryFeedbackTool(memories))
 }

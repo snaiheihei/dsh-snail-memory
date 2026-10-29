@@ -91,6 +91,15 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 - writer 本地 read 与写入串行；第二 Host 在 read 前刷新父状态并在记录 ENOENT 时重试。补充父状态失败、索引失败重开恢复、只读 v1、跨 Host 纠正/删除和 read/remove 竞争回归测试。
 - 已实际通过 28 个测试文件、124 项测试，以及 typecheck、lint、build 和 `git diff --check`。本轮未向真实 Host 安装新构建，也未重新执行真实 UI/模型 E2E；懒加载及恢复结论来自自动化与故障注入验证。
 
+### 条目 rank 与 committed 使用反馈增量（2026-10-29）
+
+- 父条目新增默认 0 的整数 rank，旧 v2 状态缺失或非法时恢复 0；内容纠正保留已有 ID 的 rank，Promote 新 Global 副本从 0 开始，consolidation 保留目标 rank、不相加被取代条目。
+- desired/committed injection 保存 token 预算内实际渲染的 memoryIds；新增 `snail_memory_feedback`，仅接受 layer、memory_id 和 helpful/unhelpful/incorrect，由 Host 推导 Session 与召回 scope。反馈结果只含稳定状态和可选 rank，不返回记忆正文。
+- 只有 committed 快照实际包含的条目可反馈；同一 Session + injection + memory 通过持久回执跨重启幂等，新 committed injection 可再次反馈。Store 专用事务同时完成资格校验、rank ±1 和回执写入，不修改内容、条目/scope revision、内容时间、dirty、调度、游标或快照。
+- read 与 feedback 工具结果均从后续蒸馏投影排除，普通工具结果保留。Web 列表与详情显示 rank，Client 复制索引后按 rank、内容 updatedAt、id 排序；Store 与快照仍按 updatedAt/id，避免高分自我强化。
+- 已同步 memory-store/context/lifecycle/safety/web Spec、能力地图和记忆演化文档。最终全量自动化为 31 个测试文件、242 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过；首次全量运行有一个既有跨 workspace refresh 用例在并行 I/O 负载下达到 5 秒超时，隔离运行 448ms 通过，未改代码后完整复验全部通过。
+- 本轮未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit。
+
 ## 后续修改 Plan（2026-10-28）
 
 当前运行定案为单一 dsh Client、单 Host。以下事项明确后置，不属于本轮来源汇集、模型输出边界、安全扫描和 Scheduler intent 代际修复：

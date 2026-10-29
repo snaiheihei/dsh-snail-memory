@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryPage } from '../../client/src/MemoryPage.js'
 import { MemoryClientStore } from '../../client/src/store.js'
@@ -52,7 +52,7 @@ describe('MemoryPage', () => {
     expect(screen.getByText('Latest snapshot: revision 1')).toBeTruthy()
     expect(screen.getByText('Use pnpm workspaces')).toBeTruthy()
     expect(screen.getByText('Project convention')).toBeTruthy()
-    expect(screen.getByText('Updated: 2026-01-02 11:04:05 +08:00 · revision 2')).toBeTruthy()
+    expect(screen.getByText('Rank: 0 · Updated: 2026-01-02 11:04:05 +08:00 · revision 2')).toBeTruthy()
     expect(screen.getByText('Sources: session-1 (events 3, 4)')).toBeTruthy()
     expect(screen.queryByText('Workspace references')).toBeNull()
     expect(screen.queryByText(/provider exact usage/i)).toBeNull()
@@ -67,6 +67,33 @@ describe('MemoryPage', () => {
     fireEvent.change(select, { target: { value: 'workspace-2' } })
     await waitFor(() => expect(rpc.calls.some(call => call.method === 'list'
       && JSON.stringify(call.payload).includes('workspace-2'))).toBe(true))
+  })
+
+  it('sorts a copied index by rank, updated time and id, and shows rank in list and details', async () => {
+    const entries = [
+      { ...ENTRY, id: 'memory-c' as typeof ENTRY.id, summary: 'Newer low rank', rank: 1, updatedAt: '2026-01-04T00:00:00.000Z' },
+      { ...ENTRY, id: 'memory-d' as typeof ENTRY.id, summary: 'Same rank B', rank: 2, updatedAt: '2026-01-03T00:00:00.000Z' },
+      { ...ENTRY, id: 'memory-b' as typeof ENTRY.id, summary: 'Older high rank', rank: 2, updatedAt: '2026-01-01T00:00:00.000Z' },
+      { ...ENTRY, id: 'memory-a' as typeof ENTRY.id, summary: 'Same rank A', rank: 2, updatedAt: '2026-01-03T00:00:00.000Z' },
+    ]
+    const rpc = readyRpc()
+      .on('list', ({ scope }) => ({ ...memoryIndex(scope), entries: entries.map(entry => ({ ...entry, scope })) }))
+      .on('read', ({ id }) => entries.find(entry => entry.id === id)!)
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+
+    await screen.findByRole('button', { name: 'View details for Same rank A' })
+    expect(screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent)).toEqual([
+      'Same rank A', 'Same rank B', 'Older high rank', 'Newer low rank',
+    ])
+    expect(entries.map(entry => entry.summary)).toEqual([
+      'Newer low rank', 'Same rank B', 'Older high rank', 'Same rank A',
+    ])
+    expect(screen.getAllByText(/Rank: [12]/)).toHaveLength(4)
+
+    fireEvent.click(screen.getByRole('button', { name: 'View details for Same rank A' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Same rank A' })
+    expect(within(dialog).getByText('Rank: 2')).toBeTruthy()
   })
 
   it('shows an empty state when the Host has no registered workspaces', async () => {

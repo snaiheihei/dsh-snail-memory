@@ -66,6 +66,7 @@ export async function readLegacyState(path: string): Promise<LegacyStoreState | 
 }
 
 function normalizeState<T extends StoreState | LegacyStoreState>(state: T): T {
+  const normalizeRank = (rank: unknown): number => typeof rank === 'number' && Number.isSafeInteger(rank) ? rank : 0
   type LegacyMeta = Omit<MemoryMeta, 'workspaceConsolidation'> & {
     workspaceConsolidation?: Record<string, WorkspaceConsolidationMeta>
     dirty?: boolean
@@ -106,6 +107,7 @@ function normalizeState<T extends StoreState | LegacyStoreState>(state: T): T {
   }
   return {
     ...state,
+    entries: state.entries.map(entry => ({ ...entry, rank: normalizeRank(entry.rank) })),
     scopeRevisions: {
       ...state.scopeRevisions,
       global: legacyGlobal
