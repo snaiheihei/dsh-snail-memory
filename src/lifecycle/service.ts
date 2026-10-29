@@ -10,6 +10,7 @@ import { scanSecrets } from '../safety/scanner.js'
 import type { MemorySettings } from '../contract.js'
 import type { MemoryStore } from '../store/store.js'
 import type { MemoryEntry, MemoryId, MemoryScope, PromoteMemoryResult, UpsertMemoryInput, WorkspaceId } from '../store/types.js'
+import { workspaceId } from '../store/types.js'
 import type { TranscriptEvent } from '../runtime.js'
 
 export interface MaintenanceHost {
@@ -116,7 +117,11 @@ export class MemoryLifecycleService {
   }
 
   runIntent(kind: string): Promise<{ written: number }> {
-    const sessionId = kind.includes(':') ? kind.slice(kind.indexOf(':') + 1) : ''
+    const separator = kind.indexOf(':')
+    const operation = separator < 0 ? kind : kind.slice(0, separator)
+    const sessionId = separator >= 0 && (operation === 'review' || operation === 'idle' || operation === 'stop')
+      ? kind.slice(separator + 1)
+      : ''
     if (this.options.runMaintenance) {
       return this.options.runMaintenance(sessionId, signal => this.executeIntent(kind, signal))
     }
@@ -128,16 +133,23 @@ export class MemoryLifecycleService {
     const route = this.options.route?.()
     const selectedProvider = route?.provider ?? this.options.provider
     const selectedModel = route?.model ?? this.options.modelName
+    const separator = kind.indexOf(':')
+    const operation = separator < 0 ? kind : kind.slice(0, separator)
+    const sessionId = operation === 'review' || operation === 'idle' || operation === 'stop'
+      ? separator < 0 ? '' : kind.slice(separator + 1)
+      : ''
+    let consolidationWorkspaceId: WorkspaceId | undefined
     try {
-      const separator = kind.indexOf(':')
-      const operation = separator < 0 ? kind : kind.slice(0, separator)
-      const sessionId = separator < 0 ? '' : kind.slice(separator + 1)
       if (operation === 'retention') {
         const removed = await this.sweepRetention()
         return { written: removed.length }
       }
       if (operation === 'consolidate') {
-        return { written: await this.consolidateWithResult(undefined, signal) }
+        if (separator >= 0) consolidationWorkspaceId = workspaceId(decodeURIComponent(kind.slice(separator + 1)))
+        const scope: MemoryScope | undefined = consolidationWorkspaceId === undefined
+          ? undefined
+          : { kind: 'workspace', workspaceId: consolidationWorkspaceId }
+        return { written: await this.consolidateWithResult(scope, signal) }
       }
       if (operation === 'global-consolidate') {
         return { written: await this.consolidateWithResult({ kind: 'global' }, signal) }
@@ -147,10 +159,10 @@ export class MemoryLifecycleService {
       }
       let state = this.store.getSessionState(sessionId)
       if (state.workspaceId === undefined) {
-        const workspaceId = this.options.resolveWorkspaceId?.(sessionId)
-        if (workspaceId !== undefined) {
+        const resolvedWorkspaceId = this.options.resolveWorkspaceId?.(sessionId)
+        if (resolvedWorkspaceId !== undefined) {
           state = await this.store.updateSessionState(sessionId, current => {
-            current.workspaceId ??= workspaceId
+            current.workspaceId ??= resolvedWorkspaceId
           })
         }
       }
@@ -166,13 +178,12 @@ export class MemoryLifecycleService {
           ...(state.workspaceId === undefined ? {} : { workspaceId: state.workspaceId }),
           events,
           kind: operation,
-          consolidationCooldownHours: this.getSettings().consolidationCooldownHours,
           now: this.now,
           ...(signal === undefined ? {} : { signal }),
         })
         written += result.written
         if (result.written > 0 && state.workspaceId) {
-          await this.scheduler.markDirty()
+          await this.scheduler.markDirty(state.workspaceId)
           await this.options.onChange?.({
             kind: 'distill',
             scope: { kind: 'workspace', workspaceId: state.workspaceId },
@@ -188,9 +199,14 @@ export class MemoryLifecycleService {
         if (kind === 'global-consolidate') {
           meta.globalDirty = true
           meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.getSettings().globalConsolidationCooldownDays * 86_400_000).toISOString()
-        } else {
-          meta.dirty = true
-          meta.nextConsolidationAt = new Date(this.now().getTime() + this.getSettings().consolidationCooldownHours * 3_600_000).toISOString()
+        } else if (consolidationWorkspaceId !== undefined) {
+          const consolidation = meta.workspaceConsolidation[consolidationWorkspaceId] ??= {
+            dirty: false,
+            nextConsolidationAt: null,
+            lastConsolidationAt: null,
+          }
+          consolidation.dirty = true
+          consolidation.nextConsolidationAt = new Date(this.now().getTime() + this.getSettings().consolidationCooldownHours * 3_600_000).toISOString()
         }
       })
       throw error
@@ -273,7 +289,7 @@ export class MemoryLifecycleService {
 
   private async markChanged(kind: string, scope: MemoryScope, ids: readonly MemoryId[]): Promise<void> {
     if (scope.kind === 'global') await this.scheduler.markGlobalDirty()
-    else await this.scheduler.markDirty()
+    else await this.scheduler.markDirty(scope.workspaceId)
     await this.options.onChange?.({ kind, scope, ids })
   }
 }

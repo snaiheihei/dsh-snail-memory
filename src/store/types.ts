@@ -137,10 +137,14 @@ export interface LifecycleIntent {
   readonly createdAt: string
 }
 
-export interface MemoryMeta {
+export interface WorkspaceConsolidationMeta {
   dirty: boolean
   nextConsolidationAt: string | null
   lastConsolidationAt: string | null
+}
+
+export interface MemoryMeta {
+  workspaceConsolidation: Record<string, WorkspaceConsolidationMeta>
   globalDirty: boolean
   nextGlobalConsolidationAt: string | null
   lastGlobalConsolidationAt: string | null

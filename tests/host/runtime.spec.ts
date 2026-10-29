@@ -111,12 +111,16 @@ describe('dsh runtime adapters', () => {
     for await (const chunk of call.stream({
       provider: 'provider', model: 'model', maxTokens: 128,
       messages: [{ role: 'user', content: [{ type: 'text', text: 'untrusted input' }] }],
+      signal: controller.signal,
     })) chunks.push(chunk)
 
     expect(preparedSignal).toBe(controller.signal)
-    expect(dispatched).toMatchObject(config)
-    expect(dispatched?.system).toContain('untrusted')
-    expect(dispatched?.messages[0]).toMatchObject({ role: 'user' })
+    expect(dispatched).toEqual({
+      ...config,
+      system: expect.stringContaining('untrusted'),
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'untrusted input' }] }],
+      signal: controller.signal,
+    })
     expect(chunks).toEqual([{ type: 'text-delta', index: 0, text: '{"candidates":[]}' }])
   })
 })

@@ -68,6 +68,15 @@ function scopeKey(scope: MemoryScope): string {
   return scope.kind === 'global' ? 'global' : scope.workspaceId
 }
 
+function markWorkspaceDirty(meta: MemoryMeta, id: string): void {
+  const consolidation = meta.workspaceConsolidation[id] ??= {
+    dirty: false,
+    nextConsolidationAt: null,
+    lastConsolidationAt: null,
+  }
+  consolidation.dirty = true
+}
+
 function storedEntry(entry: MemoryEntry): StoredMemoryEntry {
   const stored = { ...entry, detailChars: entry.detail.length } as StoredMemoryEntry & { detail?: string }
   delete stored.detail
@@ -293,7 +302,7 @@ export class MemoryStore {
       if (input.scope.kind === 'workspace') {
         const current = draft.workspaces[input.scope.workspaceId]
         draft.workspaces[input.scope.workspaceId] = { createdAt: current?.createdAt ?? timestamp, updatedAt: timestamp }
-        draft.meta.dirty = true
+        markWorkspaceDirty(draft.meta, input.scope.workspaceId)
       } else {
         draft.meta.globalDirty = true
       }
@@ -356,7 +365,7 @@ export class MemoryStore {
       draft.entries = draft.entries.filter(entry => entry.id !== id)
       this.nextScopeRevision(draft, scope)
       if (scope.kind === 'global') draft.meta.globalDirty = true
-      else draft.meta.dirty = true
+      else markWorkspaceDirty(draft.meta, scope.workspaceId)
       return true
     }, async removed => {
       if (!removed) return

@@ -253,16 +253,16 @@ describe('LifecycleScheduler', () => {
       run: async kind => { runs.push(kind) },
     })
     await scheduler.start()
-    await scheduler.markDirty()
-    expect(store.getMeta().nextConsolidationAt).toBe('2026-10-26T20:00:00.000Z')
+    await scheduler.markDirty('workspace-1')
+    expect(store.getMeta().workspaceConsolidation['workspace-1']?.nextConsolidationAt).toBe('2026-10-26T20:00:00.000Z')
 
     await scheduler.updateConsolidationCooldownHours(2)
-    expect(store.getMeta().nextConsolidationAt).toBe('2026-10-26T02:00:00.000Z')
+    expect(store.getMeta().workspaceConsolidation['workspace-1']?.nextConsolidationAt).toBe('2026-10-26T02:00:00.000Z')
     await vi.advanceTimersByTimeAsync(2 * 3_600_000 - 1)
     expect(runs).toEqual([])
     await vi.advanceTimersByTimeAsync(1)
     await scheduler.drain()
-    expect(runs).toEqual(['consolidate'])
+    expect(runs).toEqual(['consolidate:workspace-1'])
     await scheduler.dispose()
   })
 
@@ -278,17 +278,17 @@ describe('LifecycleScheduler', () => {
       },
     })
     await scheduler.start()
-    await scheduler.markDirty()
-    expect(store.getMeta()).toMatchObject({ dirty: true, nextConsolidationAt: '2026-10-26T06:00:00.000Z' })
+    await scheduler.markDirty('workspace-1')
+    expect(store.getMeta().workspaceConsolidation['workspace-1']).toMatchObject({ dirty: true, nextConsolidationAt: '2026-10-26T06:00:00.000Z' })
 
     await vi.advanceTimersByTimeAsync(6 * 3_600_000 - 1)
     expect(runs).toEqual([])
     await vi.advanceTimersByTimeAsync(1)
     await scheduler.drain()
-    expect(runs).toEqual(['consolidate'])
+    expect(runs).toEqual(['consolidate:workspace-1'])
     expect(store.getMeta().lastError).toBe('Memory consolidation failed')
     expect(store.getMeta().lastError).not.toContain('model unavailable')
-    expect(store.getMeta().nextConsolidationAt).toBe('2026-10-26T12:00:00.000Z')
+    expect(store.getMeta().workspaceConsolidation['workspace-1']?.nextConsolidationAt).toBe('2026-10-26T12:00:00.000Z')
 
     await scheduler.dispose()
     const restarted = new LifecycleScheduler(store, { run: async kind => { runs.push(kind) } })
@@ -296,8 +296,8 @@ describe('LifecycleScheduler', () => {
     await vi.advanceTimersByTimeAsync(6 * 3_600_000)
     await restarted.drain()
 
-    expect(runs).toEqual(['consolidate', 'consolidate'])
-    expect(store.getMeta().dirty).toBe(false)
+    expect(runs).toEqual(['consolidate:workspace-1', 'consolidate:workspace-1'])
+    expect(store.getMeta().workspaceConsolidation['workspace-1']?.dirty).toBe(false)
     expect(store.getMeta().lastError).toBeNull()
     await restarted.dispose()
   })
@@ -312,29 +312,28 @@ describe('LifecycleScheduler', () => {
       run: async kind => { runs.push(kind) },
     })
     await scheduler.start()
-    await scheduler.markDirty()
+    await scheduler.markDirty('workspace-1')
     await scheduler.markGlobalDirty()
 
     expect(store.getMeta()).toMatchObject({
-      dirty: true,
-      nextConsolidationAt: '2026-10-26T20:00:00.000Z',
+      workspaceConsolidation: { 'workspace-1': { dirty: true, nextConsolidationAt: '2026-10-26T20:00:00.000Z' } },
       globalDirty: true,
       nextGlobalConsolidationAt: '2026-11-02T00:00:00.000Z',
     })
     await scheduler.updateGlobalConsolidationCooldownDays(2)
-    expect(store.getMeta().nextConsolidationAt).toBe('2026-10-26T20:00:00.000Z')
+    expect(store.getMeta().workspaceConsolidation['workspace-1']?.nextConsolidationAt).toBe('2026-10-26T20:00:00.000Z')
     expect(store.getMeta().nextGlobalConsolidationAt).toBe('2026-10-28T00:00:00.000Z')
 
     await vi.advanceTimersByTimeAsync(20 * 3_600_000)
     await scheduler.drain()
-    expect(runs).toEqual(['consolidate'])
-    expect(store.getMeta()).toMatchObject({ dirty: false, globalDirty: true })
+    expect(runs).toEqual(['consolidate:workspace-1'])
+    expect(store.getMeta()).toMatchObject({ workspaceConsolidation: { 'workspace-1': { dirty: false } }, globalDirty: true })
 
     await vi.advanceTimersByTimeAsync(28 * 3_600_000)
     await scheduler.drain()
-    expect(runs).toEqual(['consolidate', 'global-consolidate'])
+    expect(runs).toEqual(['consolidate:workspace-1', 'global-consolidate'])
     expect(store.getMeta()).toMatchObject({
-      dirty: false,
+      workspaceConsolidation: { 'workspace-1': { dirty: false } },
       globalDirty: false,
       lastGlobalConsolidationAt: '2026-10-28T00:00:00.000Z',
       nextGlobalConsolidationAt: null,
@@ -362,8 +361,7 @@ describe('LifecycleScheduler', () => {
 
     expect(runs).toEqual(['global-consolidate'])
     expect(store.getMeta()).toMatchObject({
-      dirty: false,
-      nextConsolidationAt: null,
+      workspaceConsolidation: {},
       globalDirty: true,
       nextGlobalConsolidationAt: '2026-11-09T00:00:00.000Z',
       lastError: 'Global memory consolidation failed',
@@ -379,7 +377,7 @@ describe('LifecycleScheduler', () => {
     await restarted.drain()
 
     expect(runs).toEqual(['global-consolidate', 'global-consolidate'])
-    expect(store.getMeta()).toMatchObject({ dirty: false, globalDirty: false, lastError: null })
+    expect(store.getMeta()).toMatchObject({ workspaceConsolidation: {}, globalDirty: false, lastError: null })
     await restarted.dispose()
   })
 
@@ -420,6 +418,127 @@ describe('LifecycleScheduler', () => {
       globalDirty: true,
       nextGlobalConsolidationAt: '2026-11-09T00:00:00.000Z',
     })
+    await scheduler.dispose()
+  })
+
+  it('reschedules every dirty workspace independently when the cooldown changes', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 20,
+      run: async kind => { runs.push(kind) },
+    })
+    await scheduler.start()
+    await scheduler.markDirty('test_only')
+    await scheduler.markDirty('dsh_memory')
+
+    await scheduler.updateConsolidationCooldownHours(2)
+
+    expect(store.getMeta().workspaceConsolidation).toMatchObject({
+      test_only: { dirty: true, nextConsolidationAt: '2026-10-26T02:00:00.000Z' },
+      dsh_memory: { dirty: true, nextConsolidationAt: '2026-10-26T02:00:00.000Z' },
+    })
+    await vi.advanceTimersByTimeAsync(2 * 3_600_000)
+    await scheduler.drain()
+    expect(runs).toEqual(['consolidate:test_only', 'consolidate:dsh_memory'])
+    await scheduler.dispose()
+  })
+
+  it('restores an overdue workspace retry after closing and reopening the store', async () => {
+    const store = await openStore()
+    const root = store.paths.root
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 6,
+      run: async kind => {
+        runs.push(kind)
+        throw new Error('model unavailable')
+      },
+    })
+    await scheduler.start()
+    await scheduler.markDirty('test_only')
+    await vi.advanceTimersByTimeAsync(6 * 3_600_000)
+    await scheduler.drain()
+    await scheduler.dispose()
+    await store.close()
+
+    const restored = await MemoryStore.open({ root, heartbeatMs: 48 * 3_600_000 })
+    stores.push(restored)
+    const restarted = new LifecycleScheduler(restored, {
+      consolidationCooldownHours: 6,
+      run: async kind => { runs.push(kind) },
+    })
+    await restarted.start()
+    await vi.advanceTimersByTimeAsync(6 * 3_600_000)
+    await restarted.drain()
+
+    expect(runs).toEqual(['consolidate:test_only', 'consolidate:test_only'])
+    expect(restored.getMeta().workspaceConsolidation.test_only).toMatchObject({ dirty: false, nextConsolidationAt: null })
+    await restarted.dispose()
+  })
+
+  it('discards a persisted workspace intent when its scope is already clean', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    await store.updateMeta(meta => {
+      meta.workspaceConsolidation = {
+        test_only: { dirty: false, nextConsolidationAt: null, lastConsolidationAt: '2026-10-26T00:00:00.000Z' },
+        dsh_memory: { dirty: true, nextConsolidationAt: '2026-10-26T00:00:00.000Z', lastConsolidationAt: null },
+      }
+      meta.pending['consolidate:test_only'] = {
+        id: 'stale-clean-intent', kind: 'consolidate:test_only', createdAt: '2026-10-26T00:00:00.000Z',
+      }
+    })
+    const scheduler = new LifecycleScheduler(store, {
+      retentionSweepHours: 1_000,
+      run: async kind => { runs.push(kind) },
+    })
+
+    await scheduler.start()
+    await vi.advanceTimersByTimeAsync(0)
+    await scheduler.drain()
+
+    expect(runs).toEqual(['consolidate:dsh_memory'])
+    expect(store.getMeta().pending['consolidate:test_only']).toBeUndefined()
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({ dirty: false })
+    await scheduler.dispose()
+  })
+
+  it('preserves a newer same-workspace schedule while allowing another workspace to finish', async () => {
+    const store = await openStore()
+    let releaseRun!: () => void
+    let markRunStarted!: () => void
+    const runStarted = new Promise<void>(resolve => { markRunStarted = resolve })
+    const runGate = new Promise<void>(resolve => { releaseRun = resolve })
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 20,
+      retentionSweepHours: 1_000,
+      run: async kind => {
+        runs.push(kind)
+        if (kind === 'consolidate:test_only') {
+          markRunStarted()
+          await runGate
+        } else {
+          markRunStarted()
+        }
+      },
+    })
+    await scheduler.start()
+    await scheduler.markDirty('test_only')
+    await scheduler.markDirty('dsh_memory')
+    const advancing = vi.advanceTimersByTimeAsync(20 * 3_600_000)
+    await runStarted
+
+    vi.setSystemTime(new Date('2026-10-26T21:00:00.000Z'))
+    await scheduler.markDirty('test_only')
+    releaseRun()
+    await advancing
+    await scheduler.drain()
+
+    expect(runs).toEqual(['consolidate:test_only', 'consolidate:dsh_memory'])
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({ dirty: true, nextConsolidationAt: '2026-10-27T17:00:00.000Z' })
+    expect(store.getMeta().workspaceConsolidation.dsh_memory).toMatchObject({ dirty: false, nextConsolidationAt: null })
     await scheduler.dispose()
   })
 

@@ -13,7 +13,7 @@ describe('/memory command', () => {
     const service = controller(async (method, payload) => {
       calls.push([method, payload])
       if (method === 'read') return { id: 'memory-1', category: 'preference' }
-      if (method === 'status') return { writable: true, dirty: false }
+      if (method === 'status') return { writable: true, workspaceConsolidation: {} }
       if (method === 'remove') return { removed: true }
       return { id: 'memory-1', summary: 'saved' }
     })
@@ -31,6 +31,28 @@ describe('/memory command', () => {
       ['remove', { scope, id: 'memory-1' }],
       ['status', {}],
     ])
+  })
+
+  it('summarizes dirty workspaces and their earliest schedule instead of a shared dirty flag', async () => {
+    const service = controller(async method => {
+      if (method === 'status') return {
+        writable: true,
+        workspaceConsolidation: {
+          clean: { dirty: false, nextConsolidationAt: null, lastConsolidationAt: null },
+          later: { dirty: true, nextConsolidationAt: '2026-10-26T08:00:00.000Z', lastConsolidationAt: null },
+          sooner: { dirty: true, nextConsolidationAt: '2026-10-26T06:00:00.000Z', lastConsolidationAt: null },
+        },
+        nextRetentionAt: null,
+      }
+      return {}
+    })
+
+    const result = await executeMemoryCommand(service, ' status', 'session-1')
+
+    expect(result).toEqual({
+      kind: 'success',
+      text: 'Snail Memory: writable; dirty workspaces=2; next workspace consolidation=2026-10-26T06:00:00.000Z; next cleanup=not scheduled',
+    })
   })
 
   it('requires an attached workspace for workspace writes', async () => {

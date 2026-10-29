@@ -47,12 +47,16 @@ export class LifecycleScheduler {
   async updateConsolidationCooldownHours(value: number): Promise<void> {
     if (!Number.isFinite(value) || value < 0) throw new Error('consolidationCooldownHours must be a non-negative finite number')
     const current = this.store.getMeta()
-    if (current.dirty || current.pending.consolidate) {
+    const hasWorkspaceWork = Object.values(current.workspaceConsolidation).some(consolidation => consolidation.dirty)
+      || Object.keys(current.pending).some(kind => kind.startsWith('consolidate:'))
+    if (hasWorkspaceWork) {
       const nextRunAt = new Date(this.now().getTime() + value * 3_600_000).toISOString()
       await this.store.updateMeta(meta => {
-        if (meta.dirty) meta.nextConsolidationAt = nextRunAt
-        if (meta.pending.consolidate) {
-          meta.pending.consolidate = { ...meta.pending.consolidate, id: randomUUID(), createdAt: nextRunAt }
+        for (const consolidation of Object.values(meta.workspaceConsolidation)) {
+          if (consolidation.dirty) consolidation.nextConsolidationAt = nextRunAt
+        }
+        for (const [kind, intent] of Object.entries(meta.pending)) {
+          if (kind.startsWith('consolidate:')) meta.pending[kind] = { ...intent, id: randomUUID(), createdAt: nextRunAt }
         }
       })
     }
@@ -85,8 +89,10 @@ export class LifecycleScheduler {
         if (meta.nextRetentionAt === null) {
           meta.nextRetentionAt = new Date(this.now().getTime() + this.retentionDelayMs).toISOString()
         }
-        if (meta.dirty && meta.nextConsolidationAt === null) {
-          meta.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+        for (const consolidation of Object.values(meta.workspaceConsolidation)) {
+          if (consolidation.dirty && consolidation.nextConsolidationAt === null) {
+            consolidation.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+          }
         }
         if (meta.globalDirty && meta.nextGlobalConsolidationAt === null) {
           meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.globalConsolidationDelayMs).toISOString()
@@ -124,10 +130,15 @@ export class LifecycleScheduler {
     await this.putIntent(`stop:${sessionId}`, this.now().toISOString())
   }
 
-  async markDirty(): Promise<void> {
+  async markDirty(workspaceId: string): Promise<void> {
     await this.store.updateMeta(meta => {
-      meta.dirty = true
-      meta.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+      const consolidation = meta.workspaceConsolidation[workspaceId] ??= {
+        dirty: false,
+        nextConsolidationAt: null,
+        lastConsolidationAt: null,
+      }
+      consolidation.dirty = true
+      consolidation.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
     })
     this.schedule()
   }
@@ -179,31 +190,46 @@ export class LifecycleScheduler {
       const meta = this.store.getMeta()
       const now = this.now().getTime()
       const due = Object.entries(meta.pending).find(([, value]) => this.dueAt(value.kind, value.createdAt) <= now)
-      const consolidationDue = meta.dirty && meta.nextConsolidationAt !== null
-        && new Date(meta.nextConsolidationAt).getTime() <= now
+      const workspaceDue = Object.entries(meta.workspaceConsolidation).find(([, consolidation]) => consolidation.dirty
+        && consolidation.nextConsolidationAt !== null && new Date(consolidation.nextConsolidationAt).getTime() <= now)
       const globalConsolidationDue = meta.globalDirty && meta.nextGlobalConsolidationAt !== null
         && new Date(meta.nextGlobalConsolidationAt).getTime() <= now
       const retentionDue = meta.nextRetentionAt !== null && new Date(meta.nextRetentionAt).getTime() <= now
-      if (!due && !consolidationDue && !globalConsolidationDue && !retentionDue) break
+      if (!due && !workspaceDue && !globalConsolidationDue && !retentionDue) break
 
-      const key = due?.[0] ?? (consolidationDue ? 'consolidate' : globalConsolidationDue ? 'global-consolidate' : 'retention')
+      const key = due?.[0] ?? (workspaceDue
+        ? `consolidate:${encodeURIComponent(workspaceDue[0])}`
+        : globalConsolidationDue ? 'global-consolidate' : 'retention')
       const value = due?.[1] ?? { id: randomUUID(), kind: key, createdAt: this.now().toISOString() }
-      const scheduleSnapshot = value.kind === 'global-consolidate'
-        ? meta.nextGlobalConsolidationAt
-        : value.kind === 'consolidate'
-          ? meta.nextConsolidationAt
+      const workspaceId = this.workspaceId(value.kind)
+      const scheduleSnapshot = workspaceId !== undefined
+        ? meta.workspaceConsolidation[workspaceId]?.nextConsolidationAt
+        : value.kind === 'global-consolidate'
+          ? meta.nextGlobalConsolidationAt
           : value.kind === 'retention'
             ? meta.nextRetentionAt
             : null
+      if (due && workspaceId !== undefined && !meta.workspaceConsolidation[workspaceId]?.dirty) {
+        await this.store.updateMeta(current => {
+          if (current.pending[key]?.id === value.id && !current.workspaceConsolidation[workspaceId]?.dirty) {
+            delete current.pending[key]
+          }
+        })
+        continue
+      }
       if (!due) await this.store.updateMeta(current => { current.pending[key] = value })
       try {
         await this.options.run(value.kind)
         await this.store.updateMeta(current => {
           if (current.pending[key]?.id === value.id) delete current.pending[key]
           current.lastError = null
-          if (value.kind === 'consolidate' && current.nextConsolidationAt === scheduleSnapshot) {
-            current.dirty = false
-            current.nextConsolidationAt = null
+          if (workspaceId !== undefined) {
+            const consolidation = current.workspaceConsolidation[workspaceId]
+            if (consolidation && consolidation.nextConsolidationAt === scheduleSnapshot) {
+              consolidation.dirty = false
+              consolidation.nextConsolidationAt = null
+              consolidation.lastConsolidationAt = this.now().toISOString()
+            }
           } else if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === scheduleSnapshot) {
             current.globalDirty = false
             current.nextGlobalConsolidationAt = null
@@ -214,7 +240,7 @@ export class LifecycleScheduler {
           }
         })
       } catch {
-        const delay = value.kind === 'consolidate'
+        const delay = workspaceId !== undefined
           ? this.consolidationDelayMs
           : value.kind === 'global-consolidate'
             ? this.globalConsolidationDelayMs
@@ -222,7 +248,7 @@ export class LifecycleScheduler {
               ? this.retentionDelayMs
               : this.idleDelayMs
         const retryAt = new Date(this.now().getTime() + delay).toISOString()
-        const retryCreatedAt = value.kind === 'consolidate' || value.kind === 'global-consolidate' || value.kind === 'retention'
+        const retryCreatedAt = workspaceId !== undefined || value.kind === 'global-consolidate' || value.kind === 'retention'
           ? retryAt
           : this.now().toISOString()
         await this.store.updateMeta(current => {
@@ -236,8 +262,9 @@ export class LifecycleScheduler {
               current.pending[retryKind] = { id: randomUUID(), kind: retryKind, createdAt: retryCreatedAt }
             }
           }
-          if (value.kind === 'consolidate' && current.nextConsolidationAt === scheduleSnapshot) {
-            current.nextConsolidationAt = retryAt
+          if (workspaceId !== undefined) {
+            const consolidation = current.workspaceConsolidation[workspaceId]
+            if (consolidation && consolidation.nextConsolidationAt === scheduleSnapshot) consolidation.nextConsolidationAt = retryAt
           }
           if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === scheduleSnapshot) {
             current.nextGlobalConsolidationAt = retryAt
@@ -249,6 +276,15 @@ export class LifecycleScheduler {
       }
     }
     this.schedule()
+  }
+
+  private workspaceId(kind: string): string | undefined {
+    if (!kind.startsWith('consolidate:')) return undefined
+    try {
+      return decodeURIComponent(kind.slice('consolidate:'.length))
+    } catch {
+      return undefined
+    }
   }
 
   private dueAt(kind: string, createdAt: string): number {
@@ -279,7 +315,9 @@ export class LifecycleScheduler {
     const meta = this.store.getMeta()
     const now = this.now().getTime()
     const times = Object.values(meta.pending).map(value => this.dueAt(value.kind, value.createdAt))
-    if (meta.dirty && meta.nextConsolidationAt) times.push(new Date(meta.nextConsolidationAt).getTime())
+    for (const consolidation of Object.values(meta.workspaceConsolidation)) {
+      if (consolidation.dirty && consolidation.nextConsolidationAt) times.push(new Date(consolidation.nextConsolidationAt).getTime())
+    }
     if (meta.globalDirty && meta.nextGlobalConsolidationAt) times.push(new Date(meta.nextGlobalConsolidationAt).getTime())
     if (meta.nextRetentionAt) times.push(new Date(meta.nextRetentionAt).getTime())
     if (times.length === 0) {

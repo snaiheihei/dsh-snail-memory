@@ -11,7 +11,7 @@ describe('memory API registration', () => {
     let command: CommandDefinition | undefined
     let routeDisposed = 0
     let commandDisposed = 0
-    const controller = { call: async () => ({ writable: true }) } as unknown as MemoryController
+    const controller = { call: async () => ({ writable: true, workspaceConsolidation: {} }) } as unknown as MemoryController
     const ctx = {
       webServer: {
         register(value: WebRoute) { route = value; return () => { routeDisposed += 1 } },

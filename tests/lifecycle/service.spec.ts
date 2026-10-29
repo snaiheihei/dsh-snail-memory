@@ -17,6 +17,7 @@ async function setup(
   maintenance?: { runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> },
   beforeResponse?: () => Promise<void>,
   resolveWorkspaceId?: (sessionId: string) => WorkspaceId | undefined,
+  runMaintenance?: <T>(sessionId: string, task: (signal?: AbortSignal) => Promise<T>) => Promise<T>,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'snail-memory-lifecycle-'))
   roots.push(root)
@@ -24,15 +25,23 @@ async function setup(
   const store = await MemoryStore.open({ root, heartbeatMs: 48 * 3_600_000 })
   stores.push(store)
   const prompts: string[] = []
+  const activity = { active: 0, maxActive: 0 }
   const model = {
     async prepareCall(config: { provider: string; model: string; maxTokens?: number }) {
       expect(config.provider).toBe('test')
       return {
-        async *stream() {
-          await beforeResponse?.()
-          const response = responses.shift() ?? '{"candidates":[]}'
-          if (response instanceof Error) throw response
-          yield { type: 'text-delta' as const, index: 0, text: response }
+        async *stream(options: { messages: readonly { content: readonly { text: string }[] }[] }) {
+          prompts.push(options.messages.flatMap(message => message.content.map(block => block.text)).join('\n'))
+          activity.active += 1
+          activity.maxActive = Math.max(activity.maxActive, activity.active)
+          try {
+            await beforeResponse?.()
+            const response = responses.shift() ?? '{"candidates":[]}'
+            if (response instanceof Error) throw response
+            yield { type: 'text-delta' as const, index: 0, text: response }
+          } finally {
+            activity.active -= 1
+          }
         },
       }
     },
@@ -46,6 +55,7 @@ async function setup(
   const service = new MemoryLifecycleService(store, {
     model,
     ...(maintenance === undefined ? {} : { maintenance }),
+    ...(runMaintenance === undefined ? {} : { runMaintenance }),
     provider: 'test',
     modelName: 'aux',
     transcriptEvents: async () => events,
@@ -53,7 +63,7 @@ async function setup(
     onChange: change => { changes.push(change) },
   })
   services.push(service)
-  return { store, service, prompts, changes, responses, events }
+  return { store, service, prompts, activity, changes, responses, events }
 }
 
 beforeEach(() => {
@@ -204,7 +214,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getMeta().lastError).toBeNull()
   })
 
-  it('rejects secret candidates and preserves dirty retry state on model failure', async () => {
+  it('rejects secret candidates and does not invent consolidation work on model failure', async () => {
     const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') }
     const { service, store, events } = await setup([
       '{"candidates":[{"category":"environment-fact","summary":"Credential","detail":"token = abcdefghijkl"}]}',
@@ -216,7 +226,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getSessionState('session-1').distillationCursor).toMatchObject({ lastEventSeq: 1 })
     events.push({ seq: 2, type: 'user/message', data: { turnId: 'turn-2', source: { kind: 'user' }, content: [{ type: 'text', text: 'A second completed turn.' }] } })
     await expect(service.runIntent('review:session-1')).rejects.toThrow(/json/i)
-    expect(store.getMeta().dirty).toBe(true)
+    expect(store.getMeta().workspaceConsolidation).toEqual({})
     expect(store.getMeta().lastError).toBe('Session distillation failed')
   })
 
@@ -253,7 +263,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect((await store.read(globalScope, target.id))?.summary).toBe('New global decision')
     expect((await store.read(workspaceScope, workspace.id))?.summary).toBe('Workspace convention')
     expect(store.getMeta()).toMatchObject({
-      dirty: true,
+      workspaceConsolidation: { 'workspace-1': { dirty: true } },
       globalDirty: false,
       lastGlobalConsolidationAt: '2026-10-26T00:00:00.000Z',
       nextGlobalConsolidationAt: null,
@@ -326,6 +336,45 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     await expect(service.runIntent('global-consolidate')).resolves.toEqual({ written: 1 })
     expect((await store.read(scope, target.id))?.sourceRefs).toEqual([{ sessionId: 'session-target' }])
     expect((await store.read(scope, excluded.id))?.summary).toBe('Excluded convention')
+  })
+
+  it('does not supersede a memory corrected while consolidation is waiting for the model', async () => {
+    const scope: MemoryScope = { kind: 'global' }
+    let releaseModel!: () => void
+    let markModelStarted!: () => void
+    const modelStarted = new Promise<void>(resolve => { markModelStarted = resolve })
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve })
+    const { service, store, responses } = await setup([], undefined, async () => {
+      markModelStarted()
+      await modelGate
+    })
+    const target = await store.upsert({
+      scope, category: 'project-convention', summary: 'Target convention', detail: 'Target detail.',
+      sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+    const superseded = await store.upsert({
+      scope, category: 'project-convention', summary: 'Superseded convention', detail: 'Original detail.',
+      sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    const running = service.runIntent('global-consolidate')
+    await modelStarted
+    const corrected = await service.correct({
+      ...superseded,
+      detail: 'Corrected during consolidation.',
+    })
+    responses.push(JSON.stringify({ candidates: [{
+      id: target.id, category: 'project-convention', summary: 'Consolidated convention',
+      detail: 'Stale consolidated detail.', supersedes: [superseded.id],
+    }] }))
+    releaseModel()
+
+    await expect(running).resolves.toEqual({ written: 0 })
+    expect((await store.read(scope, target.id))?.summary).toBe('Target convention')
+    expect(await store.read(scope, superseded.id)).toMatchObject({
+      detail: 'Corrected during consolidation.',
+      revision: corrected.revision,
+    })
   })
 
   it('does not recreate a Global memory deleted while consolidation is waiting for the model', async () => {
@@ -416,8 +465,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     })
     const before = store.getSessionState('session-1')
     await store.updateMeta(meta => {
-      meta.dirty = false
-      meta.nextConsolidationAt = null
+      meta.workspaceConsolidation = {}
       meta.globalDirty = false
       meta.nextGlobalConsolidationAt = null
     })
@@ -428,8 +476,7 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(promoted.created).toBe(true)
     expect(duplicate).toEqual({ id: promoted.id, created: false })
     expect(store.getMeta()).toMatchObject({
-      dirty: false,
-      nextConsolidationAt: null,
+      workspaceConsolidation: {},
       globalDirty: true,
       nextGlobalConsolidationAt: '2026-11-02T00:00:00.000Z',
     })
@@ -463,6 +510,140 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.list(scope).entries.map(entry => entry.category).sort()).toEqual(['long-term-decision', 'preference'])
     expect((await store.read(legacyScope, legacy.id))?.summary).toBe('Legacy global')
     expect(changes.map(change => change.kind)).toEqual(['retention'])
+  })
+
+  it('consolidates only dirty test_only and never reads or sends clean dsh_memory', async () => {
+    const testScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('test_only') }
+    const cleanScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('dsh_memory') }
+    const { service, store, prompts } = await setup()
+    await store.upsert({ scope: testScope, category: 'project-convention', summary: 'Test convention', detail: 'Only test_only detail.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    const clean = await store.upsert({ scope: cleanScope, category: 'project-convention', summary: 'Clean convention', detail: 'Clean dsh_memory detail must stay unread.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    await store.updateMeta(meta => {
+      meta.workspaceConsolidation = {
+        test_only: { dirty: true, nextConsolidationAt: '2026-10-26T00:00:00.000Z', lastConsolidationAt: null },
+        dsh_memory: { dirty: false, nextConsolidationAt: null, lastConsolidationAt: '2026-10-25T00:00:00.000Z' },
+      }
+    })
+    const read = vi.spyOn(store, 'read')
+
+    await service.start()
+    await vi.advanceTimersByTimeAsync(20 * 3_600_000)
+    await service.stop()
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('workspace:test_only')
+    expect(prompts[0]).toContain('Only test_only detail.')
+    expect(prompts[0]).not.toContain('Clean dsh_memory detail')
+    expect(prompts[0]).not.toContain('"sourceRefs"')
+    expect(prompts[0]).not.toContain('"revision"')
+    expect(read).not.toHaveBeenCalledWith(cleanScope, clean.id)
+    expect(store.getMeta().workspaceConsolidation.dsh_memory).toMatchObject({ dirty: false, nextConsolidationAt: null })
+  })
+
+  it('serializes two dirty workspaces without putting either workspace entries in the other prompt', async () => {
+    const firstScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('test_only') }
+    const secondScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('dsh_memory') }
+    const { service, prompts, activity } = await setup()
+
+    await service.remember({ scope: firstScope, category: 'project-convention', summary: 'First convention', detail: 'FIRST_WORKSPACE_ONLY_DETAIL', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    await service.remember({ scope: secondScope, category: 'project-convention', summary: 'Second convention', detail: 'SECOND_WORKSPACE_ONLY_DETAIL', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    await service.start()
+    await vi.advanceTimersByTimeAsync(20 * 3_600_000)
+    await vi.waitFor(() => expect(prompts).toHaveLength(2))
+    await service.stop()
+
+    expect(prompts).toHaveLength(2)
+    expect(prompts[0]).toContain('workspace:test_only')
+    expect(prompts[0]).toContain('FIRST_WORKSPACE_ONLY_DETAIL')
+    expect(prompts[0]).not.toContain('SECOND_WORKSPACE_ONLY_DETAIL')
+    expect(prompts[1]).toContain('workspace:dsh_memory')
+    expect(prompts[1]).toContain('SECOND_WORKSPACE_ONLY_DETAIL')
+    expect(prompts[1]).not.toContain('FIRST_WORKSPACE_ONLY_DETAIL')
+    expect(activity.maxActive).toBe(1)
+  })
+
+  it('retries only the failed workspace and does not repeat a successful scope', async () => {
+    const failedScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('test_only') }
+    const successfulScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('dsh_memory') }
+    const { service, store, prompts } = await setup([new Error('model unavailable'), '{"candidates":[]}'])
+    await service.remember({ scope: failedScope, category: 'project-convention', summary: 'Retry convention', detail: 'Retry this scope.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    await service.remember({ scope: successfulScope, category: 'project-convention', summary: 'Successful convention', detail: 'Succeed once.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+
+    await service.start()
+    await vi.advanceTimersByTimeAsync(20 * 3_600_000)
+    await vi.waitFor(() => expect(prompts).toHaveLength(2))
+    await service.stop()
+
+    expect(prompts).toHaveLength(2)
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({ dirty: true })
+    expect(store.getMeta().workspaceConsolidation.test_only?.nextConsolidationAt).not.toBe('2026-10-26T20:00:00.000Z')
+    expect(store.getMeta().workspaceConsolidation.dsh_memory).toMatchObject({ dirty: false, nextConsolidationAt: null })
+
+    await service.start()
+    await vi.advanceTimersByTimeAsync(20 * 3_600_000)
+    await vi.waitFor(() => expect(prompts).toHaveLength(3))
+    await service.stop()
+
+    expect(prompts).toHaveLength(3)
+    expect(prompts[2]).toContain('workspace:test_only')
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({ dirty: false, nextConsolidationAt: null })
+    expect(store.getMeta().workspaceConsolidation.dsh_memory).toMatchObject({ dirty: false, nextConsolidationAt: null })
+  })
+
+  it('keeps same-scope writes dirty during model wait without rescheduling another scope', async () => {
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('test_only') }
+    const otherScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('dsh_memory') }
+    let releaseModel!: () => void
+    let markModelStarted!: () => void
+    const modelStarted = new Promise<void>(resolve => { markModelStarted = resolve })
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve })
+    const { service, store } = await setup(['{"candidates":[]}'], undefined, async () => {
+      markModelStarted()
+      await modelGate
+    })
+    await service.remember({ scope, category: 'project-convention', summary: 'Original convention', detail: 'Original detail.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+    await service.remember({ scope: otherScope, category: 'project-convention', summary: 'Other convention', detail: 'Other detail.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+
+    const running = service.runIntent('consolidate:test_only')
+    await modelStarted
+    vi.setSystemTime(new Date('2026-10-26T01:00:00.000Z'))
+    await service.remember({ scope, category: 'preference', summary: 'Late preference', detail: 'Keep this scope dirty.', sourceRefs: [], lastVerifiedAt: '2026-10-26T01:00:00.000Z' })
+    releaseModel()
+    await running
+
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({ dirty: true, nextConsolidationAt: '2026-10-26T21:00:00.000Z' })
+    expect(store.getMeta().workspaceConsolidation.dsh_memory).toMatchObject({ dirty: true, nextConsolidationAt: '2026-10-26T20:00:00.000Z' })
+  })
+
+  it('marks retention consolidation only for workspaces with actual deletions', async () => {
+    const expiredScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('test_only') }
+    const retainedScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('dsh_memory') }
+    const { service, store } = await setup()
+    await store.upsert({ scope: expiredScope, category: 'environment-fact', summary: 'Expired environment', detail: 'Delete this entry.', sourceRefs: [], lastVerifiedAt: '2026-09-01T00:00:00.000Z' })
+    await store.upsert({ scope: retainedScope, category: 'preference', summary: 'Retained preference', detail: 'Keep this entry.', sourceRefs: [], lastVerifiedAt: '2026-09-01T00:00:00.000Z' })
+    await store.updateMeta(meta => { meta.workspaceConsolidation = {} })
+
+    await service.retentionSweep()
+
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({ dirty: true, nextConsolidationAt: '2026-10-26T20:00:00.000Z' })
+    expect(store.getMeta().workspaceConsolidation.dsh_memory).toBeUndefined()
+  })
+
+  it('decodes workspace intent ids without routing the suffix to Session maintenance', async () => {
+    const owner = workspaceId('workspace with spaces')
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: owner }
+    const maintenanceSessions: string[] = []
+    const { service, store, prompts } = await setup([], undefined, undefined, undefined, async (sessionId, task) => {
+      maintenanceSessions.push(sessionId)
+      return task()
+    })
+    await store.upsert({ scope, category: 'project-convention', summary: 'Encoded convention', detail: 'Encoded workspace detail.', sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z' })
+
+    await service.runIntent(`consolidate:${encodeURIComponent(owner)}`)
+
+    expect(maintenanceSessions).toEqual([''])
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain(`workspace:${owner}`)
   })
 })
 

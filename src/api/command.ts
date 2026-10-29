@@ -29,7 +29,10 @@ export async function executeMemoryCommand(
     if (action === 'status') {
       if (layer || rest) return { kind: 'error', text: USAGE }
       const status = await controller.call('status', {}) as MemoryStatus
-      return { kind: 'success', text: `Snail Memory: ${status.writable ? 'writable' : 'read-only'}; dirty=${status.dirty}; next consolidation=${status.nextConsolidationAt ?? 'not scheduled'}; next cleanup=${status.nextRetentionAt ?? 'not scheduled'}` }
+      const workspaceSchedules = Object.values(status.workspaceConsolidation).filter(consolidation => consolidation.dirty)
+      const nextConsolidationAt = workspaceSchedules.map(consolidation => consolidation.nextConsolidationAt)
+        .filter((value): value is string => value !== null).sort()[0]
+      return { kind: 'success', text: `Snail Memory: ${status.writable ? 'writable' : 'read-only'}; dirty workspaces=${workspaceSchedules.length}; next workspace consolidation=${nextConsolidationAt ?? 'not scheduled'}; next cleanup=${status.nextRetentionAt ?? 'not scheduled'}` }
     }
     let target = scope(layer)
     if (!target || !rest) return { kind: 'error', text: USAGE }

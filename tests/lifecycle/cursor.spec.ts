@@ -103,7 +103,7 @@ describe('session distillation cursor', { timeout: 15_000 }, () => {
 
     expect(store.getSessionState('session-1').distillationCursor).toMatchObject({ lastEventSeq: 1, offset: 0 })
     expect(store.list(scope).revision).toBe(revision)
-    expect(store.getMeta().dirty).toBe(false)
+    expect(store.getMeta().workspaceConsolidation).toEqual({})
     expect(store.getSessionState('session-1').layers.workspace.desired).toEqual(desired)
   })
 

@@ -54,4 +54,38 @@ describe('readState', () => {
       createdAt,
     })
   })
+
+  it('conservatively migrates shared dirty state and pending consolidation to every known workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-json-'))
+    roots.push(root)
+    const path = join(root, 'state.v2.json')
+    const state = emptyState()
+    state.workspaces = {
+      test_only: { createdAt: '2026-10-25T00:00:00.000Z', updatedAt: '2026-10-26T00:00:00.000Z' },
+      dsh_memory: { createdAt: '2026-10-25T00:00:00.000Z', updatedAt: '2026-10-26T00:00:00.000Z' },
+    }
+    await writeJsonAtomic(path, {
+      ...state,
+      meta: {
+        ...state.meta,
+        dirty: true,
+        nextConsolidationAt: '2026-10-26T06:00:00.000Z',
+        lastConsolidationAt: '2026-10-25T06:00:00.000Z',
+        pending: {
+          consolidate: { id: 'legacy-consolidate', kind: 'consolidate', createdAt: '2026-10-26T06:00:00.000Z' },
+        },
+      },
+    })
+
+    const restored = await readState(path)
+
+    expect(restored?.formatVersion).toBe(2)
+    expect(restored?.meta.workspaceConsolidation).toEqual({
+      test_only: { dirty: true, nextConsolidationAt: '2026-10-26T06:00:00.000Z', lastConsolidationAt: '2026-10-25T06:00:00.000Z' },
+      dsh_memory: { dirty: true, nextConsolidationAt: '2026-10-26T06:00:00.000Z', lastConsolidationAt: '2026-10-25T06:00:00.000Z' },
+    })
+    expect(restored?.meta.pending.consolidate).toBeUndefined()
+    expect(restored?.meta.pending['consolidate:test_only']?.kind).toBe('consolidate:test_only')
+    expect(restored?.meta.pending['consolidate:dsh_memory']?.kind).toBe('consolidate:dsh_memory')
+  })
 })

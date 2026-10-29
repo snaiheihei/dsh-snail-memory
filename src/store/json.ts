@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import type { MemoryEntry, StoreState } from './types.js'
+import type { LifecycleIntent, MemoryEntry, MemoryMeta, StoreState, WorkspaceConsolidationMeta } from './types.js'
 
 export type LegacyStoreState = Omit<StoreState, 'formatVersion' | 'entries'> & {
   readonly formatVersion: 1
@@ -18,10 +18,8 @@ export function emptyState(): StoreState {
     scopeRevisions: { global: 0, workspaces: {} },
     sessions: {},
     meta: {
-      dirty: false,
-      nextConsolidationAt: null,
+      workspaceConsolidation: {},
       nextRetentionAt: null,
-      lastConsolidationAt: null,
       globalDirty: false,
       nextGlobalConsolidationAt: null,
       lastGlobalConsolidationAt: null,
@@ -68,8 +66,44 @@ export async function readLegacyState(path: string): Promise<LegacyStoreState | 
 }
 
 function normalizeState<T extends StoreState | LegacyStoreState>(state: T): T {
-  const legacyGlobal = state.meta.globalDirty === undefined
+  type LegacyMeta = Omit<MemoryMeta, 'workspaceConsolidation'> & {
+    workspaceConsolidation?: Record<string, WorkspaceConsolidationMeta>
+    dirty?: boolean
+    nextConsolidationAt?: string | null
+    lastConsolidationAt?: string | null
+  }
+  const legacyMeta = state.meta as LegacyMeta
+  const legacyGlobal = legacyMeta.globalDirty === undefined
   const aggregateRevision = Object.values(state.scopeRevisions.workspaces).reduce((total, revision) => total + revision, 0)
+  const legacyConsolidation = legacyMeta.pending.consolidate
+  const sharedDirty = legacyMeta.dirty === true || legacyConsolidation !== undefined
+  const workspaceIds = new Set([...Object.keys(state.workspaces), ...Object.keys(legacyMeta.workspaceConsolidation ?? {})])
+  const workspaceConsolidation: Record<string, WorkspaceConsolidationMeta> = {}
+  for (const id of workspaceIds) {
+    const existing = legacyMeta.workspaceConsolidation?.[id]
+    workspaceConsolidation[id] = sharedDirty
+      ? {
+          dirty: true,
+          nextConsolidationAt: existing?.nextConsolidationAt ?? legacyMeta.nextConsolidationAt ?? legacyConsolidation?.createdAt ?? null,
+          lastConsolidationAt: existing?.lastConsolidationAt ?? legacyMeta.lastConsolidationAt ?? null,
+        }
+      : existing ?? { dirty: false, nextConsolidationAt: null, lastConsolidationAt: null }
+  }
+  const pending: Record<string, LifecycleIntent> = {}
+  for (const [key, intent] of Object.entries(legacyMeta.pending)) {
+    if (key === 'consolidate') continue
+    pending[key] = { ...intent, id: intent.id ?? `legacy:${key}:${intent.createdAt}` }
+  }
+  if (legacyConsolidation) {
+    for (const id of workspaceIds) {
+      const kind = `consolidate:${encodeURIComponent(id)}`
+      pending[kind] = {
+        ...legacyConsolidation,
+        id: `${legacyConsolidation.id ?? 'legacy:consolidate'}:${encodeURIComponent(id)}`,
+        kind,
+      }
+    }
+  }
   return {
     ...state,
     scopeRevisions: {
@@ -79,14 +113,14 @@ function normalizeState<T extends StoreState | LegacyStoreState>(state: T): T {
         : state.scopeRevisions.global,
     },
     meta: {
-      ...state.meta,
-      globalDirty: state.meta.globalDirty ?? false,
-      nextGlobalConsolidationAt: state.meta.nextGlobalConsolidationAt ?? null,
-      lastGlobalConsolidationAt: state.meta.lastGlobalConsolidationAt ?? null,
-      pending: Object.fromEntries(Object.entries(state.meta.pending).map(([key, intent]) => [key, {
-        ...intent,
-        id: intent.id ?? `legacy:${key}:${intent.createdAt}`,
-      }])),
+      workspaceConsolidation,
+      globalDirty: legacyMeta.globalDirty ?? false,
+      nextGlobalConsolidationAt: legacyMeta.nextGlobalConsolidationAt ?? null,
+      lastGlobalConsolidationAt: legacyMeta.lastGlobalConsolidationAt ?? null,
+      nextRetentionAt: legacyMeta.nextRetentionAt,
+      lastRetentionAt: legacyMeta.lastRetentionAt,
+      lastError: legacyMeta.lastError,
+      pending,
     },
   }
 }

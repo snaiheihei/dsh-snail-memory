@@ -1,6 +1,6 @@
 import type { MemoryRetentionDays } from '../contract.js'
 import type { MemoryStore } from '../store/store.js'
-import type { MemoryId, MemoryIndexEntry, MemoryScope } from '../store/types.js'
+import type { MemoryId, MemoryIndexEntry, MemoryScope, WorkspaceId } from '../store/types.js'
 
 const DAY_MS = 86_400_000
 const DEFAULT_RETENTION_DAYS: MemoryRetentionDays = {
@@ -33,6 +33,7 @@ export async function retentionSweep(store: MemoryStore, options: RetentionOptio
   const now = options.now?.() ?? new Date()
   const scopes: MemoryScope[] = store.workspaceScopes()
   const removed: MemoryId[] = []
+  const changedWorkspaces = new Set<WorkspaceId>()
   for (const scope of scopes) {
     const ids: MemoryId[] = []
     for (const entry of store.list(scope).entries) {
@@ -41,12 +42,20 @@ export async function retentionSweep(store: MemoryStore, options: RetentionOptio
         removed.push(entry.id)
       }
     }
-    if (ids.length) await options.onChange?.(scope, ids)
+    if (ids.length) {
+      if (scope.kind === 'workspace') changedWorkspaces.add(scope.workspaceId)
+      await options.onChange?.(scope, ids)
+    }
   }
   await store.updateMeta(meta => {
-    if (removed.length) {
-      meta.dirty = true
-      meta.nextConsolidationAt = new Date(now.getTime() + (options.consolidationCooldownHours ?? 20) * 3_600_000).toISOString()
+    for (const id of changedWorkspaces) {
+      const consolidation = meta.workspaceConsolidation[id] ??= {
+        dirty: false,
+        nextConsolidationAt: null,
+        lastConsolidationAt: null,
+      }
+      consolidation.dirty = true
+      consolidation.nextConsolidationAt = new Date(now.getTime() + (options.consolidationCooldownHours ?? 20) * 3_600_000).toISOString()
     }
     meta.lastRetentionAt = now.toISOString()
     meta.nextRetentionAt = new Date(now.getTime() + 24 * 3_600_000).toISOString()
