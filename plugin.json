@@ -1,0 +1,31 @@
+{
+  "id": "dsh-snail-memory",
+  "name": "Snail Memory",
+  "version": "0.1.0",
+  "description": {
+    "en": "Single-user global and workspace memory with explicit, append-only context injection.",
+    "zh": "单用户全局与 workspace 分层记忆，采用显式、只追加的上下文注入。"
+  },
+  "author": "snaiheihei",
+  "license": "MIT",
+  "homepage": "https://github.com/snaiheihei/dsh-snail-memory#readme",
+  "repository": "https://github.com/snaiheihei/dsh-snail-memory",
+  "harnessVersion": ">=0.2.1-rc.3 <0.3.0-0",
+  "entry": "dist/index.js",
+  "permissions": [
+    "storage"
+  ],
+  "tags": [
+    "dsh-plugin",
+    "memory",
+    "deepseek-harness"
+  ],
+  "category": "tools",
+  "engines": {
+    "dsh": ">=0.2.1-rc.3 <0.3.0-0"
+  },
+  "components": {
+    "host": "dist/index.js",
+    "client": "dist/client.js"
+  }
+}
