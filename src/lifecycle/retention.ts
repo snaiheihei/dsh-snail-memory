@@ -15,6 +15,7 @@ export interface RetentionOptions {
   readonly now?: () => Date
   readonly retentionDays?: MemoryRetentionDays
   readonly consolidationCooldownHours?: number
+  readonly retentionSweepHours?: number
   readonly onChange?: (scope: MemoryScope, ids: readonly MemoryId[]) => Promise<void> | void
 }
 
@@ -58,7 +59,7 @@ export async function retentionSweep(store: MemoryStore, options: RetentionOptio
       consolidation.nextConsolidationAt = new Date(now.getTime() + (options.consolidationCooldownHours ?? 20) * 3_600_000).toISOString()
     }
     meta.lastRetentionAt = now.toISOString()
-    meta.nextRetentionAt = new Date(now.getTime() + 24 * 3_600_000).toISOString()
+    meta.nextRetentionAt = new Date(now.getTime() + (options.retentionSweepHours ?? 24) * 3_600_000).toISOString()
   })
   return removed
 }

@@ -19,6 +19,7 @@ async function setup(
   beforeResponse?: () => Promise<void>,
   resolveWorkspaceId?: (sessionId: string) => WorkspaceId | undefined,
   runMaintenance?: <T>(sessionId: string, task: (signal?: AbortSignal) => Promise<T>) => Promise<T>,
+  retentionSweepHours?: number,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'snail-memory-lifecycle-'))
   roots.push(root)
@@ -61,6 +62,7 @@ async function setup(
     modelName: 'aux',
     transcriptEvents: async () => events,
     ...(resolveWorkspaceId === undefined ? {} : { resolveWorkspaceId }),
+    ...(retentionSweepHours === undefined ? {} : { retentionSweepHours }),
     onChange: change => { changes.push(change) },
   })
   services.push(service)
@@ -583,6 +585,27 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.list(scope).entries.map(entry => entry.category).sort()).toEqual(['long-term-decision', 'preference'])
     expect((await store.read(legacyScope, legacy.id))?.summary).toBe('Legacy global')
     expect(changes.map(change => change.kind)).toEqual(['retention'])
+  })
+
+  it('keeps the configured interval across consecutive scheduled retention sweeps', async () => {
+    const { service, store } = await setup([], undefined, undefined, undefined, undefined, 6)
+    await service.start()
+    await vi.advanceTimersByTimeAsync(6 * 3_600_000)
+    await service.stop()
+
+    expect(store.getMeta()).toMatchObject({
+      lastRetentionAt: '2026-10-26T06:00:00.000Z',
+      nextRetentionAt: '2026-10-26T12:00:00.000Z',
+    })
+
+    await service.start()
+    await vi.advanceTimersByTimeAsync(6 * 3_600_000)
+    await service.stop()
+
+    expect(store.getMeta()).toMatchObject({
+      lastRetentionAt: '2026-10-26T12:00:00.000Z',
+      nextRetentionAt: '2026-10-26T18:00:00.000Z',
+    })
   })
 
   it('consolidates only dirty test_only and never reads or sends clean dsh_memory', async () => {

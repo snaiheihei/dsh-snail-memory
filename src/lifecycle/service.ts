@@ -284,6 +284,7 @@ export class MemoryLifecycleService {
       now: this.now,
       retentionDays: settings.retentionDays,
       consolidationCooldownHours: settings.consolidationCooldownHours,
+      ...(this.options.retentionSweepHours === undefined ? {} : { retentionSweepHours: this.options.retentionSweepHours }),
       onChange: async (scope, ids) => { await this.options.onChange?.({ kind: 'retention', scope, ids }) },
     })
   }
