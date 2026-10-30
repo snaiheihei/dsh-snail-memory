@@ -289,11 +289,10 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               <li className="snail-memory-entry" key={`${entry.scope.kind}:${entry.scope.kind === 'workspace' ? entry.scope.workspaceId : ''}:${entry.id}`}>
                 <h2>{entry.summary}</h2>
                 <p>{t(CATEGORY_COPY[entry.category])}</p>
-                <small>{t('rank')}: {entry.rank} · {t('updatedAt')}: {formatBeijingTime(entry.updatedAt)} · {t('revision')} {entry.revision}</small>
-                {entry.sourceRefs.length > 0 && (
-                  <p>{t('sources')}: {entry.sourceRefs.map(ref => `${ref.sessionId}${ref.eventSeqs === undefined ? '' : ` (${t('events')} ${ref.eventSeqs.join(', ')})`}`).join('; ')}</p>
-                )}
-                <button type="button" aria-label={`${t('viewDetails')} ${entry.summary}`} onClick={event => { void openDetails(entry, event.currentTarget) }}>{t('details')}</button>
+                <div className="snail-memory-entry-meta">
+                  <small>{t('rank')}: {entry.rank} · {t('updatedAt')}: {formatBeijingTime(entry.updatedAt)} · {t('revision')} {entry.revision}</small>
+                  <button type="button" aria-label={`${t('viewDetails')} ${entry.summary}`} onClick={event => { void openDetails(entry, event.currentTarget) }}>{t('details')}</button>
+                </div>
               </li>
             ))}
           </ul>

@@ -41,6 +41,9 @@ export const MEMORY_STYLES = `
 .snail-memory-list { display: grid; gap: 10px; padding: 0; list-style: none; }
 .snail-memory-entry { min-width: 0; padding: 14px; border: 1px solid var(--dsh-border, #d8dce2); border-radius: 8px; }
 .snail-memory-entry p, .snail-memory-entry small, .snail-memory-detail { overflow-wrap: anywhere; word-break: break-word; }
+.snail-memory-entry-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.snail-memory-entry-meta small { min-width: 0; }
+.snail-memory-entry-meta button { flex: none; margin-inline-start: auto; }
 .snail-memory-detail-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(16 24 40 / 45%); }
 .snail-memory-detail { width: min(680px, 100%); max-width: 680px; max-height: calc(100vh - 48px); padding: 20px; overflow-y: auto; border: 1px solid var(--dsh-border, #d8dce2); border-radius: 12px; background: var(--dsh-background, #fff); box-shadow: 0 20px 48px rgb(16 24 40 / 20%); }
 .snail-memory-detail h2 { margin-top: 0; }

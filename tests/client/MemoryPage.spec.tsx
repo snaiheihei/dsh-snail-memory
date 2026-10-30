@@ -54,7 +54,8 @@ describe('MemoryPage', () => {
     expect(screen.getByText('Use pnpm workspaces')).toBeTruthy()
     expect(screen.getByText('Project convention')).toBeTruthy()
     expect(screen.getByText('Rank: 0 · Updated: 2026-01-02 11:04:05 +08:00 · revision 2')).toBeTruthy()
-    expect(screen.getByText('Sources: session-1 (events 3, 4)')).toBeTruthy()
+    expect(screen.queryByText(/Sources:/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'View details for Use pnpm workspaces' }).textContent).toBe('Detail')
     expect(screen.queryByText('Workspace references')).toBeNull()
     expect(screen.queryByText(/provider exact usage/i)).toBeNull()
 
