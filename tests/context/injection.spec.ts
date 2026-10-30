@@ -125,7 +125,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     const queued = snailMessages(pending())
     expect(queued).toHaveLength(1)
     expect(snapshotMetadata(queued[0]!)?.layer).toBe(second)
-    expect(context.getSessionState('session-1').activeDesired).toMatchObject({ layer: second })
+    expect(context.store.getSessionState('session-1').activeDesired).toMatchObject({ layer: second })
 
     const decision = await preStep(context, agent, [...claim(), userMessage('continue')])
     expect(decision.kind).toBe('enter')
@@ -134,7 +134,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     expect(admitted).toHaveLength(1)
     record(admitted[0]!)
     await context.handleSessionEvent('session-1', { type: 'user/message', data: admitted[0]! })
-    const state = context.getSessionState('session-1')
+    const state = context.store.getSessionState('session-1')
     expect(state.layers[first].committed).toEqual([])
     expect(state.layers[second].committed).toHaveLength(1)
     expect(state.activeDesired).toBeNull()
@@ -148,7 +148,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     await addGlobalMemory(store, 'Second revision')
     await context.refresh(agent, 'global')
 
-    const state = context.getSessionState('session-1')
+    const state = context.store.getSessionState('session-1')
     const queued = snailMessages(pending())
     expect(state.layers.global.desired).toHaveLength(3)
     expect(state.activeDesired).toMatchObject({ layer: 'global', injectionId: state.layers.global.desired[2]!.injectionId })
@@ -164,7 +164,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     await context.enable(agent, 'global')
     await expect(context.refresh(agent, 'global')).resolves.toMatchObject({ status: 'up-to-date' })
 
-    expect(context.getSessionState('session-1').layers.global.desired).toHaveLength(1)
+    expect(context.store.getSessionState('session-1').layers.global.desired).toHaveLength(1)
     expect(injected).toHaveLength(1)
     expect(snailMessages(pending())).toHaveLength(1)
   })
@@ -173,12 +173,12 @@ describe('MemoryContextService single-snapshot protocol', () => {
     const { store, context, agent, pending } = await setup()
     const id = workspaceId('workspace-1')
     await context.enable(agent, 'global')
-    const original = context.getSessionState('session-1').activeDesired
+    const original = context.store.getSessionState('session-1').activeDesired
     await context.enable(agent, 'workspace', id)
     await addGlobalMemory(store, 'Current global revision')
     await context.enable(agent, 'global')
 
-    const state = context.getSessionState('session-1')
+    const state = context.store.getSessionState('session-1')
     expect(state.activeDesired).not.toEqual(original)
     expect(state.activeDesired?.layer).toBe('global')
     expect(state.layers.global.desired).toHaveLength(2)
@@ -190,7 +190,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     await context.enable(agent, 'global')
     await context.disable(agent)
 
-    expect(context.getSessionState('session-1').activeDesired).toBeNull()
+    expect(context.store.getSessionState('session-1').activeDesired).toBeNull()
     expect(snailMessages(pending())).toEqual([])
     const restarted = new MemoryContextService(context.store, {})
     await restarted.restore(agent)
@@ -208,7 +208,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     const decision = await preStep(context, agent, [stale!, prompt])
     expect(decision).toEqual({ kind: 'enter', messages: [prompt] })
     await expect(context.handleSessionEvent('session-1', { type: 'user/message', data: stale! })).resolves.toBe(false)
-    expect(context.getSessionState('session-1').layers.global.committed).toEqual([])
+    expect(context.store.getSessionState('session-1').layers.global.committed).toEqual([])
     expect(snapshotMetadata(snailMessages(pending())[0]!)?.layer).toBe('workspace')
   })
 
@@ -219,14 +219,14 @@ describe('MemoryContextService single-snapshot protocol', () => {
     const first = await preStep(context, agent, [admitted!, userMessage('first prompt')], 1)
     await addGlobalMemory(store, 'New memory after admission')
     await context.refresh(agent, 'global')
-    const refreshed = context.getSessionState('session-1').activeDesired
+    const refreshed = context.store.getSessionState('session-1').activeDesired
 
     record(admitted!)
     await expect(context.handleSessionEvent('session-1', { type: 'user/message', data: admitted! })).resolves.toBe(true)
-    expect(context.getSessionState('session-1').layers.global.committed).toHaveLength(1)
-    expect(context.getSessionState('session-1').layers.global.committed[0]?.injectionId)
+    expect(context.store.getSessionState('session-1').layers.global.committed).toHaveLength(1)
+    expect(context.store.getSessionState('session-1').layers.global.committed[0]?.injectionId)
       .toBe(snapshotMetadata(admitted!)?.injectionId)
-    expect(context.getSessionState('session-1').activeDesired).toEqual(refreshed)
+    expect(context.store.getSessionState('session-1').activeDesired).toEqual(refreshed)
     expect(snailMessages(pending())).toHaveLength(1)
 
     const [next] = claim()
@@ -246,7 +246,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     expect(snailMessages(second.messages)).toHaveLength(1)
     record(deferred!)
     await context.handleSessionEvent('session-1', { type: 'user/message', data: deferred! })
-    expect(context.getSessionState('session-1').layers.global.committed).toHaveLength(2)
+    expect(context.store.getSessionState('session-1').layers.global.committed).toHaveLength(2)
     expect(first.kind).toBe('enter')
   })
 
@@ -268,7 +268,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     record(snapshot!)
     await context.handleSessionEvent('session-1', { type: 'user/message', data: snapshot! })
     await context.handleSessionEvent('session-1', { type: 'user/message', data: snapshot! })
-    const committed = context.getSessionState('session-1').layers.global.committed
+    const committed = context.store.getSessionState('session-1').layers.global.committed
     expect(committed).toHaveLength(1)
     expect(committed[0]?.tokens).toBeGreaterThan(0)
   })
@@ -307,7 +307,7 @@ describe('MemoryContextService single-snapshot protocol', () => {
     resumed.record(snapshot!)
     await restarted.restore(resumed.agent)
 
-    expect(restarted.getSessionState('session-1').layers.global.committed).toHaveLength(1)
+    expect(restarted.store.getSessionState('session-1').layers.global.committed).toHaveLength(1)
     expect(snailMessages(resumed.pending())).toEqual([])
     expect(resumed.injected).toEqual([])
   })
@@ -336,7 +336,7 @@ describe('MemoryContextService snapshots and detail reads', () => {
     const rendered = await addGlobalMemory(store, 'Rendered memory')
 
     await context.enable(agent, 'global')
-    const desired = context.getSessionState('session-1').layers.global.desired[0]!
+    const desired = context.store.getSessionState('session-1').layers.global.desired[0]!
     expect(desired.memoryIds).toEqual([rendered.id])
     expect(desired.snapshot).toContain(rendered.id)
     expect(desired.snapshot).not.toContain(omitted.id)
@@ -347,7 +347,7 @@ describe('MemoryContextService snapshots and detail reads', () => {
     record(message!)
     await context.handleSessionEvent('session-1', { type: 'user/message', data: message! })
 
-    expect(context.getSessionState('session-1').layers.global.committed[0]?.memoryIds).toEqual([rendered.id])
+    expect(context.store.getSessionState('session-1').layers.global.committed[0]?.memoryIds).toEqual([rendered.id])
   })
 
   it('renders only independent global entries without workspace aggregate references', async () => {
@@ -364,8 +364,8 @@ describe('MemoryContextService snapshots and detail reads', () => {
     })
 
     await context.enable(agent, 'global')
-    const active = context.getSessionState('session-1').activeDesired
-    const snapshot = context.getSessionState('session-1').layers.global.desired
+    const active = context.store.getSessionState('session-1').activeDesired
+    const snapshot = context.store.getSessionState('session-1').layers.global.desired
       .find(item => item.injectionId === active?.injectionId)?.snapshot
     expect(snapshot).toContain('Independent global preference')
     expect(snapshot).not.toContain('First project rule')
@@ -385,13 +385,13 @@ describe('MemoryContextService snapshots and detail reads', () => {
       await addGlobalMemory(store, summary)
     }
     await context.enable(agent, 'global')
-    const original = context.getSessionState('session-1').layers.global.desired[0]?.snapshot
+    const original = context.store.getSessionState('session-1').layers.global.desired[0]?.snapshot
 
     snapshotTokenBudget = 100
     await addGlobalMemory(store, 'Third retained summary')
     await context.refresh(agent, 'global')
 
-    const desired = context.getSessionState('session-1').layers.global.desired
+    const desired = context.store.getSessionState('session-1').layers.global.desired
     expect(desired).toHaveLength(2)
     expect(desired[0]?.snapshot).toBe(original)
     expect(desired[0]?.snapshot).toContain('First retained summary')
@@ -437,9 +437,9 @@ describe('MemoryContextService snapshots and detail reads', () => {
 
     await context.enable(agent, 'workspace', id)
 
-    expect(context.getSessionState('session-1').workspaceId).toBeUndefined()
-    expect(context.getSessionState('session-1').selectedWorkspaceId).toBe(id)
-    expect(context.getSessionState('session-1').layers.workspace.desired[0]?.revision).toBe(1)
+    expect(context.store.getSessionState('session-1').workspaceId).toBeUndefined()
+    expect(context.store.getSessionState('session-1').selectedWorkspaceId).toBe(id)
+    expect(context.store.getSessionState('session-1').layers.workspace.desired[0]?.revision).toBe(1)
   })
 
   it('switches between workspaces with one active snapshot and an unchanged distillation owner', async () => {
@@ -457,14 +457,14 @@ describe('MemoryContextService snapshots and detail reads', () => {
     await context.enable(agent, 'workspace', first)
     await context.enable(agent, 'workspace', second)
 
-    const state = context.getSessionState('session-1')
+    const state = context.store.getSessionState('session-1')
     expect(state.workspaceId).toBe(first)
     expect(state.selectedWorkspaceId).toBe(second)
     const queued = snailMessages(pending())
     expect(queued).toHaveLength(1)
     expect(queued[0]?.content[0]).toMatchObject({ text: expect.stringContaining('Second project memory') })
     await expect(context.enable(agent, 'workspace', second)).resolves.toMatchObject({ status: 'already-enabled' })
-    expect(context.getSessionState('session-1').layers.workspace.desired).toHaveLength(2)
+    expect(context.store.getSessionState('session-1').layers.workspace.desired).toHaveLength(2)
   })
 
   it('refreshes against the selected workspace revision instead of another workspace revision', async () => {
@@ -483,7 +483,7 @@ describe('MemoryContextService snapshots and detail reads', () => {
     await write(second, 'Second project revision two')
 
     await expect(context.refresh(agent, 'workspace')).resolves.toMatchObject({ status: 'refreshed' })
-    const desired = context.getSessionState('session-1').layers.workspace.desired
+    const desired = context.store.getSessionState('session-1').layers.workspace.desired
     expect(desired.at(-1)).toMatchObject({ revision: 2, workspaceId: second })
   })
 
@@ -502,6 +502,6 @@ describe('MemoryContextService snapshots and detail reads', () => {
     })
 
     await expect(context.refresh(agent, 'workspace')).resolves.toMatchObject({ status: 'up-to-date' })
-    expect(context.getSessionState('session-1').layers.workspace.desired).toHaveLength(1)
+    expect(context.store.getSessionState('session-1').layers.workspace.desired).toHaveLength(1)
   })
 })

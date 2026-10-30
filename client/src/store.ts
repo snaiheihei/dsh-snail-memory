@@ -185,24 +185,20 @@ export class MemoryClientStore {
 
   async remove(scope: MemoryScope, id: MemoryId): Promise<{ readonly removed: boolean }> {
     const result = await this.rpc.call('remove', { scope, id })
-    await this.notifyChanged()
+    await this.refreshActive()
     return result
   }
 
   async promote(scope: MemoryScope, id: MemoryId): Promise<PromoteMemoryResult> {
     const result = await this.rpc.call('promote', { scope, id })
-    await this.notifyChanged()
+    await this.refreshActive()
     return result
   }
 
   async consolidate(scope: MemoryScope): Promise<ConsolidateMemoryResult> {
     const result = await this.rpc.call('consolidate', { scope })
-    await this.notifyChanged()
+    await this.refreshActive()
     return result
-  }
-
-  notifyChanged(): Promise<void> {
-    return this.refreshActive()
   }
 
   listen(): () => void {
@@ -238,7 +234,7 @@ export class MemoryClientStore {
           ? await this.rpc.call(method, { sessionId, layer: layer!, ...(workspaceId === undefined ? {} : { workspaceId }) })
           : await this.rpc.call(method, { sessionId, layer: layer! })
       this.trackedSessions.add(sessionId)
-      await this.notifyChanged()
+      await this.refreshActive()
       return result
     })()
     this.mutations.set(key, operation)

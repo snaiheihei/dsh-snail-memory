@@ -6,8 +6,6 @@ import { formatBeijingTime } from '../time.js'
 import type { MemoryController } from './controller.js'
 import { safeError } from './errors.js'
 
-export type MemoryCommandResult = CommandResult
-
 const USAGE = 'Usage: /memory status | remember workspace <text> | correct workspace <id> <text> | forget workspace <id>'
 
 function formatScheduleTime(value: string | null | undefined): string {
@@ -25,7 +23,7 @@ export async function executeMemoryCommand(
   controller: MemoryController,
   rawInput: string,
   sessionId: string,
-): Promise<MemoryCommandResult> {
+): Promise<CommandResult> {
   const match = /^\s*(\S+)(?:\s+(global|workspace))?(?:\s+([\s\S]*))?\s*$/u.exec(rawInput)
   const action = match?.[1]
   const layer = match?.[2]

@@ -77,11 +77,6 @@ function projectTranscriptEvents(events: readonly TranscriptEvent[]): ProjectedT
   })
 }
 
-/** Project only durable evidence; memory and request-context events never distill back into themselves. */
-export function renderSessionTranscript(events: readonly TranscriptEvent[]): string {
-  return projectTranscriptEvents(events).map(event => event.text).join('\n\n')
-}
-
 export function nextDistillationBatch(
   events: readonly TranscriptEvent[],
   position: DistillationCursorPosition,

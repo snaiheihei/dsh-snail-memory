@@ -266,10 +266,6 @@ export class MemoryLifecycleService {
     return result
   }
 
-  consolidate(): Promise<number> {
-    return this.consolidateWithResult()
-  }
-
   consolidateNow(scope: MemoryScope): Promise<LifecycleIntentRunResult> {
     return this.scheduler.requestConsolidation(scope)
   }

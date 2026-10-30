@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LifecycleActivityRecord } from '../../src/lifecycle/activity.js'
 import { LifecycleScheduler, WriterLifecycleRuntime } from '../../src/lifecycle/scheduler.js'
 import { WriterLock } from '../../src/store/lock.js'
-import { emptyState, MemoryStore } from '../../src/store/store.js'
+import { emptyState } from '../../src/store/json.js'
+import { MemoryStore } from '../../src/store/store.js'
 import { workspaceId } from '../../src/store/types.js'
 
 const roots: string[] = []

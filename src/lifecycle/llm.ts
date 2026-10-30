@@ -204,6 +204,3 @@ export async function invokeAuxiliaryModel(options: AuxiliaryCallOptions): Promi
     throw withActivityCategory(error, category)
   }
 }
-
-/** An injectable model boundary; production can pass an LlmRuntime directly. */
-export type LlmModel = AuxiliaryModel

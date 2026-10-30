@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, LlmCallConfig, LlmRuntime, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
-import { DshAuxiliaryModel, nextDistillationBatch, renderSessionTranscript, resolveSessionWorkspace, selectModelRoute } from '../../src/runtime.js'
+import { DshAuxiliaryModel, nextDistillationBatch, resolveSessionWorkspace, selectModelRoute } from '../../src/runtime.js'
 
 describe('dsh runtime adapters', () => {
   it('resolves workspace membership by stable session id and preserves Ungrouped', () => {
@@ -21,13 +21,13 @@ describe('dsh runtime adapters', () => {
   })
 
   it('renders durable conversation and tool evidence without reinjecting memory snapshots', () => {
-    const transcript = renderSessionTranscript([
+    const transcript = nextDistillationBatch([
       { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Build failed' }] } },
       { seq: 2, type: 'user/message', data: { source: { kind: 'snail-memory' }, content: [{ type: 'text', text: 'old memory' }] } },
       { seq: 3, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Use the focused test' }] } } },
       { seq: 4, type: 'tool/result', data: { message: { content: [{ type: 'text', text: '6 tests passed' }] } } },
       { seq: 5, type: 'request/context', data: { content: [{ type: 'text', text: 'hidden context' }] } },
-    ])
+    ], { lastEventSeq: 0, offset: 0 }, 48_000).text
 
     expect(transcript).toContain('Build failed')
     expect(transcript).toContain('Use the focused test')
@@ -37,14 +37,14 @@ describe('dsh runtime adapters', () => {
   })
 
   it('excludes snail memory read and feedback results while preserving other tool evidence', () => {
-    const transcript = renderSessionTranscript([
+    const transcript = nextDistillationBatch([
       { seq: 1, type: 'tool/call', data: { callId: 'call-memory', name: 'snail_memory_read', arguments: '{}' } },
       { seq: 2, type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'call-memory' }, content: [{ type: 'text', text: 'full memory detail' }] } } },
       { seq: 3, type: 'tool/call', data: { callId: 'call-feedback', name: 'snail_memory_feedback', arguments: '{}' } },
       { seq: 4, type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'call-feedback' }, content: [{ type: 'text', text: 'feedback rank receipt' }] } } },
       { seq: 5, type: 'tool/call', data: { callId: 'call-test', name: 'run_tests', arguments: '{}' } },
       { seq: 6, type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'call-test' }, content: [{ type: 'text', text: '6 tests passed' }] } } },
-    ])
+    ], { lastEventSeq: 0, offset: 0 }, 48_000).text
 
     expect(transcript).not.toContain('full memory detail')
     expect(transcript).not.toContain('feedback rank receipt')
@@ -57,7 +57,7 @@ describe('dsh runtime adapters', () => {
       { seq: 20, type: 'assistant/message', data: { turnId: 'turn-1', message: { content: [{ type: 'text', text: 'second' }] } } },
       { seq: 30, type: 'user/message', data: { turnId: 'turn-2', source: { kind: 'user' }, content: [{ type: 'text', text: 'third' }] } },
     ]
-    const firstTurn = renderSessionTranscript(events.slice(0, 2))
+    const firstTurn = nextDistillationBatch(events.slice(0, 2), { lastEventSeq: 0, offset: 0 }, 48_000).text
 
     const first = nextDistillationBatch(events, { lastEventSeq: 0, offset: 0 }, firstTurn.length)
     const second = nextDistillationBatch(events, first.cursor, 24_000)
@@ -74,7 +74,7 @@ describe('dsh runtime adapters', () => {
       { seq: 7, type: 'user/message', data: { turnId: 'large-turn', source: { kind: 'user' }, content: [{ type: 'text', text: 'a'.repeat(35) }] } },
       { seq: 8, type: 'assistant/message', data: { turnId: 'large-turn', message: { content: [{ type: 'text', text: 'b'.repeat(35) }] } } },
     ]
-    const expected = renderSessionTranscript(events)
+    const expected = nextDistillationBatch(events, { lastEventSeq: 0, offset: 0 }, 48_000).text
     let cursor = { lastEventSeq: 0, offset: 0 }
     let reconstructed = ''
 

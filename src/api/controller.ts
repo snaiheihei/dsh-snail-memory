@@ -5,7 +5,7 @@ import type {
 import type { MemoryContextService, InjectionAgent, MemoryOperationResult } from '../context/service.js'
 import type { LifecycleIntentRunResult } from '../lifecycle/activity.js'
 import { pendingInjection, type MemoryStore } from '../store/store.js'
-import { workspaceId, type MemoryEntry, type MemoryId, type MemoryIndex, type MemoryScope, type PromoteMemoryResult, type UpsertMemoryInput, type WorkspaceId } from '../store/types.js'
+import type { MemoryEntry, MemoryId, MemoryIndex, MemoryScope, PromoteMemoryResult, UpsertMemoryInput, WorkspaceId } from '../store/types.js'
 import { prepareMemoryCandidate } from '../safety/index.js'
 import { MemoryApiError, safeError } from './errors.js'
 
@@ -203,5 +203,3 @@ export class MemoryController {
     return this.options.settings
   }
 }
-
-export { workspaceId }

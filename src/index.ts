@@ -116,10 +116,6 @@ async function initialize(
     model: new DshAuxiliaryModel(ctx.llm),
     route: () => selectModelRoute(ctx.agents.list(), configuredRoute),
     resolveWorkspaceId: sessionId => resolveSessionWorkspace(ctx.workspaceRegistry.list(), sessionId),
-    ...(config.reviewEveryUserTurns === undefined ? {} : { reviewEveryUserTurns: config.reviewEveryUserTurns }),
-    ...(config.idleDelayMinutes === undefined ? {} : { idleDelayMinutes: config.idleDelayMinutes }),
-    ...(config.consolidationCooldownHours === undefined ? {} : { consolidationCooldownHours: config.consolidationCooldownHours }),
-    ...(config.globalConsolidationCooldownDays === undefined ? {} : { globalConsolidationCooldownDays: config.globalConsolidationCooldownDays }),
     ...(config.retentionSweepHours === undefined ? {} : { retentionSweepHours: config.retentionSweepHours }),
     transcriptEvents: sessionId => {
       const agent = ctx.agents.get(SessionId(sessionId))
@@ -169,7 +165,6 @@ async function initialize(
     await prepareAgent(agent)
     return undefined
   })
-  ctx.on('agent/inbox/discarded', ({ agent, message }) => memories.handleDiscarded(agent.session.id, message))
   ctx.on('agent/pre-step', ({ agent, messages, turn, step }, next) =>
     memories.handlePreStep(agent, { messages, turn, step }, next))
   ctx.on('agent/status', ({ agent, status }) => {

@@ -11,7 +11,6 @@ import type {
   MemoryIndex,
   MemoryLayer,
   MemoryScope,
-  SessionMemoryState,
   WorkspaceId,
 } from '../store/types.js'
 import { estimateTokens, renderSnapshotWithIds, snapshotMetadata, type SnapshotMetadata } from './snapshot.js'
@@ -69,7 +68,6 @@ interface AdmittedInjection extends SnapshotMetadata {
 export class MemoryContextService {
   private readonly now: () => Date
   private readonly getSnapshotTokenBudget: () => number
-  private readonly queued = new Set<string>()
   private readonly turnAdmissions = new Map<string, { readonly turn: number; readonly injectionId: string }>()
   private readonly admittedInjections = new Map<string, AdmittedInjection>()
 
@@ -77,10 +75,6 @@ export class MemoryContextService {
     this.now = options.now ?? (() => new Date())
     const fallback = options.maxSnapshotTokens ?? 1_200
     this.getSnapshotTokenBudget = options.getSnapshotTokenBudget ?? (() => fallback)
-  }
-
-  getSessionState(sessionId: string): SessionMemoryState {
-    return this.store.getSessionState(sessionId)
   }
 
   async enable(agent: InjectionAgent, layer: MemoryLayer, workspaceId?: WorkspaceId): Promise<MemoryOperationResult> {
@@ -166,24 +160,16 @@ export class MemoryContextService {
         && metadata.layer === active.layer
       if (matchesActive && !activePending) {
         activePending = true
-        this.queued.add(this.queueKey(sessionId, metadata.layer, metadata.injectionId))
         continue
       }
       // Replace the first stale item in place so the new snapshot stays before the next user prompt.
       if (activeMessage && !activePending && agent.inbox.replace(message.id, activeMessage)) {
         activePending = true
-        this.queued.delete(this.queueKey(sessionId, metadata.layer, metadata.injectionId))
-        this.queued.add(this.queueKey(sessionId, active!.layer, active!.desired.injectionId))
         continue
       }
-      if (agent.inbox.remove(message.id)) {
-        this.queued.delete(this.queueKey(sessionId, metadata.layer, metadata.injectionId))
-      }
+      agent.inbox.remove(message.id)
     }
-    if (active && activeMessage && !activePending) {
-      agent.inject(activeMessage)
-      this.queued.add(this.queueKey(sessionId, active.layer, active.desired.injectionId))
-    }
+    if (active && activeMessage && !activePending) agent.inject(activeMessage)
   }
 
   async handlePreStep(
@@ -207,7 +193,6 @@ export class MemoryContextService {
         admitted = metadata
         return true
       }
-      this.queued.delete(this.queueKey(sessionId, metadata.layer, metadata.injectionId))
       return false
     })
     if (admitted) {
@@ -224,11 +209,6 @@ export class MemoryContextService {
     const metadata = snapshotMetadata(message)
     if (!metadata) return false
     return this.commitInjection(sessionId, message, metadata, true)
-  }
-
-  handleDiscarded(sessionId: string, message: UserMessage): void {
-    const metadata = snapshotMetadata(message)
-    if (metadata) this.queued.delete(this.queueKey(sessionId, metadata.layer, metadata.injectionId))
   }
 
   async readDetail(sessionId: string, layer: MemoryLayer, id: MemoryId): Promise<MemoryEntry | null> {
@@ -274,10 +254,7 @@ export class MemoryContextService {
       if (current.activeDesired?.injectionId === metadata.injectionId) current.activeDesired = null
       committed = true
     })
-    if (committed) {
-      this.queued.delete(this.queueKey(sessionId, metadata.layer, metadata.injectionId))
-      this.admittedInjections.delete(admissionKey)
-    }
+    if (committed) this.admittedInjections.delete(admissionKey)
     return committed
   }
 
@@ -300,7 +277,6 @@ export class MemoryContextService {
     const rendered = renderSnapshotWithIds({
       injectionId,
       layer,
-      scope,
       index,
       automatic,
       now: new Date(createdAt),

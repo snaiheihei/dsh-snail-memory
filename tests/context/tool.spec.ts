@@ -124,7 +124,7 @@ describe('snail_memory_feedback', () => {
       sourceRefs: [], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
     })
     await context.enable(agent, 'global')
-    const desired = context.getSessionState('session-1').layers.global.desired[0]!
+    const desired = context.store.getSessionState('session-1').layers.global.desired[0]!
     await store.updateSessionState('session-1', state => {
       state.layers.global.committed.push({
         injectionId: desired.injectionId,

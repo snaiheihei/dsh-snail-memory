@@ -580,5 +580,3 @@ export function pendingInjection(state: SessionMemoryState, layer: 'global' | 'w
   const active = activeInjection(state)
   return active?.layer === layer ? [active.desired] : []
 }
-
-export { emptyState }

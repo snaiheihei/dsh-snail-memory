@@ -1,5 +1,5 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { MemoryId, MemoryIndex, MemoryLayer, MemoryScope } from '../store/types.js'
+import type { MemoryId, MemoryIndex, MemoryLayer } from '../store/types.js'
 
 const DAY_MS = 86_400_000
 const HEADER_PATTERN = /^<!-- snail-memory: (\{.*\}) -->\n/
@@ -13,7 +13,6 @@ export interface SnapshotMetadata {
 export interface SnapshotInput {
   readonly injectionId: string
   readonly layer: MemoryLayer
-  readonly scope: MemoryScope
   readonly index: MemoryIndex
   readonly automatic: boolean
   readonly now: Date
@@ -45,10 +44,6 @@ export function snapshotMetadata(message: UserMessage): SnapshotMetadata | null 
 export interface RenderedSnapshot {
   readonly snapshot: string
   readonly memoryIds: readonly MemoryId[]
-}
-
-export function renderSnapshot(input: SnapshotInput): string {
-  return renderSnapshotWithIds(input).snapshot
 }
 
 export function renderSnapshotWithIds(input: SnapshotInput): RenderedSnapshot {
