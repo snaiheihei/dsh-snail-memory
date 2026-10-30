@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import './message-source.js'
+import type { MemoryOperationResult } from '../contract.js'
 import { activeInjection, type MemoryStore } from '../store/store.js'
 import type {
   DesiredInjection,
@@ -54,11 +55,6 @@ export interface MemoryContextOptions {
   readonly now?: () => Date
   readonly maxSnapshotTokens?: number
   readonly getSnapshotTokenBudget?: () => number
-}
-
-export interface MemoryOperationResult {
-  readonly status: 'enabled' | 'already-enabled' | 'refreshed' | 'up-to-date' | 'disabled'
-  readonly injectionId?: string
 }
 
 interface AdmittedInjection extends SnapshotMetadata {

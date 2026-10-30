@@ -10,7 +10,6 @@ import type {
   SessionMemoryState,
   WorkspaceId,
 } from './store/types.js'
-import type { MemoryOperationResult } from './context/service.js'
 
 export const RPC_ROUTE_PREFIX = '/snail-memory/rpc'
 export const RPC_METHODS = [
@@ -67,6 +66,46 @@ export interface WorkspaceView {
   readonly id: WorkspaceId
   readonly title: string
 }
+export interface MemoryOperationResult {
+  readonly status: 'enabled' | 'already-enabled' | 'disabled' | 'refreshed' | 'up-to-date'
+  readonly injectionId?: string
+}
 
-export type RpcPayload = SessionRequest | LayerRequest | EnableRequest | ScopeRequest | ReadRequest | WriteRequest | CorrectRequest | MemorySettings | Record<string, never>
-export type RpcValue = SessionStateView | MemoryOperationResult | MemoryIndex | MemoryEntry | { removed: boolean } | PromoteMemoryResult | ConsolidateMemoryResult | MemoryStatus | MemorySettings | WorkspaceView[]
+export interface RpcRequestMap {
+  readonly getSessionState: SessionRequest
+  readonly enable: EnableRequest
+  readonly disable: SessionRequest
+  readonly refresh: LayerRequest
+  readonly list: ScopeRequest
+  readonly consolidate: ScopeRequest
+  readonly read: ReadRequest
+  readonly remove: ReadRequest
+  readonly promote: ReadRequest
+  readonly remember: WriteRequest
+  readonly correct: CorrectRequest
+  readonly status: Record<string, never>
+  readonly getSettings: Record<string, never>
+  readonly updateSettings: MemorySettings
+  readonly listWorkspaces: Record<string, never>
+}
+
+export interface RpcResponseMap {
+  readonly getSessionState: SessionStateView
+  readonly enable: MemoryOperationResult
+  readonly disable: MemoryOperationResult
+  readonly refresh: MemoryOperationResult
+  readonly list: MemoryIndex
+  readonly consolidate: ConsolidateMemoryResult
+  readonly read: MemoryEntry
+  readonly remove: { readonly removed: boolean }
+  readonly promote: PromoteMemoryResult
+  readonly remember: MemoryEntry
+  readonly correct: MemoryEntry
+  readonly status: MemoryStatus
+  readonly getSettings: MemorySettings
+  readonly updateSettings: MemorySettings
+  readonly listWorkspaces: WorkspaceView[]
+}
+
+export type RpcPayload = RpcRequestMap[RpcMethod]
+export type RpcValue = RpcResponseMap[RpcMethod]

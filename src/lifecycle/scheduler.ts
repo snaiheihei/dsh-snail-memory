@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { MemoryStoreReadonlyError, type MemoryStore } from '../store/store.js'
-import type { LifecycleIntent, MemoryScope } from '../store/types.js'
+import type { LifecycleIntent, MemoryMeta, MemoryScope, WorkspaceId } from '../store/types.js'
 import type {
   LifecycleActivityRecord,
   LifecycleActivitySink,
@@ -228,6 +228,78 @@ export class LifecycleScheduler {
     this.schedule()
   }
 
+  finishConsolidation(
+    meta: MemoryMeta,
+    scope: MemoryScope,
+    snapshot: MemoryMeta,
+    completedAt: string,
+  ): void {
+    if (scope.kind === 'global') {
+      if (meta.nextGlobalConsolidationAt === snapshot.nextGlobalConsolidationAt) {
+        meta.globalDirty = false
+        meta.lastGlobalConsolidationAt = completedAt
+        meta.nextGlobalConsolidationAt = null
+      }
+    } else {
+      const consolidation = meta.workspaceConsolidation[scope.workspaceId]
+      const scheduleSnapshot = snapshot.workspaceConsolidation[scope.workspaceId]?.nextConsolidationAt
+      if (consolidation && consolidation.nextConsolidationAt === scheduleSnapshot) {
+        consolidation.dirty = false
+        consolidation.lastConsolidationAt = completedAt
+        consolidation.nextConsolidationAt = null
+      }
+    }
+    meta.lastError = null
+  }
+
+  retryConsolidation(
+    meta: MemoryMeta,
+    workspaceId: WorkspaceId | undefined,
+    retryAt: string,
+    scheduleSnapshot?: string | null,
+  ): void {
+    if (workspaceId !== undefined) {
+      const consolidation = meta.workspaceConsolidation[workspaceId] ??= {
+        dirty: false,
+        nextConsolidationAt: null,
+        lastConsolidationAt: null,
+      }
+      if (scheduleSnapshot === undefined) consolidation.dirty = true
+      if (scheduleSnapshot === undefined || consolidation.nextConsolidationAt === scheduleSnapshot) {
+        consolidation.nextConsolidationAt = retryAt
+      }
+    } else {
+      if (scheduleSnapshot === undefined) meta.globalDirty = true
+      if (scheduleSnapshot === undefined || meta.nextGlobalConsolidationAt === scheduleSnapshot) {
+        meta.nextGlobalConsolidationAt = retryAt
+      }
+    }
+  }
+
+  static finishRetention(
+    meta: MemoryMeta,
+    changedWorkspaces: readonly WorkspaceId[],
+    now: () => Date,
+    consolidationDelayMs: number,
+    retentionDelayMs: number,
+    scheduleSnapshot?: string | null,
+  ): void {
+    const completedAt = now()
+    for (const id of changedWorkspaces) {
+      const consolidation = meta.workspaceConsolidation[id] ??= {
+        dirty: false,
+        nextConsolidationAt: null,
+        lastConsolidationAt: null,
+      }
+      consolidation.dirty = true
+      consolidation.nextConsolidationAt = new Date(completedAt.getTime() + consolidationDelayMs).toISOString()
+    }
+    if (scheduleSnapshot === undefined || meta.nextRetentionAt === scheduleSnapshot) {
+      meta.lastRetentionAt = completedAt.toISOString()
+      meta.nextRetentionAt = new Date(now().getTime() + retentionDelayMs).toISOString()
+    }
+  }
+
   drain(): Promise<void> {
     return this.queue
   }
@@ -376,19 +448,13 @@ export class LifecycleScheduler {
           }
           current.lastError = null
           if (workspaceId !== undefined) {
-            const consolidation = current.workspaceConsolidation[workspaceId]
-            if (consolidation && consolidation.nextConsolidationAt === scheduleSnapshot) {
-              consolidation.dirty = false
-              consolidation.nextConsolidationAt = null
-              consolidation.lastConsolidationAt = this.now().toISOString()
-            }
-          } else if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === scheduleSnapshot) {
-            current.globalDirty = false
-            current.nextGlobalConsolidationAt = null
-            current.lastGlobalConsolidationAt = this.now().toISOString()
-          } else if (value.kind === 'retention' && current.nextRetentionAt === scheduleSnapshot) {
-            current.lastRetentionAt = this.now().toISOString()
-            current.nextRetentionAt = new Date(this.now().getTime() + this.retentionDelayMs).toISOString()
+            this.finishConsolidation(current, { kind: 'workspace', workspaceId }, meta, this.now().toISOString())
+          } else if (value.kind === 'global-consolidate') {
+            this.finishConsolidation(current, { kind: 'global' }, meta, this.now().toISOString())
+          } else if (value.kind === 'retention') {
+            LifecycleScheduler.finishRetention(
+              current, [], this.now, this.consolidationDelayMs, this.retentionDelayMs, scheduleSnapshot,
+            )
           }
         })
         const cursor = result.batchResults?.at(-1)?.cursor
@@ -436,12 +502,8 @@ export class LifecycleScheduler {
               current.pending[retryKind] = retryIntent
             }
           }
-          if (workspaceId !== undefined) {
-            const consolidation = current.workspaceConsolidation[workspaceId]
-            if (consolidation && consolidation.nextConsolidationAt === scheduleSnapshot) consolidation.nextConsolidationAt = retryAt
-          }
-          if (value.kind === 'global-consolidate' && current.nextGlobalConsolidationAt === scheduleSnapshot) {
-            current.nextGlobalConsolidationAt = retryAt
+          if (workspaceId !== undefined || value.kind === 'global-consolidate') {
+            this.retryConsolidation(current, workspaceId, retryAt, scheduleSnapshot)
           }
           if (value.kind === 'retention' && current.nextRetentionAt === scheduleSnapshot) {
             current.nextRetentionAt = retryAt
@@ -506,10 +568,10 @@ export class LifecycleScheduler {
     }
   }
 
-  private workspaceId(kind: string): string | undefined {
+  private workspaceId(kind: string): WorkspaceId | undefined {
     if (!kind.startsWith('consolidate:')) return undefined
     try {
-      return decodeURIComponent(kind.slice('consolidate:'.length))
+      return decodeURIComponent(kind.slice('consolidate:'.length)) as WorkspaceId
     } catch {
       return undefined
     }
@@ -557,84 +619,5 @@ export class LifecycleScheduler {
       this.timer = undefined
       this.enqueue()
     }, delay)
-  }
-}
-
-export interface WriterLifecycleRuntimeOptions {
-  readonly initiallyActive?: boolean
-  readonly retryMs?: number
-  readonly prepare: () => Promise<void>
-  readonly start: () => Promise<void>
-  readonly stop: () => Promise<void>
-  readonly onError: () => void
-}
-
-/** Serializes writer transitions and retries transient activation failures while writable. */
-export class WriterLifecycleRuntime {
-  private writable = false
-  private active: boolean
-  private disposed = false
-  private retry: ReturnType<typeof setTimeout> | undefined
-  private transition: Promise<void> = Promise.resolve()
-
-  constructor(private readonly options: WriterLifecycleRuntimeOptions) {
-    this.active = options.initiallyActive ?? false
-  }
-
-  setWritable(writable: boolean): void {
-    this.writable = writable
-    if (!writable) this.clearRetry()
-    this.enqueue()
-  }
-
-  drain(): Promise<void> {
-    return this.transition
-  }
-
-  async dispose(): Promise<void> {
-    this.disposed = true
-    this.clearRetry()
-    await this.transition
-  }
-
-  private enqueue(): void {
-    this.transition = this.transition.then(() => this.apply()).catch(() => {
-      this.options.onError()
-    })
-  }
-
-  private async apply(): Promise<void> {
-    if (this.disposed) return
-    if (!this.writable) {
-      if (this.active) {
-        await this.options.stop()
-        this.active = false
-      }
-      return
-    }
-    if (this.active) return
-    try {
-      await this.options.prepare()
-      if (!this.writable || this.disposed) return
-      await this.options.start()
-      this.active = true
-    } catch {
-      this.options.onError()
-      this.scheduleRetry()
-    }
-  }
-
-  private scheduleRetry(): void {
-    if (this.retry || !this.writable || this.disposed) return
-    this.retry = setTimeout(() => {
-      this.retry = undefined
-      this.enqueue()
-    }, this.options.retryMs ?? 5_000)
-    this.retry.unref()
-  }
-
-  private clearRetry(): void {
-    if (this.retry) clearTimeout(this.retry)
-    this.retry = undefined
   }
 }

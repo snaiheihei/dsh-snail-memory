@@ -218,17 +218,15 @@ export class MemoryLifecycleService {
     } catch (error) {
       await this.store.updateMeta(meta => {
         meta.lastError = lifecycleErrorMessage(kind)
-        if (kind === 'global-consolidate') {
-          meta.globalDirty = true
-          meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.getSettings().globalConsolidationCooldownDays * 86_400_000).toISOString()
-        } else if (consolidationWorkspaceId !== undefined) {
-          const consolidation = meta.workspaceConsolidation[consolidationWorkspaceId] ??= {
-            dirty: false,
-            nextConsolidationAt: null,
-            lastConsolidationAt: null,
-          }
-          consolidation.dirty = true
-          consolidation.nextConsolidationAt = new Date(this.now().getTime() + this.getSettings().consolidationCooldownHours * 3_600_000).toISOString()
+        if (kind === 'global-consolidate' || consolidationWorkspaceId !== undefined) {
+          const delay = consolidationWorkspaceId === undefined
+            ? this.getSettings().globalConsolidationCooldownDays * 86_400_000
+            : this.getSettings().consolidationCooldownHours * 3_600_000
+          this.scheduler.retryConsolidation(
+            meta,
+            consolidationWorkspaceId,
+            new Date(this.now().getTime() + delay).toISOString(),
+          )
         }
       })
       throw error
@@ -289,17 +287,26 @@ export class MemoryLifecycleService {
     const route = this.options.route?.()
     const provider = route?.provider ?? this.options.provider
     const modelName = route?.model ?? this.options.modelName
-    return consolidateMemories(this.store, {
-      ...(this.options.model === undefined ? {} : { model: this.options.model }),
-      ...(provider === undefined ? {} : { provider }),
-      ...(modelName === undefined ? {} : { modelName }),
-      ...(scope === undefined ? {} : { scope }),
-      now: this.now,
-      ...(signal === undefined ? {} : { signal }),
-      onChange: async (scope, entries) => {
-        await this.options.onChange?.({ kind: 'consolidate', scope, ids: entries.map(entry => entry.id) })
-      },
-    })
+    const now = this.now()
+    const snapshot = this.store.getMeta()
+    let written = 0
+    for (const currentScope of scope ? [scope] : this.store.workspaceScopes()) {
+      written += await consolidateMemories(this.store, {
+        ...(this.options.model === undefined ? {} : { model: this.options.model }),
+        ...(provider === undefined ? {} : { provider }),
+        ...(modelName === undefined ? {} : { modelName }),
+        scope: currentScope,
+        now: () => now,
+        ...(signal === undefined ? {} : { signal }),
+        onChange: async (scope, entries) => {
+          await this.options.onChange?.({ kind: 'consolidate', scope, ids: entries.map(entry => entry.id) })
+        },
+      })
+      await this.store.updateMeta(meta => {
+        this.scheduler.finishConsolidation(meta, currentScope, snapshot, now.toISOString())
+      })
+    }
+    return written
   }
 
   private validateInput(input: UpsertMemoryInput): void {

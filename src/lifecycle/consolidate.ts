@@ -44,13 +44,9 @@ function modelEntry(entry: MemoryEntry) {
 export async function consolidateMemories(store: MemoryStore, options: ConsolidateOptions): Promise<number> {
   if (!options.model || !options.provider || !options.modelName) throw new Error('No auxiliary model route is available')
   const now = options.now?.() ?? new Date()
-  const initialMeta = store.getMeta()
   const scopes: MemoryScope[] = options.scope ? [options.scope] : store.workspaceScopes()
   let written = 0
   for (const scope of scopes) {
-    const consolidationSchedule = scope.kind === 'global'
-      ? initialMeta.nextGlobalConsolidationAt
-      : initialMeta.workspaceConsolidation[scope.workspaceId]?.nextConsolidationAt
     const entries = await fullEntries(store, scope)
     if (entries.length > 0) {
       const newestFirst = entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -125,23 +121,6 @@ Input entries:\n${safe.text}`,
       }
       if (changed.length) await options.onChange?.(scope, changed)
     }
-    await store.updateMeta(meta => {
-      if (scope.kind === 'global') {
-        if (meta.nextGlobalConsolidationAt === consolidationSchedule) {
-          meta.globalDirty = false
-          meta.lastGlobalConsolidationAt = now.toISOString()
-          meta.nextGlobalConsolidationAt = null
-        }
-      } else {
-        const consolidation = meta.workspaceConsolidation[scope.workspaceId]
-        if (consolidation && consolidation.nextConsolidationAt === consolidationSchedule) {
-          consolidation.dirty = false
-          consolidation.lastConsolidationAt = now.toISOString()
-          consolidation.nextConsolidationAt = null
-        }
-      }
-      meta.lastError = null
-    })
   }
   return written
 }

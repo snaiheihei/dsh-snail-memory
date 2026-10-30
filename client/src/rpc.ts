@@ -1,50 +1,7 @@
-import type {
-  ConsolidateMemoryResult, CorrectRequest, EnableRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, RpcMethod, RpcResult, ScopeRequest,
-  SessionRequest, SessionStateView, WorkspaceView, WriteRequest,
-} from '../../src/contract.js'
-import type { MemoryEntry, MemoryIndex, PromoteMemoryResult } from '../../src/store/types.js'
+import type { RpcMethod, RpcRequestMap, RpcResponseMap, RpcResult } from '../../src/contract.js'
 
+export type { MemoryOperationResult, RpcRequestMap, RpcResponseMap } from '../../src/contract.js'
 export type MemoryRpcMethod = RpcMethod
-export interface MemoryOperationResult {
-  readonly status: 'enabled' | 'already-enabled' | 'disabled' | 'refreshed' | 'up-to-date'
-  readonly injectionId?: string
-}
-
-export interface RpcRequestMap {
-  readonly getSessionState: SessionRequest
-  readonly enable: EnableRequest
-  readonly disable: SessionRequest
-  readonly refresh: LayerRequest
-  readonly list: ScopeRequest
-  readonly consolidate: ScopeRequest
-  readonly read: ReadRequest
-  readonly remove: ReadRequest
-  readonly promote: ReadRequest
-  readonly remember: WriteRequest
-  readonly correct: CorrectRequest
-  readonly status: Record<string, never>
-  readonly getSettings: Record<string, never>
-  readonly updateSettings: MemorySettings
-  readonly listWorkspaces: Record<string, never>
-}
-
-export interface RpcResponseMap {
-  readonly getSessionState: SessionStateView
-  readonly enable: MemoryOperationResult
-  readonly disable: MemoryOperationResult
-  readonly refresh: MemoryOperationResult
-  readonly list: MemoryIndex
-  readonly consolidate: ConsolidateMemoryResult
-  readonly read: MemoryEntry
-  readonly remove: { readonly removed: boolean }
-  readonly promote: PromoteMemoryResult
-  readonly remember: MemoryEntry
-  readonly correct: MemoryEntry
-  readonly status: MemoryStatus
-  readonly getSettings: MemorySettings
-  readonly updateSettings: MemorySettings
-  readonly listWorkspaces: WorkspaceView[]
-}
 
 export interface MemoryRpc {
   call<M extends MemoryRpcMethod>(method: M, payload: RpcRequestMap[M]): Promise<RpcResponseMap[M]>

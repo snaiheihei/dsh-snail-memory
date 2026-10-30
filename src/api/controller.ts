@@ -1,8 +1,8 @@
 import type {
   ConsolidateMemoryResult, CorrectRequest, EnableRequest, LayerRequest, MemorySettings, MemoryStatus, ReadRequest, ScopeRequest, SessionRequest,
-  SessionStateView, WorkspaceView, WriteRequest, RpcPayload, RpcValue, RpcMethod,
+  SessionStateView, WorkspaceView, WriteRequest, RpcPayload, RpcValue, RpcMethod, MemoryOperationResult,
 } from '../contract.js'
-import type { MemoryContextService, InjectionAgent, MemoryOperationResult } from '../context/service.js'
+import type { MemoryContextService, InjectionAgent } from '../context/service.js'
 import type { LifecycleIntentRunResult } from '../lifecycle/activity.js'
 import { pendingInjection, type MemoryStore } from '../store/store.js'
 import type { MemoryEntry, MemoryId, MemoryIndex, MemoryScope, PromoteMemoryResult, UpsertMemoryInput, WorkspaceId } from '../store/types.js'

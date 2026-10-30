@@ -1,6 +1,7 @@
 import type { MemoryRetentionDays } from '../contract.js'
 import type { MemoryStore } from '../store/store.js'
 import type { MemoryId, MemoryIndexEntry, MemoryScope, WorkspaceId } from '../store/types.js'
+import { LifecycleScheduler } from './scheduler.js'
 
 const DAY_MS = 86_400_000
 const DEFAULT_RETENTION_DAYS: MemoryRetentionDays = {
@@ -49,17 +50,13 @@ export async function retentionSweep(store: MemoryStore, options: RetentionOptio
     }
   }
   await store.updateMeta(meta => {
-    for (const id of changedWorkspaces) {
-      const consolidation = meta.workspaceConsolidation[id] ??= {
-        dirty: false,
-        nextConsolidationAt: null,
-        lastConsolidationAt: null,
-      }
-      consolidation.dirty = true
-      consolidation.nextConsolidationAt = new Date(now.getTime() + (options.consolidationCooldownHours ?? 20) * 3_600_000).toISOString()
-    }
-    meta.lastRetentionAt = now.toISOString()
-    meta.nextRetentionAt = new Date(now.getTime() + (options.retentionSweepHours ?? 24) * 3_600_000).toISOString()
+    LifecycleScheduler.finishRetention(
+      meta,
+      [...changedWorkspaces],
+      () => now,
+      (options.consolidationCooldownHours ?? 20) * 3_600_000,
+      (options.retentionSweepHours ?? 24) * 3_600_000,
+    )
   })
   return removed
 }
