@@ -104,6 +104,19 @@ describe('secret scanner', () => {
     expect(sanitizeBeforeUse('const accessToken = getAccessToken()').text).toBe('const accessToken = getAccessToken()')
   })
 
+  it('redacts complete unquoted credentials containing at signs and colons', () => {
+    const input = 'password=abcdefgh@example.com token=abc@defsecret pwd=abc:defsecret'
+    const result = sanitizeBeforeUse(input)
+
+    expect(result.text).toBe([
+      'password=[REDACTED:token]',
+      'token=[REDACTED:token]',
+      'pwd=[REDACTED:token]',
+    ].join(' '))
+    expect(result.findings).toHaveLength(3)
+    expect(scanSecrets(result.text).findings).toEqual([])
+  })
+
   it('does not flag ordinary cryptographic terms, project paths, or normal code', () => {
     const input = [
       'Discuss private key cryptography and JWT validation.',

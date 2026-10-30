@@ -28,6 +28,11 @@ export interface LifecycleSchedulerOptions {
   readonly run: (kind: string) => Promise<LifecycleRunResult | void>
 }
 
+function isCurrentIntent(current: LifecycleIntent | undefined, expected: LifecycleIntent): boolean {
+  if (current?.id !== expected.id) return false
+  return !expected.kind.startsWith('idle:') || current.generation === expected.generation
+}
+
 function activityContext(kind: string): {
   operation: LifecycleOperation
   sessionId?: string
@@ -273,7 +278,10 @@ export class LifecycleScheduler {
 
   private async putIntent(kind: string, createdAt: string): Promise<void> {
     if (this.disposed) return
-    let intent: LifecycleIntent = { id: randomUUID(), kind, createdAt }
+    const id = randomUUID()
+    let intent: LifecycleIntent = {
+      id, kind, createdAt, ...(kind.startsWith('idle:') ? { generation: id } : {}),
+    }
     if (!this.store.writable) {
       this.deferredIntents.set(kind, intent)
       return
@@ -363,7 +371,9 @@ export class LifecycleScheduler {
           })
         })
         await this.store.updateMeta(current => {
-          if (current.pending[key]?.id === value.id) delete current.pending[key]
+          if (isCurrentIntent(current.pending[key], value)) {
+            delete current.pending[key]
+          }
           current.lastError = null
           if (workspaceId !== undefined) {
             const consolidation = current.workspaceConsolidation[workspaceId]
@@ -415,10 +425,14 @@ export class LifecycleScheduler {
         let retryIntent: LifecycleIntent | undefined
         await this.store.updateMeta(current => {
           current.lastError = lifecycleErrorMessage(value.kind)
-          if (current.pending[key]?.id === value.id) {
+          if (isCurrentIntent(current.pending[key], value)) {
             delete current.pending[key]
             if (retryKind === key || current.pending[retryKind] === undefined) {
-              retryIntent = { id: randomUUID(), kind: retryKind, createdAt: retryCreatedAt }
+              const id = randomUUID()
+              retryIntent = {
+                id, kind: retryKind, createdAt: retryCreatedAt,
+                ...(retryKind.startsWith('idle:') ? { generation: id } : {}),
+              }
               current.pending[retryKind] = retryIntent
             }
           }

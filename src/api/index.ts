@@ -9,13 +9,19 @@ import { createRpcHandler } from './http.js'
 export function registerMemoryApi(ctx: Context, controller: MemoryController): () => void {
   const handler = createRpcHandler(controller)
   const disposeRoute = ctx.webServer.register({ kind: 'prefix', path: RPC_ROUTE_PREFIX, handler })
-  const disposeCommand = ctx.commands.register({
-    name: 'memory',
-    description: 'Remember, correct, forget, or inspect Snail Memory',
-    input: { hint: 'status | remember workspace <text> | correct workspace <id> <text> | forget workspace <id>' },
-    recordInput: false,
-    handler: invocation => executeMemoryCommand(controller, invocation.rawInput, invocation.agent.session.id),
-  })
+  let disposeCommand: () => void
+  try {
+    disposeCommand = ctx.commands.register({
+      name: 'memory',
+      description: 'Remember, correct, forget, or inspect Snail Memory',
+      input: { hint: 'status | remember workspace <text> | correct workspace <id> <text> | forget workspace <id>' },
+      recordInput: false,
+      handler: invocation => executeMemoryCommand(controller, invocation.rawInput, invocation.agent.session.id),
+    })
+  } catch (error) {
+    disposeRoute()
+    throw error
+  }
   let disposed = false
   return () => {
     if (disposed) return

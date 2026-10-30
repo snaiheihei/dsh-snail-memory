@@ -46,9 +46,46 @@ export const Config: z<Config> = z.object({
   retentionSweepHours: z.number().min(0).default(24),
 })
 
+interface PluginResources {
+  readonly disposers: Array<() => void | Promise<void>>
+  disposed: boolean
+}
+
+async function disposeResources(resources: PluginResources): Promise<void> {
+  if (resources.disposed) return
+  resources.disposed = true
+  let firstFailure: { readonly error: unknown } | undefined
+  for (const dispose of resources.disposers.reverse()) {
+    try {
+      await dispose()
+    } catch (error) {
+      firstFailure ??= { error }
+    }
+  }
+  if (firstFailure) throw firstFailure.error
+}
+
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const root = join(resolveDshHome(config.dshHome), 'snail_memory')
   const store = await MemoryStore.open({ root })
+  const resources: PluginResources = { disposers: [() => store.close()], disposed: false }
+  try {
+    await initialize(ctx, config, root, store, resources)
+  } catch (error) {
+    await disposeResources(resources).catch(() => {
+      ctx.logger.warn('[snail-memory] Could not clean up failed initialization')
+    })
+    throw error
+  }
+}
+
+async function initialize(
+  ctx: Context,
+  config: Config,
+  root: string,
+  store: MemoryStore,
+  resources: PluginResources,
+): Promise<void> {
   let settings: MemorySettingsStore
   try {
     settings = await MemorySettingsStore.open(store, {
@@ -72,6 +109,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     file: join(root, 'logs', 'lifecycle.v1.jsonl'),
     onError: () => { ctx.logger.warn('[snail-memory] Could not write lifecycle activity history') },
   })
+  resources.disposers.push(() => activity.close())
   const lifecycle = new MemoryLifecycleService(store, {
     settings,
     activity,
@@ -94,6 +132,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       return agent ? agent.runMaintenance(signal => task(signal)) : task(new AbortController().signal)
     },
   })
+  resources.disposers.push(() => lifecycle.dispose())
   const resolveSession = (sessionId: string) => {
     const agent = ctx.agents.get(SessionId(sessionId))
     if (!agent) return undefined
@@ -109,8 +148,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     listWorkspaces: () => ctx.workspaceRegistry.list().map(workspace => ({ id: workspaceId(workspace.id), title: workspace.title })),
   })
   const disposeApi = registerMemoryApi(ctx, controller)
+  resources.disposers.push(disposeApi)
   const disposeReadTool = registerMemoryReadTool(ctx, memories)
+  resources.disposers.push(disposeReadTool)
   const disposeFeedbackTool = registerMemoryFeedbackTool(ctx, memories)
+  resources.disposers.push(disposeFeedbackTool)
 
   const prepareAgent = async (agent: Agent) => {
     const sessionId = agent.session.id
@@ -163,20 +205,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       ctx.logger.warn('[snail-memory] Could not apply writer lock transition')
     },
   })
+  resources.disposers.push(() => writerRuntime.dispose())
   const disposeWritable = store.onWritableChange(writable => { writerRuntime.setWritable(writable) })
+  resources.disposers.push(disposeWritable)
   writerRuntime.setWritable(store.writable)
   await writerRuntime.drain()
 
-  ctx.effect(() => async () => {
-    disposeWritable()
-    disposeApi()
-    disposeReadTool()
-    disposeFeedbackTool()
-    await writerRuntime.dispose()
-    await lifecycle.dispose()
-    await activity.close()
-    await store.close()
-  })
+  ctx.effect(() => () => disposeResources(resources))
 }
 
 export type * from './contract.js'

@@ -15,7 +15,7 @@ const API_KEY_PATTERN = /(?<![A-Za-z0-9_-])(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,256}
 const PRIVATE_KEY_PATTERN = /(?:^|\r?\n)-----BEGIN ([A-Z0-9 ]{0,32}PRIVATE KEY)-----/g
 const URL_PASSWORD_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:([^\s/@]{1,1024})@/gi
 const AUTHORIZATION_PATTERN = /\bAuthorization[ \t]*:[ \t]*([^\r\n]{1,4096})/gi
-const ASSIGNMENT_PATTERN = /(?:^|[\s,;{])(?<key>api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)\s*(?:=|:)\s*(?:(?<quote>['"`])(?<quoted>[^'"`\r\n]{4,})\k<quote>|(?<bare>[A-Za-z0-9_./+~!#$%^&*?=-]{8,})(?![A-Za-z0-9_./+~!#$%^&*?=-])(?!\s*\())/gi
+const ASSIGNMENT_PATTERN = /(?:^|[\s,;{])(?<key>api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)\s*(?:=|:)\s*(?:(?<quote>['"`])(?<quoted>[^'"`\r\n]{4,})\k<quote>|(?<bare>[A-Za-z0-9_./+~!#$%^&*?=@:-]{8,})(?![A-Za-z0-9_./+~!#$%^&*?=@:-])(?!\s*\())/gi
 const RULES: readonly PatternRule[] = [
   { kind: 'jwt', pattern: JWT_PATTERN },
   { kind: 'api-key', pattern: API_KEY_PATTERN },

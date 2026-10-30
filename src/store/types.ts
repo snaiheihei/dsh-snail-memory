@@ -155,6 +155,8 @@ export interface LifecycleIntent {
   readonly id: string
   readonly kind: string
   readonly createdAt: string
+  /** Idle refreshes retain their activity id but receive a new execution generation. */
+  readonly generation?: string
 }
 
 export interface WorkspaceConsolidationMeta {

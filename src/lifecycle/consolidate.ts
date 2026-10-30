@@ -86,7 +86,7 @@ Input entries:\n${safe.text}`,
         const snapshot = candidate.id
           ? included.find(entry => entry.id === candidate.id)
           : included.find(entry => entry.category === candidate.category
-            && entry.summary.toLowerCase() === candidate.summary.toLowerCase())
+            && entry.summary.trim().toLowerCase() === candidate.summary.trim().toLowerCase())
         // An id absent from the model input may belong to another scope or a truncated entry.
         if (candidate.id && !snapshot) continue
         const existing = snapshot ? await store.read(scope, snapshot.id) : undefined

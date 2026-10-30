@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +7,7 @@ import { MemoryLifecycleService } from '../../src/lifecycle/service.js'
 import { MemoryStore } from '../../src/store/store.js'
 import type { TranscriptEvent } from '../../src/runtime.js'
 import type { MemoryScope, WorkspaceId } from '../../src/store/types.js'
-import { workspaceId } from '../../src/store/types.js'
+import { memoryId, workspaceId } from '../../src/store/types.js'
 
 const roots: string[] = []
 const stores: MemoryStore[] = []
@@ -408,6 +409,44 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(await store.read(scope, superseded.id)).toMatchObject({
       detail: 'Corrected during consolidation.',
       revision: corrected.revision,
+    })
+  })
+
+  it('does not let summary whitespace bypass the revision check for an existing stable id', async () => {
+    const scope: MemoryScope = { kind: 'global' }
+    let releaseModel!: () => void
+    let markModelStarted!: () => void
+    const modelStarted = new Promise<void>(resolve => { markModelStarted = resolve })
+    const modelGate = new Promise<void>(resolve => { releaseModel = resolve })
+    const { service, store, responses } = await setup([], undefined, async () => {
+      markModelStarted()
+      await modelGate
+    })
+    const category = 'project-convention'
+    const summary = 'Target convention'
+    const id = memoryId(createHash('sha256').update(`global\0${category}\0${summary.toLowerCase()}`).digest('hex'))
+    const target = await store.upsert({
+      id, scope, category, summary, detail: 'Target detail.',
+      sourceRefs: [{ sessionId: 'session-original' }], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    const running = service.runIntent('global-consolidate')
+    await modelStarted
+    const corrected = await service.correct({
+      ...target,
+      detail: 'Corrected during consolidation.',
+      sourceRefs: [{ sessionId: 'session-corrected' }],
+    })
+    responses.push(JSON.stringify({ candidates: [{
+      category, summary: `${summary} `, detail: 'Stale consolidated detail.',
+    }] }))
+    releaseModel()
+
+    await expect(running).resolves.toEqual({ written: 0 })
+    expect(await store.read(scope, id)).toMatchObject({
+      detail: 'Corrected during consolidation.',
+      revision: corrected.revision,
+      sourceRefs: [{ sessionId: 'session-corrected' }],
     })
   })
 

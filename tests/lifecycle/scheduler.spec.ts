@@ -85,6 +85,36 @@ describe('LifecycleScheduler', () => {
     await scheduler.dispose()
   })
 
+  it.each(['succeeds', 'fails'])('keeps a refreshed idle intent when an older run %s', async outcome => {
+    const store = await openStore()
+    let releaseRun!: () => void
+    let markRunStarted!: () => void
+    const runStarted = new Promise<void>(resolve => { markRunStarted = resolve })
+    const runGate = new Promise<void>(resolve => { releaseRun = resolve })
+    const scheduler = new LifecycleScheduler(store, {
+      idleDelayMinutes: 0,
+      run: async () => {
+        markRunStarted()
+        await runGate
+        if (outcome === 'fails') throw new Error('model unavailable')
+      },
+    })
+    await scheduler.start()
+    await scheduler.requestIdle('session-1')
+    const advancing = vi.advanceTimersByTimeAsync(0)
+    await runStarted
+
+    await scheduler.requestIdle('session-1')
+    const refreshed = store.getMeta().pending['idle:session-1']
+    const stopping = scheduler.stop()
+    releaseRun()
+    await advancing
+    await stopping
+
+    expect(store.getMeta().pending['idle:session-1']).toEqual(refreshed)
+    await scheduler.dispose()
+  })
+
   it('does not let a failed review overwrite a newer idle intent', async () => {
     const store = await openStore()
     let releaseRun!: () => void

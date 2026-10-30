@@ -73,6 +73,102 @@ describe('lifecycle dsh runtime composition', () => {
     expect(close).toHaveBeenCalledTimes(1)
   })
 
+  it('releases acquired resources when initialization fails after store opening', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-host-failure-'))
+    roots.push(root)
+    const open = MemoryStore.open
+    vi.spyOn(MemoryStore, 'open').mockImplementation(async options => {
+      const store = await open(options)
+      stores.push(store)
+      return store
+    })
+    const disposeRoute = vi.fn()
+    const disposeCommand = vi.fn()
+    const closeActivity = vi.spyOn(LifecycleActivityFileSink.prototype, 'close')
+    const ctx = {
+      agents: { list: () => [], get: () => undefined },
+      commands: { register: () => disposeCommand },
+      llm: {},
+      tools: { register: () => { throw new Error('injected tool registration failure') } },
+      webServer: { register: () => disposeRoute },
+      workspaceRegistry: { list: () => [] },
+      logger: { warn: () => {} },
+      on: () => () => {},
+      effect: (effect: () => () => void | Promise<void>) => { effects.push(effect()) },
+    } as unknown as Context
+
+    await expect(apply(ctx, { dshHome: root })).rejects.toThrow('injected tool registration failure')
+    const reopened = await MemoryStore.open({ root: stores[0]!.paths.root, heartbeatMs: 60_000 })
+
+    expect(reopened.writable).toBe(true)
+    expect(disposeRoute).toHaveBeenCalledTimes(1)
+    expect(disposeCommand).toHaveBeenCalledTimes(1)
+    expect(closeActivity).toHaveBeenCalledTimes(1)
+  })
+
+  it('rolls back the route when command registration fails during initialization', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-host-command-failure-'))
+    roots.push(root)
+    const open = MemoryStore.open
+    vi.spyOn(MemoryStore, 'open').mockImplementation(async options => {
+      const store = await open(options)
+      stores.push(store)
+      return store
+    })
+    const disposeRoute = vi.fn()
+    const ctx = {
+      agents: { list: () => [], get: () => undefined },
+      commands: { register: () => { throw new Error('injected command registration failure') } },
+      llm: {},
+      tools: { register: () => () => {} },
+      webServer: { register: () => disposeRoute },
+      workspaceRegistry: { list: () => [] },
+      logger: { warn: () => {} },
+      on: () => () => {},
+      effect: (effect: () => () => void | Promise<void>) => { effects.push(effect()) },
+    } as unknown as Context
+
+    await expect(apply(ctx, { dshHome: root })).rejects.toThrow('injected command registration failure')
+    const reopened = await MemoryStore.open({ root: stores[0]!.paths.root, heartbeatMs: 60_000 })
+
+    expect(disposeRoute).toHaveBeenCalledTimes(1)
+    expect(reopened.writable).toBe(true)
+  })
+
+  it('continues cleanup after a resource disposer fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-host-dispose-failure-'))
+    roots.push(root)
+    const open = MemoryStore.open
+    vi.spyOn(MemoryStore, 'open').mockImplementation(async options => {
+      const store = await open(options)
+      stores.push(store)
+      return store
+    })
+    const disposeRoute = vi.fn()
+    const disposeCommand = vi.fn()
+    const closeActivity = vi.spyOn(LifecycleActivityFileSink.prototype, 'close')
+      .mockRejectedValue(new Error('injected activity close failure'))
+    const ctx = {
+      agents: { list: () => [], get: () => undefined },
+      commands: { register: () => disposeCommand },
+      llm: {},
+      tools: { register: () => { throw new Error('injected tool registration failure') } },
+      webServer: { register: () => disposeRoute },
+      workspaceRegistry: { list: () => [] },
+      logger: { warn: () => {} },
+      on: () => () => {},
+      effect: (effect: () => () => void | Promise<void>) => { effects.push(effect()) },
+    } as unknown as Context
+
+    await expect(apply(ctx, { dshHome: root })).rejects.toThrow('injected tool registration failure')
+    const reopened = await MemoryStore.open({ root: stores[0]!.paths.root, heartbeatMs: 60_000 })
+
+    expect(disposeRoute).toHaveBeenCalledTimes(1)
+    expect(disposeCommand).toHaveBeenCalledTimes(1)
+    expect(closeActivity).toHaveBeenCalledTimes(1)
+    expect(reopened.writable).toBe(true)
+  })
+
   it('retries the initial lifecycle start without unloading the plugin', async () => {
     const root = await mkdtemp(join(tmpdir(), 'snail-memory-host-start-'))
     roots.push(root)
