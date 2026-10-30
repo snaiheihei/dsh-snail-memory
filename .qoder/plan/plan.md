@@ -120,6 +120,14 @@ store 和 safety 无内部依赖，可并行；context 和 lifecycle 在两者�
 - 已同步 lifecycle/API/Web Spec、能力地图和记忆演化文档。聚焦自动化实际通过 4 个测试文件、65 项测试；最终全量自动化为 32 个测试文件、263 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过。首次全量运行有一个既有 Store Promote 隔离用例在并行 I/O 负载下达到 5 秒超时，隔离运行 540ms 通过，未改代码后完整复验全部通过。
 - 最终差异复核未发现直接整合旁路或跨 scope 写入；高置信秘密模式扫描只命中既有合成安全测试样本，没有新增真实凭据。本轮未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit。
 
+### 整合输出契约与脱敏诊断增量（2026-10-30）
+
+- 整合 prompt 现在明确只返回一个含 `candidates` 数组的 JSON 对象，列明五类 category、必填 summary/detail、可选 id/supersedes、16,000 字符详情上限及输入 ID 引用边界；只请求新增或变化候选，不回吐 unchanged 条目，也不允许模型返回 sourceRefs。
+- 辅助模型输出失败细分为 `model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid` 和 `model-output-budget-exceeded`；其他解析错误继续使用 `model-output-invalid`。单候选 category/summary/detail 非法、详情超长或秘密扫描命中仍只增加 rejected，不改判为整次输出失败。
+- 手动与自动整合继续复用 `$DSH_HOME/snail_memory/logs/lifecycle.v1.jsonl`。Scheduler 的 `run-failed` 现在保留上述具体分类，并继续关联 intent ID、workspace、耗时和 retry 元数据；不记录模型原始响应、prompt、记忆正文或异常原文。
+- 本轮保留既有辅助模型路由、64,000 字符输入/输出预算和 16,000 max tokens，未凭推测调整预算。新增测试先复现详细分类被降级及 prompt 契约缺失，再完成修复；聚焦自动化实际通过 3 个测试文件、65 项测试，最终全量自动化为 32 个测试文件、265 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过。
+- 已同步 lifecycle/safety Spec、能力地图和记忆演化文档。本轮未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit，因此真实模型不再复现原失败仍待后续运行验证。
+
 ## 后续修改 Plan（2026-10-28）
 
 当前运行定案为单一 dsh Client、单 Host。以下事项明确后置，不属于本轮来源汇集、模型输出边界、安全扫描和 Scheduler intent 代际修复：

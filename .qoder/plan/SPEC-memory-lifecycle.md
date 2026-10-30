@@ -1,5 +1,7 @@
 # Spec: memory-lifecycle
 
+> 2026-10-30 整合输出诊断修订：整合 prompt 明确完整 JSON candidates 契约并要求只返回新增或变化候选；活动日志细分空输出、非法 JSON、顶层结构错误和输出字符预算超限，仍不保存模型原始输出或异常正文。
+>
 > 2026-10-29 手动整合修订：Global 与选中的 workspace 可通过 Scheduler 立即执行各自 scope 的 consolidation；复用持久 intent、串行队列、防重、真实结果、失败重试和活动日志，不新增直接整合通路。
 >
 > 2026-10-29 活动日志修订：新增独立、非权威的 `logs/lifecycle.v1.jsonl`，按持久 intent ID 追踪任务建立、执行、批次、成功、跳过、失败和重试；日志采用字段白名单、大小轮转与 best-effort 写入，不改变记忆状态或 Session。
@@ -57,6 +59,7 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - 首次加载只恢复已有记忆、调度和注入状态，不自动遍历并蒸馏全部历史 Session；历史回填不是默认生命周期任务。
 - 默认保留期：环境事实 30 天、项目约定/排障经验 180 天、用户偏好/长期决策 0 天（不自动过期）；五类均可配置，修改从下一次每日清理生效，显式 `expiresAt` 始终优先。过期结论先从最近验证时间判定。
 - Review 每批输入最多 24,000 字符且每次 intent 只处理一批；Idle/Stop 每批最多 48,000 字符，每次 intent 最多连续追赶两批。整合最多 64,000 字符；详情单条最多 16,000 字符。长历史通过后续生命周期 intent 继续推进，不做无预算全量回填。
+- 整合 prompt 明确要求只返回一个含 `candidates` 数组的 JSON 对象，不使用 Markdown 围栏或解释文字，并列明 category 五类枚举、必填 summary/detail、可选 id/supersedes 及 16,000 字符详情上限。模型只返回新增或变化候选，不回吐 unchanged 条目；id/supersedes 只能引用输入条目，不返回 sourceRefs。输出上限仍为 64,000 字符，对应 16,000 max tokens，本轮不扩大输入或输出预算。
 - Review/Idle/Stop 共享 `SessionMemoryState.distillationCursor`。游标以最后处理的稳定 `eventSeq` 为主身份，以该事件渲染文本内已消费的 UTF-16 `offset` 处理超大消息；完整 turn 能装入预算时不得拆分，超大 turn 再按事件顺序和片内 offset 分片。
 - 只有模型响应可解析、候选完成安全校验且写入/去重成功，或候选为空/被安全策略完整拒绝后，才通过主 MemoryStore 串行 writer 推进游标。路由缺失、请求失败/取消/超时、不可解析输出、输入拒绝或存储失败均保留原游标。
 - 记忆提交后、游标提交前崩溃允许重试同批；稳定 ID、内容去重、sourceRefs 合并和后续整合承担至少一次语义。不得先推进游标再调用模型或写记忆。
@@ -71,7 +74,7 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 - 白名单字段为 formatVersion/time/event/operation/intentId、可选 sessionId/workspaceId、durationMs、batch/batches、written/rejected、processed/hasMore、仅含 lastEventSeq/offset 的 cursor、skipReason、稳定 error 和重试元数据。不得记录对话、prompt、summary/detail、sourceRefs、模型原始响应、异常正文或秘密。
 - intent-created 只在 intent 成功持久建立后记录；已有 idle intent 的 debounce 刷新保留同代 intent ID，只更新 createdAt，不重复记录，确保建立与后续运行事件可串联；deferred intent 在 start 成功提交后记录。自动到期的 consolidation/retention 先持久 pending 再记录。
 - run-succeeded 和业务型 run-skipped 在业务运行及权威调度状态收尾成功后记录；无 owner、无新事件、clean workspace 分别使用 `workspace-unassigned`、`no-new-events`、`workspace-clean`。clean workspace 不调用 run，也不记录 run-started。
-- 每个实际蒸馏批次记录 batch-completed、written/rejected 和游标位置。失败只记录 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`store-readonly`、`operation-aborted`、`operation-failed`；只有实际创建新代 retry intent 才记录 retry-scheduled。
+- 每个实际蒸馏批次记录 batch-completed、written/rejected 和游标位置。失败只记录 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid`、`model-output-budget-exceeded`、`store-readonly`、`operation-aborted`、`operation-failed`；四种具体输出分类分别定位空输出、非法 JSON、顶层结构错误和输出字符预算超限，通用 `model-output-invalid` 保留给其他解析失败。手动与自动整合复用同一活动 JSONL，不记录原始输出。只有实际创建新代 retry intent 才记录 retry-scheduled。
 - `MemoryLifecycleService.runIntentDetailed()` 提供结构化运行与逐批结果，既有 `runIntent() → { written }` 保持兼容。非蒸馏任务 batches 为 0，retention 的 written 为删除数，consolidation 的 written 为写入数。
 - 文件 sink 以独立 Promise 队列串行 append，默认单文件上限 1 MiB，保留当前文件加最多 `.1`、`.2`、`.3` 三个历史代际。写入与告警 best-effort，日志失败不得改变业务结果；Scheduler dispose 先 flush，插件卸载再 close。
 
@@ -103,7 +106,8 @@ pending?.count += 1
 - 20 小时默认冷却、dirty 设置热更新与计划重排、dirty gate、每日清理、单 timer 和卸载 drain。
 - 五类保留期默认值、持久化与 RPC 校验；`0` 天关闭类别过期，自定义策略在下一次清理生效，显式过期时间优先。
 - 快照预算默认值、旧配置兼容、RPC/UI 保存，以及预算变更只影响后续新快照。
-- LLM 空输出、非 JSON、部分有效候选、秘密输出、超时和重试。
+- LLM 空输出、非 JSON、部分有效候选、秘密输出、超时和重试；空输出、非法 JSON、顶层结构错误和输出字符预算超限分别产生四种稳定分类，单候选字段或安全校验失败仍只计入 rejected。
+- 整合 prompt 包含完整 JSON candidates 契约并只请求新增/变化候选；手动整合的 `run-failed` 保留具体输出分类和重试链，原始输出及异常正文不落盘。
 - `snail_memory_read` 与 `snail_memory_feedback` 结果不进入蒸馏输入，普通工具结果继续保留。
 - rank 反馈前后 dirty、pending、consolidation/retention 计划、条目与 scope revision、内容时间、游标及注入状态保持不变；反馈不触发辅助模型调用。
 - 顺序批次、三入口不重复、空候选/安全拒绝仍推进、路由/请求/解析/存储失败不推进、重启恢复和写入后游标未推进的重复窗口。

@@ -175,7 +175,7 @@ intent-created → run-started → batch-completed（每实际蒸馏批次）
 
 Scheduler 统一记录六类 operation：Review、Idle、Stop、workspace consolidation、Global consolidation 和 retention。业务层提供结构化结果，保留原有 `runIntent() → { written }` 兼容接口；每批记录 written、rejected 和 `{ lastEventSeq, offset }`，运行收尾记录耗时、批次、累计 written、processed/hasMore 和最后游标。无 workspace owner、没有新事件、到期 workspace 已 clean 分别形成 `workspace-unassigned`、`no-new-events`、`workspace-clean` 跳过；clean 跳过不执行模型任务，也不记录 run-started。
 
-`run-succeeded` 或业务型 `run-skipped` 只在业务运行和权威调度状态收尾成功后记录，避免模型已返回但状态提交失败时误报成功。失败仅保存 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`store-readonly`、`operation-aborted`、`operation-failed` 之一；不保存异常正文。活动文件逐字段白名单重建记录，对话、prompt、summary/detail、sourceRefs、模型原始响应和额外异常字段都不能落盘。
+`run-succeeded` 或业务型 `run-skipped` 只在业务运行和权威调度状态收尾成功后记录，避免模型已返回但状态提交失败时误报成功。失败仅保存 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid`、`model-output-budget-exceeded`、`store-readonly`、`operation-aborted`、`operation-failed` 之一；不保存异常正文。四种具体输出分类分别定位空输出、非法 JSON、顶层结构错误和输出字符预算超限，通用 `model-output-invalid` 保留给其他解析失败。手动与自动整合都复用这份活动 JSONL。活动文件逐字段白名单重建记录，对话、prompt、summary/detail、sourceRefs、模型原始响应和额外异常字段都不能落盘。
 
 文件 sink 使用独立 Promise 队列串行 append，默认当前文件达到 1 MiB 后轮转，保留当前文件及最多 `.1`、`.2`、`.3` 三个历史代际。它是 best-effort 诊断而非第二事实源：写入失败只发出脱敏告警，不改变记忆、游标或调度结果。Scheduler dispose 先 flush，插件卸载再 close；首版直接读取 JSONL 排查，不增加 UI 或 RPC。
 
@@ -196,7 +196,7 @@ Scheduler 统一记录六类 operation：Review、Idle、Stop、workspace consol
   → 通过主 Store writer 提交新游标
 ```
 
-模型输出上限为 64,000 字符，对应调用预算 16,000 max tokens。没有可用模型路由时明确失败并保留可重试状态，不生成虚假记忆，也不伪造整合成功。
+模型输出上限为 64,000 字符，对应调用预算 16,000 max tokens。输出为空、无法恢复合法 JSON、顶层结构不符或超过该字符预算分别形成 `model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid` 和 `model-output-budget-exceeded`；其他解析失败保留通用 `model-output-invalid`。这些分类进入既有活动日志，不记录原始输出。没有可用模型路由时明确失败并保留可重试状态，不生成虚假记忆，也不伪造整合成功。
 
 游标采用**至少处理一次**语义，提交顺序始终是“模型成功响应并解析 → 候选安全校验 → 写入或确定性去重 → 游标提交”。空候选和被安全策略完整拒绝的候选都属于已可靠处理，可以推进；是否有新增记忆不是推进条件。路由缺失、请求失败/取消/超时、输出不可解析、输入安全拒绝或存储失败都不推进。
 
@@ -228,7 +228,7 @@ Promote 只接受已注册 workspace 的来源条目。Store 在同一串行写�
 
 1. 按 `updatedAt` 从新到旧排列完整条目。
 2. 逐条装入最多 64,000 字符的模型输入；达到预算后停止加入更老条目。
-3. 要求模型在当前 scope 内合并重复、修正冲突、淘汰旧结论，返回 candidates 和可选 `id/supersedes`。
+3. 要求模型在当前 scope 内合并重复、修正冲突、淘汰旧结论，只返回一个含 `candidates` 数组的 JSON 对象，不使用 Markdown 围栏或解释文字。prompt 列明 category 五类枚举、必填 summary/detail、可选 `id/supersedes` 和 16,000 字符详情上限；只返回新增或变化候选，不回吐 unchanged 条目，也不返回 sourceRefs。
 4. 确定性代码只接受经 64,000 字符预算截断后、实际发送给模型的输入快照中真实存在的候选 ID；`supersedes` 也去重并限制在同一输入快照，未知、被预算排除、快照外或指向目标自身的 ID 不生效，更不能用于跨 scope 移动或删除。
 5. 不采用模型返回的 `sourceRefs`。程序从现有目标与有效被取代条目的真实来源汇集并按 JSON 精确值去重，再写回新 revision、删除同 scope 中被取代的旧 ID；Global 写回保留 `promotedFrom`，目标条目已有 rank 经既有 upsert 保留，不把被取代条目的 rank 相加。
 6. 全部成功后只清理目标类的 dirty、pending 和下次整合时间，并记录对应的最近整合时间。
@@ -617,6 +617,14 @@ Scheduler 成为统一埋点边界：idle debounce 不反复记录已有 intent�
 活动 sink 逐字段白名单重建 JSONL，独立串行 append，默认 1 MiB 轮转并保留三个历史代际；日志和告警失败均不影响业务，卸载时 drain/close。首版不增加 UI/RPC，不修改 `state.v2.json`、Session、记忆算法或持久格式。差异复核额外发现 idle debounce 换 ID 会使建立与运行记录断链，回归断言先复现后，已改为同代刷新保留原 intent ID。
 
 聚焦自动化已实际通过 5 个测试文件、65 项测试；最终全量自动化为 32 个测试文件、254 项测试全部通过，typecheck、lint、build 和 `git diff --check` 通过；变更范围高置信私钥、云密钥、令牌与 Bearer 模式扫描无命中。真实 Host/UI/模型验收不在本轮执行范围内，也未安装到真实 Host、重启用户进程或创建 git commit。
+
+### 阶段十六：整合输出契约与可定位的脱敏失败
+
+真实手动整合曾完成模型调用，却因整体输出无法通过 JSON 解析而以通用 `model-output-invalid` 收尾。原有 prompt 只笼统要求“返回 JSON candidates”，与解析器实际接受的结构、字段和类别契约不对等。本轮把契约完整写入 prompt：只返回一个含 `candidates` 数组的 JSON 对象，明确五类 category、必填 summary/detail、可选 id/supersedes、详情上限和输入 ID 引用边界；模型只返回新增或变化候选，不回吐 unchanged 条目，以减少无意义输出。
+
+输出诊断同时拆分为空输出、非法 JSON、顶层结构错误和输出字符预算超限四类，其他解析失败仍使用通用分类。手动与自动整合都在既有活动 JSONL 的 `run-failed` 中记录具体类别，并保留 intent、scope、耗时和重试关联；原始模型响应、prompt、记忆正文及异常原文仍被白名单排除。单候选字段不合法或安全扫描命中仍只计入 rejected，不与整次输出失败混淆。
+
+本轮没有修改辅助模型路由、64,000 字符输入/输出预算或 16,000 max tokens，也不把 token 截断当作已证实根因；若实际发生预算超限，现在可由 `model-output-budget-exceeded` 明确识别。聚焦自动化为 3 个测试文件、65 项测试，全量自动化为 32 个测试文件、265 项测试，typecheck、lint、build 和 `git diff --check` 均通过。未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit，真实模型复验仍是后续边界。
 
 ## 14. 当前边界与后续演进方向
 

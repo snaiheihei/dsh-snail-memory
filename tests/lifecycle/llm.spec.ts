@@ -75,12 +75,23 @@ describe('auxiliary LLM calls and candidate parsing', () => {
       prompt: 'review',
     })).rejects.toMatchObject({ activityCategory: 'model-request-failed', message: 'private provider diagnostic' })
 
-    await expect(invokeAuxiliaryModel({
-      model: { async prepareCall() { return { async *stream() {} } } },
-      provider: 'test',
-      modelName: 'aux',
-      prompt: 'review',
-    })).rejects.toMatchObject({ activityCategory: 'model-output-invalid' })
+    const outputFailures = [
+      { text: '', maxOutputChars: 128, activityCategory: 'model-output-empty' },
+      { text: 'not json', maxOutputChars: 128, activityCategory: 'model-output-invalid-json' },
+      { text: '{"items":[]}', maxOutputChars: 128, activityCategory: 'model-output-shape-invalid' },
+      { text: 'x'.repeat(129), maxOutputChars: 128, activityCategory: 'model-output-budget-exceeded' },
+    ]
+    for (const failure of outputFailures) {
+      await expect(invokeAuxiliaryModel({
+        model: { async prepareCall() { return { async *stream() {
+          if (failure.text) yield { type: 'text-delta' as const, index: 0, text: failure.text }
+        } } } },
+        provider: 'test',
+        modelName: 'aux',
+        prompt: 'review',
+        maxOutputChars: failure.maxOutputChars,
+      })).rejects.toMatchObject({ activityCategory: failure.activityCategory })
+    }
   })
 
   it('times out a stalled model call', async () => {

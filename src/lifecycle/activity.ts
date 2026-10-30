@@ -10,6 +10,7 @@ export type LifecycleActivityEvent = 'intent-created' | 'run-started' | 'batch-c
   | 'run-succeeded' | 'run-skipped' | 'run-failed' | 'retry-scheduled'
 export type LifecycleSkipReason = 'workspace-unassigned' | 'no-new-events' | 'workspace-clean'
 export type LifecycleErrorCategory = 'model-route-missing' | 'model-request-failed' | 'model-output-invalid'
+  | 'model-output-empty' | 'model-output-invalid-json' | 'model-output-shape-invalid' | 'model-output-budget-exceeded'
   | 'store-readonly' | 'operation-aborted' | 'operation-failed'
 
 export interface LifecycleActivityRecord {

@@ -47,7 +47,7 @@ export interface ParsedCandidates {
 function decodeJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
   const source = (fenced ?? text).trim()
-  if (!source) throw new Error('Empty model output; expected JSON')
+  if (!source) throw withActivityCategory(new Error('Empty model output; expected JSON'), 'model-output-empty')
   try {
     return JSON.parse(source) as unknown
   } catch {
@@ -56,11 +56,16 @@ function decodeJson(text: string): unknown {
       return index < 0 ? source.length : index
     }))
     const end = Math.max(source.lastIndexOf('}'), source.lastIndexOf(']'))
-    if (start >= source.length || end <= start) throw new Error('Model output was not valid JSON')
+    if (start >= source.length || end <= start) {
+      throw withActivityCategory(new Error('Model output was not valid JSON'), 'model-output-invalid-json')
+    }
     try {
       return JSON.parse(source.slice(start, end + 1)) as unknown
     } catch (error) {
-      const wrapped = new Error(`Model output was not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
+      const wrapped = withActivityCategory(
+        new Error(`Model output was not valid JSON: ${error instanceof Error ? error.message : String(error)}`),
+        'model-output-invalid-json',
+      )
       Object.defineProperty(wrapped, 'cause', { value: error, configurable: true, writable: true })
       throw wrapped
     }
@@ -77,14 +82,19 @@ function candidateStrings(value: unknown): string[] {
 }
 
 export function parseCandidateResponse(text: string, maxDetailChars = 16_000): ParsedCandidates {
-  if (!text.trim()) throw new Error('Empty model output; expected JSON')
+  if (!text.trim()) throw withActivityCategory(new Error('Empty model output; expected JSON'), 'model-output-empty')
   const parsed = decodeJson(text)
   const value = Array.isArray(parsed)
     ? parsed
     : parsed && typeof parsed === 'object' && Array.isArray((parsed as { candidates?: unknown }).candidates)
       ? (parsed as { candidates: unknown[] }).candidates
       : null
-  if (!value) throw new Error('Model output JSON must be an array or a candidates object')
+  if (!value) {
+    throw withActivityCategory(
+      new Error('Model output JSON must be an array or a candidates object'),
+      'model-output-shape-invalid',
+    )
+  }
   const categories = new Set<MemoryCategory>([
     'preference', 'project-convention', 'environment-fact', 'troubleshooting', 'long-term-decision',
   ])
@@ -149,12 +159,13 @@ async function invokeAuxiliaryModelInner(options: AuxiliaryCallOptions): Promise
   })) {
     if (chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
     if (text.length > outputBudget) {
-      throw withActivityCategory(new Error('Model output exceeds the JSON candidate budget'), 'model-output-invalid')
+      throw withActivityCategory(new Error('Model output exceeds the JSON candidate budget'), 'model-output-budget-exceeded')
     }
   }
   try {
     return parseCandidateResponse(text, options.maxDetailChars)
   } catch (error) {
+    if ((error as { activityCategory?: unknown } | null)?.activityCategory !== undefined) throw error
     throw withActivityCategory(error, 'model-output-invalid')
   }
 }

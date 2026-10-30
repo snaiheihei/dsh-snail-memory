@@ -663,6 +663,31 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getMeta().workspaceConsolidation.dsh_memory).toBeUndefined()
   })
 
+  it('gives consolidation the complete JSON contract and requests only changed candidates', async () => {
+    const scope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('test_only') }
+    const { service, store, prompts } = await setup()
+    await store.upsert({
+      scope,
+      category: 'project-convention',
+      summary: 'Test convention',
+      detail: 'Only test_only detail.',
+      sourceRefs: [],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    await service.runIntent('consolidate:test_only')
+
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toMatch(/only JSON/i)
+    expect(prompts[0]).toContain('"candidates"')
+    expect(prompts[0]).toContain('"category"')
+    expect(prompts[0]).toContain('"summary"')
+    expect(prompts[0]).toContain('"detail"')
+    expect(prompts[0]).toContain('preference, project-convention, environment-fact, troubleshooting, long-term-decision')
+    expect(prompts[0]).toMatch(/changed/i)
+    expect(prompts[0]).toMatch(/unchanged/i)
+  })
+
   it('decodes workspace intent ids without routing the suffix to Session maintenance', async () => {
     const owner = workspaceId('workspace with spaces')
     const scope: MemoryScope = { kind: 'workspace', workspaceId: owner }

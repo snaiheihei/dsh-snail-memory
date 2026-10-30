@@ -55,7 +55,7 @@ export function sanitizeBeforeUse(input: string): SanitizedText {
 
 - 活动日志只保存 `formatVersion/time/event/operation/intentId`、可选 Session/workspace、耗时、批次与写入/拒绝计数、processed/hasMore、`{ lastEventSeq, offset }` 游标位置、跳过原因、稳定错误分类及 retryAt/retryIntentId。
 - 文件 sink 必须逐字段重建记录，不能序列化调用方传入的任意对象；即使调用方额外提供 prompt、对话、summary/detail、sourceRefs、模型原始响应、异常正文或秘密，这些字段也不得落盘。游标同样只投影两个位置字段，不保存 updatedAt 或转录。
-- 模型和 Store 错误通过 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`store-readonly`、`operation-aborted`、`operation-failed` 稳定分类传递，活动日志不读取或保存异常 message。日志写入与告警均为 best-effort，不能将已经成功的记忆任务改判失败。
+- 模型和 Store 错误通过 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid`、`model-output-budget-exceeded`、`store-readonly`、`operation-aborted`、`operation-failed` 稳定分类传递，活动日志不读取或保存异常 message。四种具体输出分类分别表示空输出、无法恢复合法 JSON、顶层不是数组或 candidates 对象、输出超过字符预算；通用 `model-output-invalid` 仅作其他解析失败的兼容分类。日志写入与告警均为 best-effort，不能将已经成功的记忆任务改判失败。
 
 ## Testing Strategy
 

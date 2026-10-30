@@ -637,6 +637,36 @@ describe('LifecycleScheduler', () => {
     await scheduler.dispose()
   })
 
+  it('logs a detailed sanitized output failure for manual consolidation', async () => {
+    const store = await openStore()
+    const records: LifecycleActivityRecord[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      activity: { record: record => { records.push(record) } },
+      run: async () => {
+        throw Object.assign(new Error('raw model response must not be logged'), {
+          activityCategory: 'model-output-invalid-json',
+        })
+      },
+    })
+    await scheduler.start()
+    const request = scheduler.requestConsolidation({ kind: 'workspace', workspaceId: workspaceId('test_only') })
+    const assertion = expect(request).rejects.toMatchObject({ message: 'Memory consolidation failed' })
+    await vi.advanceTimersByTimeAsync(0)
+    await assertion
+
+    expect(records.map(record => record.event)).toEqual([
+      'intent-created', 'run-started', 'run-failed', 'retry-scheduled',
+    ])
+    expect(records.at(-2)).toMatchObject({
+      operation: 'consolidate',
+      workspaceId: 'test_only',
+      event: 'run-failed',
+      error: 'model-output-invalid-json',
+    })
+    expect(JSON.stringify(records)).not.toContain('raw model response')
+    await scheduler.dispose()
+  })
+
   it('logs a clean persisted workspace intent as skipped without executing it', async () => {
     const store = await openStore()
     const records: LifecycleActivityRecord[] = []

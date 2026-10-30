@@ -52,6 +52,8 @@ function activityErrorCategory(error: unknown): LifecycleErrorCategory {
   if (error instanceof MemoryStoreReadonlyError) return 'store-readonly'
   const category = (error as { activityCategory?: unknown } | null)?.activityCategory
   if (category === 'model-route-missing' || category === 'model-request-failed' || category === 'model-output-invalid'
+    || category === 'model-output-empty' || category === 'model-output-invalid-json'
+    || category === 'model-output-shape-invalid' || category === 'model-output-budget-exceeded'
     || category === 'store-readonly' || category === 'operation-aborted' || category === 'operation-failed') return category
   const message = error instanceof Error ? error.message : ''
   if (message === 'No auxiliary model route is available') return 'model-route-missing'

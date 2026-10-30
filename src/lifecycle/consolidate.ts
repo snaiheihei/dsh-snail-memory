@@ -71,7 +71,12 @@ export async function consolidateMemories(store: MemoryStore, options: Consolida
         model: options.model,
         provider: options.provider,
         modelName: options.modelName,
-        prompt: `Consolidate only scope ${scopeName}. Never promote between scopes. Merge duplicates, correct conflicts, and supersede obsolete entries. Return JSON candidates with optional id and supersedes.\n${safe.text}`,
+        prompt: `Consolidate only scope ${scopeName}. Never promote between scopes. Merge duplicates, correct conflicts, and supersede obsolete entries.
+Return only JSON: one object with a candidates array, without Markdown fences or explanatory text.
+Use this shape: {"candidates":[{"id":"optional input entry id","category":"required category","summary":"required non-empty string","detail":"required non-empty string, at most 16000 characters","supersedes":["optional input entry ids"]}]}.
+Category must be exactly one of preference, project-convention, environment-fact, troubleshooting, long-term-decision.
+Return only new or changed candidates; do not return unchanged entries. Omit id for new entries. id and supersedes may only reference entry ids from the input below. Do not return sourceRefs.
+Input entries:\n${safe.text}`,
         maxOutputChars: 64_000,
         maxDetailChars: 16_000,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
