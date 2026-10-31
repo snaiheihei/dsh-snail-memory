@@ -46,6 +46,9 @@ export const MEMORY_STYLES = `
   overflow-x: hidden;
 }
 .snail-memory-page h1 {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   margin: 0;
   font-size: 24px;
   line-height: 1.25;
@@ -53,6 +56,7 @@ export const MEMORY_STYLES = `
   letter-spacing: -0.01em;
   color: var(--sm-ink);
 }
+.snail-memory-page h1 > svg { flex: none; }
 .snail-memory-head { display: grid; gap: 0; min-width: 0; }
 .snail-memory-figures {
   display: grid;
@@ -191,6 +195,7 @@ export const MEMORY_STYLES = `
 }
 .snail-memory-empty--plain { grid-template-columns: minmax(0, 1fr); }
 .snail-memory-empty-main { display: grid; gap: 10px; align-content: start; justify-items: start; min-width: 0; }
+.snail-memory-empty-main > svg { margin-bottom: 2px; }
 .snail-memory-empty-title { margin: 0; font-size: 14px; line-height: 1.45; font-weight: 500; color: var(--sm-ink); }
 .snail-memory-empty p + p { max-width: 46ch; margin: 0; font-size: 13px; line-height: 1.55; color: var(--sm-muted); }
 .snail-memory-kinds { display: grid; margin: 0; padding: 0; border-top: var(--sm-line); }
@@ -455,7 +460,8 @@ export const MEMORY_STYLES = `
 }
 @media (max-width: 480px) {
   .snail-memory-page { padding: 20px 16px 36px; }
-  .snail-memory-page h1 { font-size: 21px; }
+  .snail-memory-page h1 { font-size: 21px; gap: 8px; }
+  .snail-memory-page h1 > svg { width: 26px; height: 26px; }
   .snail-memory-tabs { gap: 18px; overflow-x: auto; }
   .snail-memory-filters { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
   .snail-memory-edit-fields { padding: 14px 16px; }

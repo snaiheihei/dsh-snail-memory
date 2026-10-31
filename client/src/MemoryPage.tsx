@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { FormEvent } from 'react'
 import type { MemoryEntry, MemoryIndexEntry, MemoryScope, WorkspaceId } from '../../src/store/types.js'
+import type { WorkspaceView } from '../../src/contract.js'
 import { formatBeijingMinute, formatBeijingTime } from '../../src/time.js'
 import { formatCount } from './format.js'
+import { MemoryMark } from './icons.js'
 import type { MemoryCopyKey, MemoryTranslator } from './locale.js'
 import { renderMarkdown } from './markdown.js'
 import type { MemoryClientStore } from './store.js'
@@ -58,6 +60,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [promoting, setPromoting] = useState(false)
+  const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editStatus, setEditStatus] = useState<{ kind: 'status' | 'alert'; text: string } | null>(null)
   const [consolidating, setConsolidating] = useState(false)
@@ -161,12 +164,13 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   }
 
   useEffect(() => {
-    if (detail === null) return
+    if (detail === null && !creating) return
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
       event.preventDefault()
+      if (creating) { setCreating(false); return }
       if (editing) { setEditing(false); setEditStatus(null); return }
       closeDetails()
     }
@@ -175,7 +179,16 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
       document.body.style.overflow = previousOverflow
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [detail, deleting, promoting, editing])
+  }, [detail, creating, deleting, promoting, editing])
+
+  const createdMemory = (entry: MemoryEntry): void => {
+    setCreating(false)
+    if (entry.scope.kind === 'workspace') {
+      selectTab('workspaces')
+      setWorkspaceSelection({ id: entry.scope.workspaceId, manual: true })
+    }
+    setNotice({ kind: 'status', text: t('createSaved') })
+  }
 
   const savedEdit = (entry: MemoryEntry): void => {
     setEditing(false)
@@ -254,7 +267,8 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const categoryCounts = CATEGORY_ORDER.map(category => allEntries.filter(entry => entry.category === category).length)
   const entries = categoryFilter === 'all' ? allEntries : allEntries.filter(entry => entry.category === categoryFilter)
   const emptyScope = tab === 'global' ? t('emptyGlobal') : t('emptyWorkspace')
-  const showToolbar = scope !== undefined && (tab === 'workspaces' || index === undefined || allEntries.length > 0)
+  const showToolbar = scope !== undefined
+  const showConsolidate = tab === 'workspaces' || index === undefined || allEntries.length > 0
   const showFilters = tab !== 'settings' && index !== undefined && allEntries.length > 0
 
   const toolbar = scope === undefined ? null : (
@@ -287,17 +301,28 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
         </div>
       )}
       <div className="snail-memory-toolbar-end">
+        {showConsolidate && (
+          <button
+            type="button"
+            className="snail-memory-button"
+            disabled={consolidating}
+            onClick={() => {
+              setConsolidationFeedback(null)
+              setConsolidationConfirming(true)
+            }}
+          >
+            {consolidating ? t('consolidating') : t(tab === 'global' ? 'consolidateGlobal' : 'consolidateWorkspace')}
+          </button>
+        )}
         <button
           type="button"
           className="snail-memory-button"
-          disabled={consolidating}
+          data-variant="primary"
           onClick={() => {
-            setConsolidationFeedback(null)
-            setConsolidationConfirming(true)
+            setCreating(true)
+            void store.loadWorkspaces()
           }}
-        >
-          {consolidating ? t('consolidating') : t(tab === 'global' ? 'consolidateGlobal' : 'consolidateWorkspace')}
-        </button>
+        >{t('newMemory')}</button>
       </div>
     </div>
   )
@@ -305,7 +330,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   return (
     <section className="snail-memory-page" aria-label={t('title')}>
       <header className="snail-memory-head">
-        <h1>{t('title')}</h1>
+        <h1><MemoryMark size={32} />{t('title')}</h1>
         <dl className="snail-memory-figures">
           <div className="snail-memory-figure">
             <dt>{t('memoryCountLabel')}</dt>
@@ -392,6 +417,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
             {index !== undefined && allEntries.length === 0 && (
               <div className={tab === 'global' ? 'snail-memory-empty' : 'snail-memory-empty snail-memory-empty--plain'}>
                 <div className="snail-memory-empty-main">
+                  <MemoryMark size={40} />
                   <p className="snail-memory-empty-title">{emptyScope}</p>
                   {tab === 'global' && <p>{t('emptyGlobalWhy')}</p>}
                   {tab === 'global' && <button type="button" className="snail-memory-button" onClick={() => selectTab('workspaces')}>{t('browseWorkspaces')}</button>}
@@ -486,7 +512,148 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
           </div>
         </div>
       )}
+      {creating && (
+        <div className="snail-memory-detail-backdrop" onPointerDown={event => { if (event.target === event.currentTarget) setCreating(false) }}>
+          <div className="snail-memory-detail" role="dialog" aria-modal="true" aria-labelledby="snail-memory-create-title">
+            <div className="snail-memory-detail-head">
+              <h2 id="snail-memory-create-title">{t('newMemory')}</h2>
+            </div>
+            <NewMemoryForm
+              store={store}
+              t={t}
+              workspaces={workspaces}
+              defaultWorkspaceId={selectedWorkspaceId}
+              sessionId={sessionId}
+              onSaved={createdMemory}
+              onCancel={() => setCreating(false)}
+            />
+          </div>
+        </div>
+      )}
     </section>
+  )
+}
+
+interface NewMemoryFormProps {
+  readonly store: MemoryClientStore
+  readonly t: MemoryTranslator
+  readonly workspaces: readonly WorkspaceView[] | undefined
+  readonly defaultWorkspaceId?: WorkspaceId | undefined
+  readonly sessionId?: string | undefined
+  readonly onSaved: (entry: MemoryEntry) => void
+  readonly onCancel: () => void
+}
+
+function NewMemoryForm({ store, t, workspaces, defaultWorkspaceId, sessionId, onSaved, onCancel }: NewMemoryFormProps) {
+  const [summary, setSummary] = useState('')
+  const [detail, setDetail] = useState('')
+  const [category, setCategory] = useState<MemoryEntry['category']>('project-convention')
+  const [workspaceId, setWorkspaceId] = useState<string>(defaultWorkspaceId ?? workspaces?.[0]?.id ?? '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const mounted = useRef(true)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  useEffect(() => {
+    if (workspaceId !== '') return
+    const fallback = defaultWorkspaceId ?? workspaces?.[0]?.id
+    if (fallback !== undefined) setWorkspaceId(fallback)
+  }, [workspaceId, defaultWorkspaceId, workspaces])
+
+  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault()
+    if (saving) return
+    if (summary.trim() === '' || detail.trim() === '') {
+      setError(t('editRequired'))
+      return
+    }
+    if (workspaceId === '') {
+      setError(t('noWorkspaces'))
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const entry = await store.remember({
+        scope: { kind: 'workspace', workspaceId: workspaceId as WorkspaceId },
+        category, summary: summary.trim(), detail: detail.trim(),
+        ...(sessionId === undefined ? {} : { sessionId }),
+      })
+      if (mounted.current) onSaved(entry)
+    } catch (reason) {
+      if (mounted.current) setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      if (mounted.current) setSaving(false)
+    }
+  }
+
+  return (
+    <form className="snail-memory-edit" onSubmit={event => { void submit(event) }}>
+      <div className="snail-memory-edit-fields">
+        <div className="snail-memory-edit-field">
+          <label htmlFor="snail-memory-create-summary">{t('summaryLabel')}</label>
+          <input
+            id="snail-memory-create-summary"
+            value={summary}
+            maxLength={500}
+            required
+            autoFocus
+            disabled={saving}
+            aria-describedby="snail-memory-create-summary-count"
+            onChange={event => setSummary(event.target.value)}
+          />
+          <p id="snail-memory-create-summary-count">{formatCount(summary.length)} / 500</p>
+        </div>
+        <div className="snail-memory-edit-field">
+          <label htmlFor="snail-memory-create-category">{t('category')}</label>
+          <select
+            id="snail-memory-create-category"
+            value={category}
+            disabled={saving}
+            onChange={event => setCategory(event.target.value as MemoryEntry['category'])}
+          >
+            {CATEGORY_ORDER.map(value => <option key={value} value={value}>{t(CATEGORY_COPY[value])}</option>)}
+          </select>
+        </div>
+        <div className="snail-memory-edit-field">
+          <label htmlFor="snail-memory-create-workspace">{t('saveTo')}</label>
+          <select
+            id="snail-memory-create-workspace"
+            value={workspaceId}
+            disabled={saving || workspaces === undefined || workspaces.length === 0}
+            aria-describedby="snail-memory-create-workspace-hint"
+            onChange={event => setWorkspaceId(event.target.value)}
+          >
+            {workspaceId === '' && <option value="">{workspaces?.length === 0 ? t('noWorkspaces') : ''}</option>}
+            {workspaces?.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.title}</option>)}
+          </select>
+          <p id="snail-memory-create-workspace-hint">{workspaces === undefined ? t('loading') : t('scopeHint')}</p>
+        </div>
+        <div className="snail-memory-edit-field">
+          <label htmlFor="snail-memory-create-detail">{t('detailLabel')}</label>
+          <textarea
+            id="snail-memory-create-detail"
+            value={detail}
+            maxLength={16_000}
+            required
+            rows={9}
+            disabled={saving}
+            aria-describedby="snail-memory-create-detail-count"
+            onChange={event => setDetail(event.target.value)}
+          />
+          <p id="snail-memory-create-detail-count">{formatCount(detail.length)} / 16,000</p>
+        </div>
+        {error !== null && <p className="snail-memory-detail-note" role="alert">{error}</p>}
+      </div>
+      <div className="snail-memory-detail-foot">
+        <button type="submit" className="snail-memory-button" data-variant="primary" disabled={saving}>{saving ? t('creatingMemory') : t('createMemory')}</button>
+        <button type="button" className="snail-memory-button" disabled={saving} onClick={onCancel}>{t('cancel')}</button>
+      </div>
+    </form>
   )
 }
 

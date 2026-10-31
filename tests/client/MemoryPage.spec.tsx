@@ -269,6 +269,53 @@ describe('MemoryPage', () => {
     expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(3)
   })
 
+  it('adds a memory by hand from the global index tab', async () => {
+    const rpc = readyRpc().on('remember', ({ scope, category, summary, detail }) => ({
+      ...ENTRY, id: 'memory-new' as typeof ENTRY.id, scope, category, summary, detail, revision: 4,
+    }))
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    await screen.findByText('Active memories')
+
+    fireEvent.click(screen.getByRole('button', { name: 'New memory' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New memory' })
+    expect(within(dialog).getByText(/global memory is promoted/)).toBeTruthy()
+    const scopeSelect = within(dialog).getByRole('combobox', { name: 'Save to' })
+    await waitFor(() => expect(within(scopeSelect).getAllByRole('option')).toHaveLength(2))
+
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Summary' }), { target: { value: 'Prefer short answers' } })
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Body' }), { target: { value: 'Answer in two sentences unless asked for detail.' } })
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Category' }), { target: { value: 'preference' } })
+    fireEvent.change(scopeSelect, { target: { value: 'workspace-2' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add memory' }))
+
+    expect(await screen.findByText('Memory added.')).toBeTruthy()
+    expect(rpc.calls.find(call => call.method === 'remember')?.payload).toEqual({
+      scope: { kind: 'workspace', workspaceId: 'workspace-2' },
+      category: 'preference',
+      summary: 'Prefer short answers',
+      detail: 'Answer in two sentences unless asked for detail.',
+      sessionId: 'session-1',
+    })
+    expect(screen.getByRole('tab', { name: 'Workspaces' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('refuses a whitespace-only new memory without calling the Host', async () => {
+    const rpc = readyRpc().on('remember', () => ENTRY)
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    await screen.findByText('Active memories')
+
+    fireEvent.click(screen.getByRole('button', { name: 'New memory' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New memory' })
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Summary' }), { target: { value: '  ' } })
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Body' }), { target: { value: 'Body text' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add memory' }))
+
+    expect(await within(dialog).findByText('A summary and a body are both required.')).toBeTruthy()
+    expect(rpc.count('remember')).toBe(0)
+  })
+
   it('promotes a workspace memory from its detail dialog', async () => {
     const rpc = readyRpc()
     const store = new MemoryClientStore(rpc)

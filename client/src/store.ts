@@ -13,6 +13,10 @@ export interface CorrectInput {
   readonly sessionId?: string
 }
 
+export interface RememberInput extends CorrectInput {
+  readonly scope: MemoryScope
+}
+
 function scopeKey(scope: MemoryScope): string {
   return scope.kind === 'global' ? 'global' : `workspace:${scope.workspaceId}`
 }
@@ -205,6 +209,15 @@ export class MemoryClientStore {
   async correct(scope: MemoryScope, id: MemoryId, input: CorrectInput): Promise<MemoryEntry> {
     const entry = await this.rpc.call('correct', {
       scope, id, category: input.category, summary: input.summary, detail: input.detail,
+      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+    })
+    await this.refreshActive()
+    return entry
+  }
+
+  async remember(input: RememberInput): Promise<MemoryEntry> {
+    const entry = await this.rpc.call('remember', {
+      scope: input.scope, category: input.category, summary: input.summary, detail: input.detail,
       ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
     })
     await this.refreshActive()
