@@ -154,9 +154,17 @@ export interface SessionMemoryState {
 export interface LifecycleIntent {
   readonly id: string
   readonly kind: string
+  /**
+   * Session intents treat this as the activity window start; consolidation and retention
+   * retries persist their absolute retry time here instead.
+   */
   readonly createdAt: string
   /** Idle refreshes retain their activity id but receive a new execution generation. */
   readonly generation?: string
+  /** Failed-run count for session intents; bounded so a dead Session cannot retry forever. */
+  readonly attempts?: number
+  /** Absolute earliest retry time for a session intent; backoff outlives the idle delay. */
+  readonly retryAt?: string
 }
 
 export interface WorkspaceConsolidationMeta {

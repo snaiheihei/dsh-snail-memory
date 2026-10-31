@@ -636,6 +636,29 @@ describe('MemoryLifecycleService', { timeout: 15_000 }, () => {
     expect(store.getMeta().workspaceConsolidation.dsh_memory).toMatchObject({ dirty: false, nextConsolidationAt: null })
   })
 
+  it('clears an empty dirty workspace without a model call', async () => {
+    const { service, store, prompts } = await setup()
+    await store.updateMeta(meta => {
+      meta.workspaceConsolidation = {
+        test_only: { dirty: true, nextConsolidationAt: '2026-10-26T00:00:00.000Z', lastConsolidationAt: null },
+      }
+    })
+
+    await expect(service.runIntentDetailed('consolidate:test_only')).resolves.toEqual({
+      written: 0,
+      batches: 0,
+      processed: false,
+      batchResults: [],
+      skipReason: 'no-entries',
+    })
+    expect(prompts).toHaveLength(0)
+    expect(store.getMeta().workspaceConsolidation.test_only).toMatchObject({
+      dirty: false,
+      nextConsolidationAt: null,
+      lastConsolidationAt: '2026-10-26T00:00:00.000Z',
+    })
+  })
+
   it('serializes two dirty workspaces without putting either workspace entries in the other prompt', async () => {
     const firstScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('test_only') }
     const secondScope: MemoryScope = { kind: 'workspace', workspaceId: workspaceId('dsh_memory') }

@@ -849,6 +849,99 @@ describe('LifecycleScheduler', () => {
     expect(store.getMeta().lastError).toBe('Global memory consolidation failed')
     await scheduler.dispose()
   })
+
+  it('persists one idle intent per activity window instead of one record per event', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      idleDelayMinutes: 15,
+      run: async kind => { runs.push(kind) },
+    })
+    await scheduler.start()
+    const updates = vi.spyOn(store, 'updateMeta')
+
+    for (let event = 0; event < 5; event += 1) {
+      await scheduler.requestIdle('session-1')
+      await vi.advanceTimersByTimeAsync(60_000)
+    }
+    expect(updates).toHaveBeenCalledTimes(1)
+    expect(runs).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(15 * 60_000)
+    await scheduler.drain()
+    expect(runs).toEqual(['idle:session-1'])
+
+    updates.mockClear()
+    await scheduler.requestIdle('session-1')
+    expect(updates).toHaveBeenCalledTimes(1)
+    await scheduler.dispose()
+  })
+
+  it('backs off and stops retrying a session intent whose transcript never returns', async () => {
+    const store = await openStore()
+    const records: LifecycleActivityRecord[] = []
+    let runs = 0
+    const scheduler = new LifecycleScheduler(store, {
+      idleDelayMinutes: 1,
+      activity: { record: record => { records.push(record) } },
+      run: async () => {
+        runs += 1
+        throw Object.assign(new Error('Session transcript is not currently available'), {
+          activityCategory: 'transcript-unavailable',
+        })
+      },
+    })
+    await scheduler.start()
+    await scheduler.requestIdle('session-1')
+    const backoffs: number[] = []
+
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      const pending = store.getMeta().pending['idle:session-1']
+      expect(pending).toBeDefined()
+      const due = pending!.retryAt ?? new Date(new Date(pending!.createdAt).getTime() + 60_000).toISOString()
+      await vi.advanceTimersByTimeAsync(new Date(due).getTime() - Date.now())
+      await scheduler.drain()
+      const retried = store.getMeta().pending['idle:session-1']
+      if (attempt === 6) break
+      expect(retried).toMatchObject({ attempts: attempt })
+      backoffs.push(new Date(retried!.retryAt!).getTime() - Date.now())
+    }
+
+    expect(backoffs).toEqual([60_000, 120_000, 240_000, 480_000, 960_000])
+    expect(runs).toBe(6)
+    expect(store.getMeta().pending['idle:session-1']).toBeUndefined()
+    expect(records.filter(record => record.event === 'run-failed')[0]).toMatchObject({
+      error: 'transcript-unavailable',
+    })
+    expect(records.filter(record => record.event === 'retry-exhausted')).toHaveLength(1)
+    await scheduler.dispose()
+  })
+
+  it('throttles dirty consolidation instead of pushing its deadline back on every write', async () => {
+    const store = await openStore()
+    const runs: string[] = []
+    const scheduler = new LifecycleScheduler(store, {
+      consolidationCooldownHours: 20,
+      run: async kind => { runs.push(kind) },
+    })
+    await scheduler.start()
+    await scheduler.markDirty('workspace-1')
+    await vi.advanceTimersByTimeAsync(10 * 3_600_000)
+    await scheduler.markDirty('workspace-1')
+    expect(store.getMeta().workspaceConsolidation['workspace-1']?.nextConsolidationAt)
+      .toBe('2026-10-26T20:00:00.000Z')
+
+    await vi.advanceTimersByTimeAsync(10 * 3_600_000)
+    await scheduler.drain()
+    expect(runs).toEqual(['consolidate:workspace-1'])
+    expect(store.getMeta().workspaceConsolidation['workspace-1'])
+      .toMatchObject({ dirty: false, nextConsolidationAt: null })
+
+    await scheduler.markDirty('workspace-1')
+    expect(store.getMeta().workspaceConsolidation['workspace-1']?.nextConsolidationAt)
+      .toBe('2026-10-27T16:00:00.000Z')
+    await scheduler.dispose()
+  })
 })
 
 describe('WriterLifecycleRuntime', () => {

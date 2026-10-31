@@ -7,11 +7,11 @@ export const DEFAULT_ACTIVITY_RETAINED_FILES = 3
 
 export type LifecycleOperation = 'review' | 'idle' | 'stop' | 'consolidate' | 'global-consolidate' | 'retention'
 export type LifecycleActivityEvent = 'intent-created' | 'run-started' | 'batch-completed'
-  | 'run-succeeded' | 'run-skipped' | 'run-failed' | 'retry-scheduled'
-export type LifecycleSkipReason = 'workspace-unassigned' | 'no-new-events' | 'workspace-clean'
+  | 'run-succeeded' | 'run-skipped' | 'run-failed' | 'retry-scheduled' | 'retry-exhausted'
+export type LifecycleSkipReason = 'workspace-unassigned' | 'no-new-events' | 'workspace-clean' | 'no-entries'
 export type LifecycleErrorCategory = 'model-route-missing' | 'model-request-failed' | 'model-output-invalid'
   | 'model-output-empty' | 'model-output-invalid-json' | 'model-output-shape-invalid' | 'model-output-budget-exceeded'
-  | 'store-readonly' | 'operation-aborted' | 'operation-failed'
+  | 'store-readonly' | 'transcript-unavailable' | 'operation-aborted' | 'operation-failed'
 
 export interface LifecycleActivityRecord {
   readonly formatVersion: 1

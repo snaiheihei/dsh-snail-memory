@@ -23,6 +23,12 @@ export interface ModelRoute {
   readonly model: string
 }
 
+interface ConsolidationSummary {
+  readonly written: number
+  readonly skipped: number
+  readonly total: number
+}
+
 const IDLE_ACTIVITY_EVENTS = new Set([
   'user/message', 'assistant/message', 'tool/call', 'tool/result',
   'turn/start', 'turn/end', 'turn/completed', 'agent/turn',
@@ -157,15 +163,10 @@ export class MemoryLifecycleService {
         const scope: MemoryScope | undefined = consolidationWorkspaceId === undefined
           ? undefined
           : { kind: 'workspace', workspaceId: consolidationWorkspaceId }
-        return { written: await this.consolidateWithResult(scope, signal), batches: 0, processed: true, batchResults: [] }
+        return this.consolidationResult(await this.consolidateWithResult(scope, signal))
       }
       if (operation === 'global-consolidate') {
-        return {
-          written: await this.consolidateWithResult({ kind: 'global' }, signal),
-          batches: 0,
-          processed: true,
-          batchResults: [],
-        }
+        return this.consolidationResult(await this.consolidateWithResult({ kind: 'global' }, signal))
       }
       if (operation !== 'review' && operation !== 'idle' && operation !== 'stop') {
         throw new Error(`Unknown memory lifecycle intent: ${kind}`)
@@ -283,30 +284,56 @@ export class MemoryLifecycleService {
     })
   }
 
-  private async consolidateWithResult(scope?: MemoryScope, signal?: AbortSignal): Promise<number> {
+  private async consolidateWithResult(scope?: MemoryScope, signal?: AbortSignal): Promise<ConsolidationSummary> {
     const route = this.options.route?.()
     const provider = route?.provider ?? this.options.provider
     const modelName = route?.model ?? this.options.modelName
     const now = this.now()
     const snapshot = this.store.getMeta()
     let written = 0
+    let skipped = 0
+    let total = 0
     for (const currentScope of scope ? [scope] : this.store.workspaceScopes()) {
-      written += await consolidateMemories(this.store, {
-        ...(this.options.model === undefined ? {} : { model: this.options.model }),
-        ...(provider === undefined ? {} : { provider }),
-        ...(modelName === undefined ? {} : { modelName }),
-        scope: currentScope,
-        now: () => now,
-        ...(signal === undefined ? {} : { signal }),
-        onChange: async (scope, entries) => {
-          await this.options.onChange?.({ kind: 'consolidate', scope, ids: entries.map(entry => entry.id) })
-        },
-      })
+      total += 1
+      // A concurrent write to this scope must move its schedule, so completion cannot clear it.
+      this.scheduler.beginConsolidation(currentScope)
+      try {
+        if (this.store.list(currentScope).entries.length === 0) {
+          // Nothing to merge: clear the schedule without a model call or a route requirement.
+          skipped += 1
+        } else {
+          written += await consolidateMemories(this.store, {
+            ...(this.options.model === undefined ? {} : { model: this.options.model }),
+            ...(provider === undefined ? {} : { provider }),
+            ...(modelName === undefined ? {} : { modelName }),
+            scope: currentScope,
+            now: () => now,
+            ...(signal === undefined ? {} : { signal }),
+            onChange: async (changedScope, entries) => {
+              await this.options.onChange?.({ kind: 'consolidate', scope: changedScope, ids: entries.map(entry => entry.id) })
+            },
+          })
+        }
+      } finally {
+        this.scheduler.endConsolidation(currentScope)
+      }
       await this.store.updateMeta(meta => {
         this.scheduler.finishConsolidation(meta, currentScope, snapshot, now.toISOString())
       })
     }
-    return written
+    return { written, skipped, total }
+  }
+
+  /** A scope with no entries is a completed no-op, never a model request. */
+  private consolidationResult(summary: ConsolidationSummary): LifecycleRunResult {
+    const empty = summary.total > 0 && summary.skipped === summary.total
+    return {
+      written: summary.written,
+      batches: 0,
+      processed: !empty,
+      batchResults: [],
+      ...(empty ? { skipReason: 'no-entries' as const } : {}),
+    }
   }
 
   private validateInput(input: UpsertMemoryInput): void {

@@ -91,9 +91,15 @@ function normalizeState<T extends StoreState | LegacyStoreState>(state: T): T {
       : existing ?? { dirty: false, nextConsolidationAt: null, lastConsolidationAt: null }
   }
   const pending: Record<string, LifecycleIntent> = {}
-  for (const [key, intent] of Object.entries(legacyMeta.pending)) {
+  for (const [key, raw] of Object.entries(legacyMeta.pending)) {
     if (key === 'consolidate') continue
-    pending[key] = { ...intent, id: intent.id ?? `legacy:${key}:${intent.createdAt}` }
+    const { attempts, retryAt, ...rest } = raw as LifecycleIntent & { attempts?: unknown; retryAt?: unknown }
+    pending[key] = {
+      ...rest,
+      id: rest.id ?? `legacy:${key}:${rest.createdAt}`,
+      ...(typeof attempts === 'number' && Number.isSafeInteger(attempts) && attempts > 0 ? { attempts } : {}),
+      ...(typeof retryAt === 'string' && Number.isFinite(new Date(retryAt).getTime()) ? { retryAt } : {}),
+    }
   }
   if (legacyConsolidation) {
     for (const id of workspaceIds) {

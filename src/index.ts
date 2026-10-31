@@ -120,7 +120,12 @@ async function initialize(
     transcriptEvents: sessionId => {
       const agent = ctx.agents.get(SessionId(sessionId))
       const events = agent ? agent.session.snapshotEvents() : transcripts.get(sessionId)
-      if (events === undefined) throw new Error('Session transcript is not currently available')
+      if (events === undefined) {
+        // Not a model or store failure: the Session is closed and its transcript left memory.
+        throw Object.assign(new Error('Session transcript is not currently available'), {
+          activityCategory: 'transcript-unavailable',
+        })
+      }
       return events
     },
     runMaintenance: (sessionId, task) => {

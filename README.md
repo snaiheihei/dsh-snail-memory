@@ -15,7 +15,7 @@ DeepSeek Harness（dsh）插件：单用户、**显式开启**的全局 / worksp
 - **显式开关**：记忆不会自动进入上下文。每个 Session 里手动启用某一层，用 `refresh` 生成新快照，`disable` 关闭。
 - **只追加注入**：快照通过 `agent.inject()` 作为一条 `user` 消息追加（`source.kind = "snail-memory"`），插件从不改写、替换或删除既有会话消息。
 - **可对账的注入**：每次注入带稳定 `injectionId`，区分 `desired → queued → committed`；只有观察到会话里真正落盘的 `user/message` 才算 committed，重启后按会话日志对账，不会重复注入。
-- **生命周期维护**：统计完成的真实用户轮次，按空闲时间蒸馏记忆，分别调度 workspace 与 global 的 consolidation，并按分类执行 retention 清理。
+- **生命周期维护**：统计完成的真实用户轮次，按空闲时间蒸馏记忆，分别调度 workspace 与 global 的 consolidation，并按分类执行 retention 清理。会话活动只推进内存中的空闲期限，最近一次 transcript 不可用的 Session 会退避重试并在有限次数后放弃。
 - **模型工具**：`snail_memory_read`（按 id 读取，大对象先返回分片清单）、`snail_memory_feedback`（对已 committed 快照里的记忆打 helpful / unhelpful / incorrect）。
 - **斜杠命令**：`/memory status`、`/memory remember workspace <text>`、`/memory correct workspace <id> <text>`、`/memory forget workspace <id>`。
 - **Web UI**：输入框左侧记忆按钮，侧栏 `Memory` 面板（全局 / 工作区 / 设置三个标签），可查看条目、引用、最近一次已提交快照与 token 估算。
@@ -78,8 +78,8 @@ dsh --profile web --dump-config   # 应出现 "# == dsh-snail-memory"
 | `provider` / `model` | 未设置 | 辅助模型路由。留空时从当前 agent 列表中选择可用模型 |
 | `reviewEveryUserTurns` | `15` | 每累计多少个完成的用户轮次触发一次记忆蒸馏 |
 | `idleDelayMinutes` | `60` | 会话空闲多久后触发蒸馏 |
-| `consolidationCooldownHours` | `20` | workspace consolidation 冷却时间 |
-| `globalConsolidationCooldownDays` | `7` | global consolidation 冷却时间 |
+| `consolidationCooldownHours` | `20` | workspace consolidation 冷却时间；一次 dirty 窗口只在首次需要排期时定时，后续写入不再推迟 |
+| `globalConsolidationCooldownDays` | `7` | global consolidation 冷却时间，语义同上 |
 | `retentionSweepHours` | `24` | retention 清理的间隔 |
 
 ## 数据位置

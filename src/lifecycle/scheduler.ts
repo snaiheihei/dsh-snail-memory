@@ -10,6 +10,14 @@ import type {
   LifecycleRunResult,
 } from './activity.js'
 
+/** Activity deadlines live only in memory, so a long-lived process must bound the map. */
+const MAX_TRACKED_ACTIVITY = 256
+/** Session intents retry with exponential backoff and stop after this many failed attempts. */
+const MAX_SESSION_RETRIES = 6
+/** Floor keeps a zero idle delay from turning a dead Session into a hot retry loop. */
+const MIN_SESSION_RETRY_DELAY_MS = 60_000
+const MAX_SESSION_RETRY_DELAY_MS = 86_400_000
+
 interface ConsolidationRequest {
   intentId: string
   settled: boolean
@@ -59,7 +67,8 @@ function activityErrorCategory(error: unknown): LifecycleErrorCategory {
   if (category === 'model-route-missing' || category === 'model-request-failed' || category === 'model-output-invalid'
     || category === 'model-output-empty' || category === 'model-output-invalid-json'
     || category === 'model-output-shape-invalid' || category === 'model-output-budget-exceeded'
-    || category === 'store-readonly' || category === 'operation-aborted' || category === 'operation-failed') return category
+    || category === 'store-readonly' || category === 'transcript-unavailable'
+    || category === 'operation-aborted' || category === 'operation-failed') return category
   const message = error instanceof Error ? error.message : ''
   if (message === 'No auxiliary model route is available') return 'model-route-missing'
   if ((error as { name?: unknown } | null)?.name === 'AbortError' || /aborted|cancelled/i.test(message)) return 'operation-aborted'
@@ -86,6 +95,12 @@ export class LifecycleScheduler {
   private readonly deferredIntents = new Map<string, LifecycleIntent>()
   private readonly consolidationRequests = new Map<string, ConsolidationRequest>()
   private readonly activeConsolidations = new Map<string, string>()
+  /** Latest Session activity, used to postpone idle work without rewriting authoritative state. */
+  private readonly lastActivity = new Map<string, number>()
+  /** Scopes currently being consolidated by a caller outside this scheduler, with nesting depth. */
+  private readonly runningScopes = new Map<string, number>()
+  /** Kind currently executing, so a refresh during a run can still persist a newer generation. */
+  private readonly activeIntents = new Map<string, string>()
   private readonly now: () => Date
 
   constructor(
@@ -177,8 +192,27 @@ export class LifecycleScheduler {
     await this.queue
   }
 
+  /**
+   * Activity inside one Session. The first event of an idle window persists the intent; later events
+   * only move an in-memory deadline, so a chat burst cannot rewrite authoritative state per event.
+   * Activity that lands while the window is already running still persists a newer generation,
+   * otherwise that run's completion would drop the work it has not seen yet.
+   */
   async requestIdle(sessionId: string): Promise<void> {
-    await this.putIntent(`idle:${sessionId}`, this.now().toISOString())
+    this.rememberActivity(sessionId)
+    const kind = `idle:${sessionId}`
+    if (this.store.getMeta().pending[kind] === undefined || this.activeIntents.has(kind)) {
+      await this.putIntent(kind, this.now().toISOString())
+      return
+    }
+    this.schedule()
+  }
+
+  private rememberActivity(sessionId: string): void {
+    this.lastActivity.set(sessionId, this.now().getTime())
+    if (this.lastActivity.size <= MAX_TRACKED_ACTIVITY) return
+    const oldest = [...this.lastActivity.entries()].sort((left, right) => left[1] - right[1])[0]
+    if (oldest !== undefined) this.lastActivity.delete(oldest[0])
   }
 
   async requestReview(sessionId: string): Promise<void> {
@@ -207,7 +241,14 @@ export class LifecycleScheduler {
     return promise
   }
 
+  /**
+   * Throttle, not debounce: the first unscheduled write fixes one run time and later writes keep it,
+   * so a continuously active workspace still consolidates on a fixed cadence. A write that lands
+   * while this scope is consolidating must move the schedule, otherwise completion could drop work
+   * the run never saw.
+   */
   async markDirty(workspaceId: string): Promise<void> {
+    const consolidating = this.isConsolidating(workspaceId)
     await this.store.updateMeta(meta => {
       const consolidation = meta.workspaceConsolidation[workspaceId] ??= {
         dirty: false,
@@ -215,17 +256,44 @@ export class LifecycleScheduler {
         lastConsolidationAt: null,
       }
       consolidation.dirty = true
-      consolidation.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+      if (consolidating || consolidation.nextConsolidationAt === null) {
+        consolidation.nextConsolidationAt = new Date(this.now().getTime() + this.consolidationDelayMs).toISOString()
+      }
     })
     this.schedule()
   }
 
   async markGlobalDirty(): Promise<void> {
+    const consolidating = this.isConsolidating('global')
     await this.store.updateMeta(meta => {
       meta.globalDirty = true
-      meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.globalConsolidationDelayMs).toISOString()
+      if (consolidating || meta.nextGlobalConsolidationAt === null) {
+        meta.nextGlobalConsolidationAt = new Date(this.now().getTime() + this.globalConsolidationDelayMs).toISOString()
+      }
     })
     this.schedule()
+  }
+
+  /** A caller outside the queue (manual consolidate) marks its scope so concurrent writes stay dirty. */
+  beginConsolidation(scope: MemoryScope): void {
+    const key = scope.kind === 'global' ? 'global' : scope.workspaceId
+    this.runningScopes.set(key, (this.runningScopes.get(key) ?? 0) + 1)
+  }
+
+  endConsolidation(scope: MemoryScope): void {
+    const key = scope.kind === 'global' ? 'global' : scope.workspaceId
+    const depth = (this.runningScopes.get(key) ?? 1) - 1
+    if (depth <= 0) {
+      this.runningScopes.delete(key)
+      return
+    }
+    this.runningScopes.set(key, depth)
+  }
+
+  private isConsolidating(scopeKey: string): boolean {
+    if ((this.runningScopes.get(scopeKey) ?? 0) > 0) return true
+    const kind = scopeKey === 'global' ? 'global-consolidate' : `consolidate:${encodeURIComponent(scopeKey)}`
+    return this.activeConsolidations.has(kind)
   }
 
   finishConsolidation(
@@ -386,7 +454,7 @@ export class LifecycleScheduler {
       if (!this.started) return
       const meta = this.store.getMeta()
       const now = this.now().getTime()
-      const due = Object.entries(meta.pending).find(([, value]) => this.dueAt(value.kind, value.createdAt) <= now)
+      const due = Object.entries(meta.pending).find(([, value]) => this.dueAt(value) <= now)
       const workspaceDue = Object.entries(meta.workspaceConsolidation).find(([, consolidation]) => consolidation.dirty
         && consolidation.nextConsolidationAt !== null && new Date(consolidation.nextConsolidationAt).getTime() <= now)
       const globalConsolidationDue = meta.globalDirty && meta.nextGlobalConsolidationAt !== null
@@ -427,6 +495,7 @@ export class LifecycleScheduler {
       }
       const startedAt = this.now().getTime()
       this.logActivity(value, 'run-started')
+      this.activeIntents.set(key, value.id)
       let failed = false
       try {
         const result: LifecycleRunResult = await this.options.run(value.kind) ?? {
@@ -474,13 +543,17 @@ export class LifecycleScheduler {
           durationMs: Math.max(0, this.now().getTime() - startedAt),
           error: activityErrorCategory(error),
         })
+        const sessionKind = value.kind.startsWith('review:') || value.kind.startsWith('idle:')
+          || value.kind.startsWith('stop:')
+        const attempts = (value.attempts ?? 0) + 1
+        const exhausted = sessionKind && attempts >= MAX_SESSION_RETRIES
         const delay = workspaceId !== undefined
           ? this.consolidationDelayMs
           : value.kind === 'global-consolidate'
             ? this.globalConsolidationDelayMs
             : value.kind === 'retention'
               ? this.retentionDelayMs
-              : this.idleDelayMs
+              : this.sessionRetryDelayMs(attempts)
         const retryAt = new Date(this.now().getTime() + delay).toISOString()
         const retryCreatedAt = workspaceId !== undefined || value.kind === 'global-consolidate' || value.kind === 'retention'
           ? retryAt
@@ -489,15 +562,21 @@ export class LifecycleScheduler {
           ? `idle:${value.kind.slice(value.kind.indexOf(':') + 1)}`
           : value.kind
         let retryIntent: LifecycleIntent | undefined
+        let dropped = false
         await this.store.updateMeta(current => {
           current.lastError = lifecycleErrorMessage(value.kind)
           if (isCurrentIntent(current.pending[key], value)) {
             delete current.pending[key]
-            if (retryKind === key || current.pending[retryKind] === undefined) {
+            if (exhausted) {
+              // A Session whose transcript never returns must not retry forever.
+              dropped = true
+            } else if (retryKind === key || current.pending[retryKind] === undefined) {
               const id = randomUUID()
               retryIntent = {
                 id, kind: retryKind, createdAt: retryCreatedAt,
-                ...(retryKind.startsWith('idle:') ? { generation: id } : {}),
+                ...(retryKind.startsWith('idle:')
+                  ? { generation: id, attempts, retryAt }
+                  : {}),
               }
               current.pending[retryKind] = retryIntent
             }
@@ -512,10 +591,13 @@ export class LifecycleScheduler {
         if (retryIntent) {
           this.logActivity(value, 'retry-scheduled', {
             retryIntentId: retryIntent.id,
-            retryAt: new Date(this.dueAt(retryKind, retryCreatedAt)).toISOString(),
+            retryAt: new Date(this.dueAt(retryIntent)).toISOString(),
           })
+        } else if (dropped) {
+          this.logActivity(value, 'retry-exhausted')
         }
       } finally {
+        if (this.activeIntents.get(key) === value.id) this.activeIntents.delete(key)
         if (this.activeConsolidations.get(key) === value.id) this.activeConsolidations.delete(key)
         // This runs after retry persistence, or when that persistence itself fails.
         if (failed) this.rejectConsolidation(key, value.id)
@@ -577,10 +659,24 @@ export class LifecycleScheduler {
     }
   }
 
-  private dueAt(kind: string, createdAt: string): number {
-    const base = new Date(createdAt).getTime()
-    // Consolidation and retention retries store their absolute retry timestamp.
-    return kind.startsWith('idle:') ? base + this.idleDelayMs : base
+  /**
+   * Consolidation and retention retries persist their absolute retry time in `createdAt`.
+   * Session intents take their deadline from the latest in-memory activity and then honour the
+   * persisted backoff, so a failing Session still gets a later attempt.
+   */
+  private dueAt(intent: LifecycleIntent): number {
+    const createdAt = new Date(intent.createdAt).getTime()
+    const idle = intent.kind.startsWith('idle:')
+    const activity = idle ? this.lastActivity.get(intent.kind.slice('idle:'.length)) ?? 0 : 0
+    const deadline = idle ? Math.max(createdAt, activity) + this.idleDelayMs : createdAt
+    if (intent.retryAt === undefined) return deadline
+    const retryAt = new Date(intent.retryAt).getTime()
+    return Number.isFinite(retryAt) ? Math.max(deadline, retryAt) : deadline
+  }
+
+  private sessionRetryDelayMs(attempts: number): number {
+    const base = Math.max(this.idleDelayMs, MIN_SESSION_RETRY_DELAY_MS)
+    return Math.min(base * 2 ** Math.max(0, attempts - 1), MAX_SESSION_RETRY_DELAY_MS)
   }
 
   private get idleDelayMs(): number {
@@ -604,7 +700,7 @@ export class LifecycleScheduler {
     if (this.timer) clearTimeout(this.timer)
     const meta = this.store.getMeta()
     const now = this.now().getTime()
-    const times = Object.values(meta.pending).map(value => this.dueAt(value.kind, value.createdAt))
+    const times = Object.values(meta.pending).map(value => this.dueAt(value))
     for (const consolidation of Object.values(meta.workspaceConsolidation)) {
       if (consolidation.dirty && consolidation.nextConsolidationAt) times.push(new Date(consolidation.nextConsolidationAt).getTime())
     }

@@ -51,11 +51,12 @@
 
 - 仅 `user/message` 且 `source.kind === 'user'` 的消息计为有效用户轮；注入、调度和 runtime context 不计数。
 - 默认每第 15 个有效用户轮对应的 turn 以 `completed` 结束后安排轻量 Review；aborted/error turn 不触发。有效轮计数当前仅在进程内，重启后重新累计，但已持久 intent 和游标会恢复。
-- dsh 没有统一 session-end：使用真正 idle 的 debounce、`runMaintenance()`、dispose 和 workspace stop 信号组合触发；不得把 `session/event` 的 fire-and-forget 通知当作异步事务提交。
-- 会话蒸馏只写 Session owner workspace。workspace dirty 默认 20 小时后逐项目整合，Global dirty 默认 7 天后独立整合；每日 retention 只清理 workspace。
-- 调度状态持久化以 kind 为 key 的 `pending = { id, kind, createdAt }`、workspace/Global dirty、各自 next/last consolidation、next/last retention 和最近稳定错误类别；每 Session 的蒸馏游标单独持久化。新 intent、重试和设置重排生成新 ID，旧任务只在当前 ID 匹配时收尾，不能删除或覆盖运行期间到达的新代 intent。全插件只保留一个必要 timer，重启后恢复到期任务，不持久化独立 running intent 或统一 nextRunAt 字段。
+- dsh 没有统一 session-end：使用真正 idle 的 debounce、`runMaintenance()`、dispose 和 workspace stop 信号组合触发；不得把 `session/event` 的 fire-and-forget 通知当作异步事务提交。会话活动只推进进程内到期时间，只有窗口首个活动与运行期活动持久化 intent，避免每个事件重写权威状态。
+- 会话蒸馏只写 Session owner workspace。workspace dirty 首次排期 20 小时后逐项目整合（同一 dirty 窗口内后写入不再推迟，运行期写入才重排），Global dirty 默认 7 天后独立整合；每日 retention 只清理 workspace。会话类意图失败按 60 分钟起逐次翻倍、6 次后丢弃；transcript 不可得单独归类为 `transcript-unavailable`。
+- 调度状态持久化以 kind 为 key 的 `pending = { id, kind, createdAt }`（会话类可选 `attempts`/`retryAt`）、workspace/Global dirty、各自 next/last consolidation、next/last retention 和最近稳定错误类别；每 Session 的蒸馏游标单独持久化。新 intent、重试和设置重排生成新 ID，旧任务只在当前 ID 匹配时收尾，不能删除或覆盖运行期间到达的新代 intent。全插件只保留一个必要 timer，重启后恢复到期任务，不持久化独立 running intent 或统一 nextRunAt 字段。
+- 目标 scope 无任何条目的整合以 `no-entries` 跳过，照常清理 dirty 与下次时间，且不要求存在可用模型路由。
 - Global 与选中的单个 workspace 可手动立即整合，clean scope 也允许；复用同 kind 持久 intent 与串行队列。Host 按 scope 防重并允许加入正在运行的自动任务，调用方等待目标 intent 的真实 written 或稳定失败，不等待全队列，不新增跨 scope 全部整合。
-- `logs/lifecycle.v1.jsonl` 提供独立、非权威的逐次活动历史，以 intent ID 关联任务建立、执行、逐批结果、成功、跳过、失败和 retryIntentId。成功只在权威调度状态收尾后记录；idle debounce 保留同代 ID，不重复记录已有 intent。默认 1 MiB 轮转、保留三个历史代际，写失败不影响业务，卸载 drain 并 close；首版无 UI/RPC。
+- `logs/lifecycle.v1.jsonl` 提供独立、非权威的逐次活动历史，以 intent ID 关联任务建立、执行、逐批结果、成功、跳过、失败、retryIntentId 与 `retry-exhausted`。成功只在权威调度状态收尾后记录；普通 idle 活动刷新不重写 pending，也不重复记录已有 intent，只有运行期新活动才持久化新代际。默认 1 MiB 轮转、保留三个历史代际，写失败不影响业务，卸载 drain 并 close；首版无 UI/RPC。
 - Review、Idle、Stop 共享每 Session 的 `lastEventSeq + offset` 蒸馏游标。完整 turn 优先按边界入批，超大 turn/消息按确定性片内位置续批；Review 一次一批，Idle/Stop 一次最多两批，首次加载不自动 backfill。
 - 候选安全处理、写入/去重完成后才推进游标；模型/解析/存储失败不推进。记忆已写而游标未写时允许同批重试，以稳定 ID、内容去重、sourceRefs 合并和整合降低重复；重试输出变化时仍可能产生语义重复。
 - 转录投影按 tool callId 排除 `snail_memory_read` 和 `snail_memory_feedback` 的结果，普通工具证据保留；rank-only 更新不设置 dirty、不重排整合/保留期、不推进 revision 或游标，也不生成新快照。

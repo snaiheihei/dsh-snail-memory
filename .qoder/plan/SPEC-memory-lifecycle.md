@@ -1,5 +1,7 @@
 # Spec: memory-lifecycle
 
+> 2026-10-31 写放大与重试治理修订：Session 活动只推进内存中的 idle 到期时间，仅窗口首个活动（及窗口运行期间的新活动）持久化 intent；会话类 intent 失败按 60 分钟起逐次翻倍退避、累计 6 次后丢弃并记录 `retry-exhausted`，transcript 不可得单独归类为 `transcript-unavailable`；空 scope 整合以 `no-entries` 跳过但仍清脏；workspace/Global 整合排期由"每次写入推迟冷却"改为"首次排期、运行期写入才重排"的节流。
+>
 > 2026-10-30 整合输出诊断修订：整合 prompt 明确完整 JSON candidates 契约并要求只返回新增或变化候选；活动日志细分空输出、非法 JSON、顶层结构错误和输出字符预算超限，仍不保存模型原始输出或异常正文。
 >
 > 2026-10-29 手动整合修订：Global 与选中的 workspace 可通过 Scheduler 立即执行各自 scope 的 consolidation；复用持久 intent、串行队列、防重、真实结果、失败重试和活动日志，不新增直接整合通路。
@@ -49,9 +51,9 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 ## Configuration Defaults
 
 - `reviewEveryUserTurns = 15`；仅真实 `source.kind === 'user'`，且所在 turn `completed` 后触发。有效轮计数、pending/completed turn 关联和事件去重当前只保存在进程内，重启后重新累计；已持久化的生命周期 intent 和蒸馏游标不受此重置影响。
-- `idleDelayMinutes = 60`；新活动刷新同 Session idle intent 的创建时间并重排唯一 timer，形成 debounce；dispose 不再启动新 maintenance，但会 drain 已进入队列的工作。
-- `consolidationCooldownHours = 20`；workspace dirty 为必要条件，成功或失败后记录持久结果，重启不错过到期任务。
-- `globalConsolidationCooldownDays = 7`；独立 Global dirty、intent、成功、失败与重试不清理或重排 workspace 状态。
+- `idleDelayMinutes = 60`；到期时间由“最近一次活动 + 延迟”决定，但活动只推进进程内到期时间并重排唯一 timer，不重写权威状态；只有窗口首个活动事件和该窗口正在运行期间到达的新活动才持久化 intent（后者保证旧运行收尾不删除它未覆盖的工作）。重启后内存活动时间丢失，已持久 intent 按自身时间恢复，因此可能提前到期并立即执行。dispose 不再启动新 maintenance，但会 drain 已进入队列的工作。
+- `consolidationCooldownHours = 20`；workspace dirty 为必要条件。首次需要排期时定为“当前时间 + 冷却”，同一 dirty 窗口内的后续写入保持原时间（节流），只有落在该 scope 运行期间的写入才重排，避免运行收尾清掉未覆盖的写入。成功或失败后记录持久结果，重启不错过到期任务。
+- `globalConsolidationCooldownDays = 7`；独立 Global dirty、intent、成功、失败与重试不清理或重排 workspace 状态，排期语义与 workspace 一致。
 - 手动 Consolidate 不受上述冷却等待限制，但仍通过同一 Scheduler。clean scope 也可执行：显式请求把对应 intent 提前并临时设置工作 gate，不表示刚写入了记忆。相同 scope 的重复调用共享同一 Promise/intent；运行中的自动任务可被手动调用加入，不重复执行。成功等待目标 intent 的权威 meta 收尾，失败等待重试持久化，不 `drain()` 整个队列。
 - Settings 页可调整上述四项、`snapshotTokenBudget` 和五类 `retentionDays`；`settings.v1.json` 原子持久化并优先于启动默认值，旧文件缺少新增字段时补用对应默认值。保存后保留当前进程内轮计数，分别重排已有 idle intent、workspace 与 Global dirty/consolidation 计划，只读 Host 拒绝更新。
 - Workspaces 页从完整 WorkspaceRegistry 选择任意已注册 workspace 并读取其索引，不以当前 Session 或已有记忆引用为限。
@@ -70,11 +72,11 @@ tests/lifecycle/            → 事件、调度、预算和失败测试
 ## Lifecycle Activity
 
 - 活动历史写入 `$DSH_HOME/snail_memory/logs/lifecycle.v1.jsonl`，不进入权威状态，不与事务 audit 混用，也不修改 dsh Session。首版通过文件直接排查，不新增 UI 或 RPC。
-- 六类 operation 为 `review`、`idle`、`stop`、`consolidate`、`global-consolidate`、`retention`；七类 event 为 `intent-created`、`run-started`、`batch-completed`、`run-succeeded`、`run-skipped`、`run-failed`、`retry-scheduled`。同一 intent ID 串联一次运行，retry-scheduled 另记录 retryIntentId 和真实 retryAt。
+- 六类 operation 为 `review`、`idle`、`stop`、`consolidate`、`global-consolidate`、`retention`；八类 event 为 `intent-created`、`run-started`、`batch-completed`、`run-succeeded`、`run-skipped`、`run-failed`、`retry-scheduled`、`retry-exhausted`。同一 intent ID 串联一次运行，retry-scheduled 另记录 retryIntentId 和真实 retryAt；`retry-exhausted` 表示会话类意图达到重试上限后已丢弃。
 - 白名单字段为 formatVersion/time/event/operation/intentId、可选 sessionId/workspaceId、durationMs、batch/batches、written/rejected、processed/hasMore、仅含 lastEventSeq/offset 的 cursor、skipReason、稳定 error 和重试元数据。不得记录对话、prompt、summary/detail、sourceRefs、模型原始响应、异常正文或秘密。
-- intent-created 只在 intent 成功持久建立后记录；已有 idle intent 的 debounce 刷新保留同代 intent ID，只更新 createdAt，不重复记录，确保建立与后续运行事件可串联；deferred intent 在 start 成功提交后记录。自动到期的 consolidation/retention 先持久 pending 再记录。
-- run-succeeded 和业务型 run-skipped 在业务运行及权威调度状态收尾成功后记录；无 owner、无新事件、clean workspace 分别使用 `workspace-unassigned`、`no-new-events`、`workspace-clean`。clean workspace 不调用 run，也不记录 run-started。
-- 每个实际蒸馏批次记录 batch-completed、written/rejected 和游标位置。失败只记录 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid`、`model-output-budget-exceeded`、`store-readonly`、`operation-aborted`、`operation-failed`；四种具体输出分类分别定位空输出、非法 JSON、顶层结构错误和输出字符预算超限，通用 `model-output-invalid` 保留给其他解析失败。手动与自动整合复用同一活动 JSONL，不记录原始输出。只有实际创建新代 retry intent 才记录 retry-scheduled。
+- intent-created 只在 intent 成功持久建立后记录；已有 idle intent 的普通活动刷新既不重写 pending 也不重复记录（同代 intent ID 保留），只有窗口运行期间到达的新活动才持久化新代际；deferred intent 在 start 成功提交后记录。自动到期的 consolidation/retention 先持久 pending 再记录。
+- run-succeeded 和业务型 run-skipped 在业务运行及权威调度状态收尾成功后记录；无 owner、无新事件、clean workspace、目标 scope 无条目分别使用 `workspace-unassigned`、`no-new-events`、`workspace-clean`、`no-entries`。这些跳过都不调用 run，也不记录 run-started；`no-entries` 仍清理 dirty 与下次整合时间，且不要求存在可用模型路由。
+- 每个实际蒸馏批次记录 batch-completed、written/rejected 和游标位置。失败只记录 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid`、`model-output-budget-exceeded`、`store-readonly`、`transcript-unavailable`、`operation-aborted`、`operation-failed`；`transcript-unavailable` 专指 Session 已关闭且 transcript 不在内存，区别于模型与存储故障；四种具体输出分类分别定位空输出、非法 JSON、顶层结构错误和输出字符预算超限，通用 `model-output-invalid` 保留给其他解析失败。手动与自动整合复用同一活动 JSONL，不记录原始输出。只有实际创建新代 retry intent 才记录 retry-scheduled。
 - `MemoryLifecycleService.runIntentDetailed()` 提供结构化运行与逐批结果，既有 `runIntent() → { written }` 保持兼容。非蒸馏任务 batches 为 0，retention 的 written 为删除数，consolidation 的 written 为写入数。
 - 文件 sink 以独立 Promise 队列串行 append，默认单文件上限 1 MiB，保留当前文件加最多 `.1`、`.2`、`.3` 三个历史代际。写入与告警 best-effort，日志失败不得改变业务结果；Scheduler dispose 先 flush，插件卸载再 close。
 
@@ -86,7 +88,7 @@ const pending = this.pendingTurns.get(sessionId)
 pending?.count += 1
 ```
 
-任务以 kind 为 pending key、以持久 `{ id, kind, createdAt }` 为运行代际串行执行。每次新 intent、失败重试和 consolidation 设置重排都生成新 ID；旧任务仅能在当前 pending ID 仍等于运行快照时清理或改写它。Review/Stop 失败转为 Idle 时必须保留目标 key 上已有的新 Idle。该 ID 是调度代际，不是候选业务幂等键；至少一次处理仍通过稳定记忆 ID、内容比较和 sourceRefs 合并去重。post-commit 事件只负责观察，不承担写事务。LLM 失败保留可重试状态，不伪造成功。
+任务以 kind 为 pending key、以持久 `{ id, kind, createdAt }`（会话类可选 `attempts`/`retryAt`）为运行代际串行执行。每次新 intent、失败重试和 consolidation 设置重排都生成新 ID；旧任务仅能在当前 pending ID 仍等于运行快照时清理或改写它。Review/Stop 失败转为 Idle 时必须保留目标 key 上已有的新 Idle。会话类意图的失败重试按 60 分钟起步、逐次翻倍（上限 24 小时）退避，累计 6 次后丢弃并记录 `retry-exhausted`，避免已关闭 Session 永久重试；consolidation 与 retention 仍按各自固定周期重试且不设上限。该 ID 是调度代际，不是候选业务幂等键；至少一次处理仍通过稳定记忆 ID、内容比较和 sourceRefs 合并去重。post-commit 事件只负责观察，不承担写事务。LLM 失败保留可重试状态，不伪造成功。
 
 ## Concurrency Boundaries
 
@@ -104,6 +106,9 @@ pending?.count += 1
 - 第 14/15/16 轮边界、当前进程内计数重置行为、持久 intent/游标的重启恢复、重复事件和乱序通知。
 - idle debounce、非 idle maintenance 竞态、dispose、archive/stop。
 - 20 小时默认冷却、dirty 设置热更新与计划重排、dirty gate、每日清理、单 timer 和卸载 drain。
+- 同一 idle 窗口的多个活动事件只产生一次持久化，窗口运行期间的新活动仍产生新代际且不会被旧运行清理；空 scope 整合返回 `no-entries`、不调用模型且正常清脏。
+- 会话类意图按 60/120/240/480/960 秒退避并在第 6 次失败后记录 `retry-exhausted` 并丢弃；`transcript-unavailable` 作为独立稳定分类出现。
+- 同一 dirty 窗口的重复写入不推迟整合时间；运行期间到达的写入会重排并保持在完成收尾后仍为 dirty。
 - 五类保留期默认值、持久化与 RPC 校验；`0` 天关闭类别过期，自定义策略在下一次清理生效，显式过期时间优先。
 - 快照预算默认值、旧配置兼容、RPC/UI 保存，以及预算变更只影响后续新快照。
 - LLM 空输出、非 JSON、部分有效候选、秘密输出、超时和重试；空输出、非法 JSON、顶层结构错误和输出字符预算超限分别产生四种稳定分类，单候选字段或安全校验失败仍只计入 rejected。

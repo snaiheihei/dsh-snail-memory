@@ -148,12 +148,14 @@ updatedAt：游标提交时间
 
 调度器只保留一个必要 timer，所有任务串行执行。`meta.pending` 持久化 Review、Idle、Stop、workspace `consolidate`、独立 `global-consolidate` 和 Retention 意图；重启后根据各自时间恢复到期任务。
 
-pending key 仍是 kind，但每个值包含 `{ id, kind, createdAt }`。新 intent、失败重试和整合设置热重排都会生成新 ID；旧任务只有在当前 pending ID 仍等于本次运行快照时才能清理或改写记录。这样即使任务串行，旧 Review 运行期间新对话写入的同 key Review 或目标 Idle 也不会被旧任务收尾误删。Review/Stop 失败转 Idle 时保留已有新 Idle；deferred 快照只按 ID 清理已提交项。旧状态没有 ID 时按 key 和 createdAt 补稳定兼容 ID。
+pending key 仍是 kind，但每个值包含 `{ id, kind, createdAt }`，会话类意图还携带可选的 `attempts` 与 `retryAt`。新 intent、失败重试和整合设置热重排都会生成新 ID；旧任务只有在当前 pending ID 仍等于本次运行快照时才能清理或改写记录。这样即使任务串行，旧 Review 运行期间新对话写入的同 key Review 或目标 Idle 也不会被旧任务收尾误删。Review/Stop 失败转 Idle 时保留已有新 Idle；deferred 快照只按 ID 清理已提交项。旧状态没有 ID 时按 key 和 createdAt 补稳定兼容 ID，非法 `attempts`/`retryAt` 在加载时丢弃。
 
-- workspace 有实际写入时设置 `dirty`，默认将整合安排在 20 小时后；Global 新建、修改或删除只设置 `globalDirty`，默认独立安排在 7 天后。
+- workspace 有实际写入时设置 `dirty`，并在首次需要排期时定为“当前时间 + 20 小时”；同一 dirty 窗口内的后续写入**只保持原时间、不再推迟**（节流而非防抖），否则持续对话会让整合无限延期。Global 同理，默认独立安排在 7 天后。
+- 唯一例外是写入恰好落在该 scope 的整合运行期间：此时必须重排到“写入时间 + 冷却”，否则本次运行收尾会清掉它没有看到的写入。
 - 两类整合都只在各自 dirty 且到期时运行，成功清理、失败重试和设置热更新不互相清除或重排对方状态。
 - 保留期清理默认每 24 小时运行，只枚举 workspace scope。
-- Review/Idle/Stop 只写 Session owner workspace，不改变 Global dirty 或调度；Review/Stop 失败后降级为 Idle 意图，空闲类任务按 60 分钟重试。
+- Review/Idle/Stop 只写 Session owner workspace，不改变 Global dirty 或调度；Review/Stop 失败后降级为 Idle 意图。会话类意图失败按 60 分钟起步、逐次翻倍（上限 24 小时）退避重试，累计 6 次仍失败则丢弃意图并记录 `retry-exhausted`，避免已关闭且 transcript 不再可用的 Session 永久每小时空转。
+- 同一 Session 的活动事件只在 idle 窗口首次出现时持久化意图；之后的 `user/message`、`assistant/message`、`tool/call`、`tool/result`、`turn/*` 只更新内存中的到期时间，不重写权威状态。该窗口正在运行时若有新活动，仍会持久化一个新代际，使本次运行收尾不会丢弃它未覆盖的工作。
 - rank-only 反馈不属于内容写入，不设置任何 dirty、不创建或重排整合/保留期 intent、不推进游标，也不生成新快照；它只更新父条目 rank 和 committed 回执。
 - 两类整合和保留期失败分别按各自周期重试。
 - 手动 Consolidate 复用同一 Scheduler：目标为独立 Global 或当前选中的单个 workspace，不提供跨 scope 的“全部整合”。即使 scope 当前 clean，也把显式点击视为立即工作请求，持久建立或提前对应 kind 的 intent 后直接进入既有串行队列；这里的临时 dirty 只表达有待执行的整合工作，不代表刚发生了记忆写入。
@@ -169,13 +171,14 @@ pending key 仍是 kind，但每个值包含 `{ id, kind, createdAt }`。新 int
 intent-created → run-started → batch-completed（每实际蒸馏批次）
                              → run-succeeded | run-skipped | run-failed
                              → retry-scheduled（仅实际建立新代重试时）
+                             → retry-exhausted（会话类意图达到重试上限后放弃）
 ```
 
-同一持久 intent ID 串联一次运行；`retry-scheduled` 通过原 intentId、retryIntentId 和 retryAt 指向新代任务。自动到期才落入 pending 的 consolidation/retention 也先记录 intent-created，暂停期间暂存、随后成功提交的 deferred intent 同样只在持久建立后记录。idle 新活动只刷新既有 intent 时间，不重复追加 intent-created。
+同一持久 intent ID 串联一次运行；`retry-scheduled` 通过原 intentId、retryIntentId 和 retryAt 指向新代任务。自动到期才落入 pending 的 consolidation/retention 也先记录 intent-created，暂停期间暂存、随后成功提交的 deferred intent 同样只在持久建立后记录。idle 新活动只在内存中推迟到期时间，既不重写 pending，也不重复追加 intent-created；只有窗口内出现新活动且该窗口正在运行时才持久化新代际。
 
-Scheduler 统一记录六类 operation：Review、Idle、Stop、workspace consolidation、Global consolidation 和 retention。业务层提供结构化结果，保留原有 `runIntent() → { written }` 兼容接口；每批记录 written、rejected 和 `{ lastEventSeq, offset }`，运行收尾记录耗时、批次、累计 written、processed/hasMore 和最后游标。无 workspace owner、没有新事件、到期 workspace 已 clean 分别形成 `workspace-unassigned`、`no-new-events`、`workspace-clean` 跳过；clean 跳过不执行模型任务，也不记录 run-started。
+Scheduler 统一记录六类 operation：Review、Idle、Stop、workspace consolidation、Global consolidation 和 retention。业务层提供结构化结果，保留原有 `runIntent() → { written }` 兼容接口；每批记录 written、rejected 和 `{ lastEventSeq, offset }`，运行收尾记录耗时、批次、累计 written、processed/hasMore 和最后游标。无 workspace owner、没有新事件、到期 workspace 已 clean、目标 scope 没有任何条目分别形成 `workspace-unassigned`、`no-new-events`、`workspace-clean`、`no-entries` 跳过；这些跳过都不执行模型任务，也不记录 run-started。`no-entries` 仍然清理该 scope 的 dirty 与下次整合时间，因此空 workspace 不会留下永远到期的计划，也不要求存在可用模型路由。
 
-`run-succeeded` 或业务型 `run-skipped` 只在业务运行和权威调度状态收尾成功后记录，避免模型已返回但状态提交失败时误报成功。失败仅保存 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid`、`model-output-budget-exceeded`、`store-readonly`、`operation-aborted`、`operation-failed` 之一；不保存异常正文。四种具体输出分类分别定位空输出、非法 JSON、顶层结构错误和输出字符预算超限，通用 `model-output-invalid` 保留给其他解析失败。手动与自动整合都复用这份活动 JSONL。活动文件逐字段白名单重建记录，对话、prompt、summary/detail、sourceRefs、模型原始响应和额外异常字段都不能落盘。
+`run-succeeded` 或业务型 `run-skipped` 只在业务运行和权威调度状态收尾成功后记录，避免模型已返回但状态提交失败时误报成功。失败仅保存 `model-route-missing`、`model-request-failed`、`model-output-invalid`、`model-output-empty`、`model-output-invalid-json`、`model-output-shape-invalid`、`model-output-budget-exceeded`、`store-readonly`、`transcript-unavailable`、`operation-aborted`、`operation-failed` 之一；不保存异常正文。`transcript-unavailable` 表示 Session 已关闭且 transcript 不再位于内存，属于会话内容不可得而不是模型或存储故障，因此可以据此判断某次空闲蒸馏为何反复失败。四种具体输出分类分别定位空输出、非法 JSON、顶层结构错误和输出字符预算超限，通用 `model-output-invalid` 保留给其他解析失败。手动与自动整合都复用这份活动 JSONL。活动文件逐字段白名单重建记录，对话、prompt、summary/detail、sourceRefs、模型原始响应和额外异常字段都不能落盘。
 
 文件 sink 使用独立 Promise 队列串行 append，默认当前文件达到 1 MiB 后轮转，保留当前文件及最多 `.1`、`.2`、`.3` 三个历史代际。它是 best-effort 诊断而非第二事实源：写入失败只发出脱敏告警，不改变记忆、游标或调度结果。Scheduler dispose 先 flush，插件卸载再 close；首版直接读取 JSONL 排查，不增加 UI 或 RPC。
 
@@ -626,6 +629,19 @@ Scheduler 成为统一埋点边界：idle debounce 不反复记录已有 intent�
 
 本轮没有修改辅助模型路由、64,000 字符输入/输出预算或 16,000 max tokens，也不把 token 截断当作已证实根因；若实际发生预算超限，现在可由 `model-output-budget-exceeded` 明确识别。聚焦自动化为 3 个测试文件、65 项测试，全量自动化为 32 个测试文件、265 项测试，typecheck、lint、build 和 `git diff --check` 均通过。未执行真实 Host/UI/模型验收，未安装到真实 Host、重启用户进程或创建 git commit，真实模型复验仍是后续边界。
 
+### 阶段十七：生命周期写放大与重试治理
+
+真实运行日志（约 20.7 小时）暴露两处问题。其一是 `memory-meta/update` 达 1384 次、峰值 53 次/分钟，且与 Session 活动事件数一一对应：每条 `user/message`、`assistant/message`、`tool/call`、`tool/result`、`turn/*` 都经 `requestIdle` 重写 intent 的 createdAt，而每次事务都会重写全量 `state.v2.json` 与各 scope 的 INDEX/MEMORY 投影。其二是某个已关闭 Session 的 idle 意图在 transcript 不可得时每小时失败一次并永久重试，把 `lastError` 长期固定在失败状态，且没有任何尝试上限。
+
+本轮据此调整：
+
+1. idle 只在窗口首个活动事件持久化意图，后续活动仅推进内存到期时间，不重写权威状态；若该窗口正在运行，新活动仍持久化一个新代际，保持“旧运行收尾不得删除新工作”的既有语义。
+2. 会话类意图新增 `attempts`/`retryAt`：失败后按 60 分钟起步、逐次翻倍（上限 24 小时）退避，累计 6 次仍失败则丢弃意图并记录 `retry-exhausted`；transcript 不可得单独归类为 `transcript-unavailable`，便于与模型故障区分。
+3. 目标 scope 没有任何条目的整合改为 `no-entries` 跳过：依旧清理 dirty 与下次整合时间，但不要求模型路由、不调用模型，也不再消耗一次 intent。
+4. 整合排期从“每次写入推迟 20 小时”改为节流：首次需要排期时定时，同一 dirty 窗口内的后续写入不再推迟；只有落在该 scope 运行期间的写入才重排，以保留“运行收尾不得清掉未覆盖写入”的保护。
+
+边界：consolidation/retention 的失败重试周期（20 小时/7 天/24 小时）与不设上限的现状未改；模型路由、输入输出预算、快照与投影格式未改；活动 JSONL 只新增一个事件值、一个跳过原因和一个错误类别，`formatVersion` 仍为 1，旧日志可继续读取。自动化覆盖 idle 意图每窗口只持久化一次、退避序列 60/120/240/480/960 秒与第 6 次丢弃、空 scope 不调用模型且正常清脏、重复写入不推迟排期而运行期写入重排。
+
 ## 14. 当前边界与后续演进方向
 
 以下是当前限制或候选方向，不是已经实现的能力：
@@ -637,7 +653,7 @@ Scheduler 成为统一埋点边界：idle debounce 不反复记录已有 intent�
 5. **召回质量**：当前没有查询相关性排序或向量召回。未来可在保留摘要索引和确定性权限边界的前提下增加可重建召回索引，而不是直接把所有详情塞入上下文。
 6. **预算完整性**：当前 token 预算主要约束摘要条目，后续可把固定头和尾部说明统一纳入最终快照预算。
 7. **时间元数据健壮性**：无效 `lastVerifiedAt` 的展示和验证策略可进一步统一，避免快照出现无效年龄。
-8. **模型调用韧性**：辅助模型已支持 AbortSignal 和可选 timeout，但蒸馏与整合调用方尚未设置统一默认超时，可补充明确超时和重试预算。
+8. **模型调用韧性**：辅助模型已支持 AbortSignal 和可选 timeout，但蒸馏与整合调用方尚未设置统一默认超时。会话类意图已改为退避重试并设上限，整合与保留期的失败重试仍按固定周期无限继续，后续可补明确超时与重试预算。
 9. **安全入口收敛**：可把安全策略进一步下沉为所有生产写入都必须经过的用例层，减少未来新增入口绕过扫描的可能。
 10. **完整跨 Host 写事务 fencing（暂缓）**：当前只支持单一 dsh Client、单 Host，既有锁与接管逻辑是意外重复启动防护。Store 仍只在事务开始验权；若未来支持多个 Host 共同访问同一存储根，必须增加 writer 代际、进行中事务验权和原子条件发布，不能把现有锁协议当作完整跨 Host 隔离。
 11. **整合 expected-revision 原子条件写（后续 Plan）**：整合已用调用前快照、写前 revision 复核和调度时间代际判断缩小竞态，但 `store.read()` → `store.upsert()` 以及 `supersedes` 的 `read()` → `remove()` 仍不是同一条件事务。后续应在 Store 同一写事务内提供原子条件写和条件删除，并接入 consolidate、distill、retention 和 correct 需要的写路径。
