@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { MemoryEntry, MemoryIndexEntry, MemoryScope, WorkspaceId } from '../../src/store/types.js'
-import { formatBeijingTime } from '../../src/time.js'
+import { formatBeijingMinute, formatBeijingTime } from '../../src/time.js'
+import { formatCount } from './format.js'
 import type { MemoryCopyKey, MemoryTranslator } from './locale.js'
 import type { MemoryClientStore } from './store.js'
 
@@ -33,6 +34,30 @@ const RETENTION_CATEGORIES = [
   'environment-fact', 'project-convention', 'troubleshooting', 'preference', 'long-term-decision',
 ] as const satisfies readonly MemoryEntry['category'][]
 
+const CATEGORY_ORDER = [
+  'preference', 'project-convention', 'environment-fact', 'troubleshooting', 'long-term-decision',
+] as const satisfies readonly MemoryEntry['category'][]
+
+const CATEGORY_HELP = {
+  preference: 'preferenceHelp',
+  'project-convention': 'projectConventionHelp',
+  'environment-fact': 'environmentFactHelp',
+  troubleshooting: 'troubleshootingHelp',
+  'long-term-decision': 'longTermDecisionHelp',
+} as const satisfies Record<MemoryEntry['category'], MemoryCopyKey>
+
+/** The stored detail repeats the summary and metadata the dialog already shows. */
+function detailBody(entry: MemoryEntry): string {
+  const lines = entry.detail.split('\n')
+  const first = lines.findIndex(line => line.trim() !== '')
+  if (first === -1) return ''
+  let cursor = first
+  if (lines[first]!.replace(/^#\s+/, '').trim() !== entry.summary.trim()) return entry.detail
+  cursor += 1
+  while (cursor < lines.length && /^-\s+(Category|Updated|Last verified|Revision):/i.test(lines[cursor]!.trim())) cursor += 1
+  return lines.slice(cursor).join('\n').trim()
+}
+
 export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const [tab, setTab] = useState<MemoryTab>('global')
@@ -44,7 +69,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const [consolidating, setConsolidating] = useState(false)
   const [consolidationConfirming, setConsolidationConfirming] = useState(false)
   const [consolidationFeedback, setConsolidationFeedback] = useState<{ kind: 'status' | 'alert'; text: string } | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<{ kind: 'status' | 'alert'; text: string } | null>(null)
   const detailRequest = useRef(0)
   const consolidationRequest = useRef(0)
   const detailTrigger = useRef<HTMLElement | null>(null)
@@ -161,9 +186,9 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
       detailRequest.current += 1
       setDetail(null)
       setConfirming(false)
-      setNotice(t('deleteSuccess'))
+      setNotice({ kind: 'status', text: t('deleteSuccess') })
     } catch (reason) {
-      if (mounted.current) setNotice(reason instanceof Error ? reason.message : String(reason))
+      if (mounted.current) setNotice({ kind: 'alert', text: reason instanceof Error ? reason.message : String(reason) })
     } finally {
       if (mounted.current) setDeleting(false)
     }
@@ -176,9 +201,9 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     setNotice(null)
     try {
       const result = await store.promote(target.scope, target.id)
-      if (mounted.current) setNotice(t(result.created ? 'promoteSuccess' : 'promoteAlready'))
+      if (mounted.current) setNotice({ kind: 'status', text: t(result.created ? 'promoteSuccess' : 'promoteAlready') })
     } catch (reason) {
-      if (mounted.current) setNotice(reason instanceof Error ? reason.message : String(reason))
+      if (mounted.current) setNotice({ kind: 'alert', text: reason instanceof Error ? reason.message : String(reason) })
     } finally {
       if (mounted.current) setPromoting(false)
     }
@@ -214,112 +239,200 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   const tokens = (state?.layers.global.committedTokens ?? 0) + (state?.layers.workspace.committedTokens ?? 0)
   const entries = [...(index?.entries ?? [])].sort((a, b) =>
     b.rank - a.rank || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+  const emptyScope = tab === 'global' ? t('emptyGlobal') : t('emptyWorkspace')
+  const showToolbar = scope !== undefined && (tab === 'workspaces' || index === undefined || entries.length > 0)
+  const detailText = detail?.entry === undefined ? '' : detailBody(detail.entry)
+
+  const toolbar = scope === undefined ? null : (
+    <div className="snail-memory-toolbar">
+      {tab === 'workspaces' && (
+        <div className="snail-memory-scope">
+          <label htmlFor="snail-memory-workspace-select">{t('workspaceSelect')}</label>
+          <select
+            id="snail-memory-workspace-select"
+            value={selectedWorkspaceId ?? ''}
+            disabled={workspaces === undefined || workspaces.length === 0}
+            onChange={event => {
+              detailRequest.current += 1
+              consolidationRequest.current += 1
+              setDetail(null)
+              setConfirming(false)
+              setConsolidating(false)
+              setConsolidationConfirming(false)
+              setConsolidationFeedback(null)
+              setNotice(null)
+              setWorkspaceSelection({ id: event.target.value as WorkspaceId, manual: true })
+            }}
+          >
+            {selectedWorkspaceId === undefined && <option value="" />}
+            {workspaces?.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.title}</option>)}
+          </select>
+        </div>
+      )}
+      <div className="snail-memory-toolbar-end">
+        <button
+          type="button"
+          className="snail-memory-button"
+          disabled={consolidating}
+          onClick={() => {
+            setConsolidationFeedback(null)
+            setConsolidationConfirming(true)
+          }}
+        >
+          {consolidating ? t('consolidating') : t(tab === 'global' ? 'consolidateGlobal' : 'consolidateWorkspace')}
+        </button>
+      </div>
+    </div>
+  )
 
   return (
     <section className="snail-memory-page" aria-label={t('title')}>
-      <header>
+      <header className="snail-memory-head">
         <h1>{t('title')}</h1>
-        <div className="snail-memory-stats" aria-label={t('title')}>
-          <span>{entries.length} {t(entries.length === 1 ? 'activeMemorySingular' : 'activeMemoryPlural')}</span>
-          <span>{t('estimatedTokens')}: {tokens}</span>
-          <span>{latestRevision === null ? t('noSnapshot') : `${t('latestSnapshot')}: ${t('revision')} ${latestRevision}`}</span>
-        </div>
+        <dl className="snail-memory-figures">
+          <div className="snail-memory-figure">
+            <dt>{t('memoryCountLabel')}</dt>
+            <dd data-snail="memory-count">{formatCount(entries.length)}</dd>
+          </div>
+          <div className="snail-memory-figure">
+            <dt>{t('estimatedTokens')}</dt>
+            <dd data-snail="session-tokens">{formatCount(tokens)}</dd>
+          </div>
+          <div className="snail-memory-figure">
+            <dt>{t('injectedSnapshot')}</dt>
+            <dd data-snail="session-revision">{latestRevision === null ? '—' : formatCount(latestRevision)}</dd>
+          </div>
+        </dl>
+        {latestRevision === null && <p className="snail-memory-hint">{t('noSnapshot')}</p>}
       </header>
       <div className="snail-memory-tabs" role="tablist" aria-label={t('title')}>
         <button type="button" role="tab" id="snail-memory-global-tab" aria-selected={tab === 'global'} aria-controls="snail-memory-panel" onClick={() => selectTab('global')}>{t('globalTab')}</button>
         <button type="button" role="tab" id="snail-memory-workspaces-tab" aria-selected={tab === 'workspaces'} aria-controls="snail-memory-panel" onClick={() => selectTab('workspaces')}>{t('workspaceTab')}</button>
         <button type="button" role="tab" id="snail-memory-settings-tab" aria-selected={tab === 'settings'} aria-controls="snail-memory-panel" onClick={() => selectTab('settings')}>{t('settingsTab')}</button>
       </div>
-      {notice !== null && <p role={[t('deleteSuccess'), t('promoteSuccess'), t('promoteAlready')].includes(notice) ? 'status' : 'alert'}>{notice}</p>}
-      {sessionError !== undefined && <p className="snail-memory-error" role="alert">{sessionError}</p>}
+      {notice !== null && <p className="snail-memory-notice" role={notice.kind}>{notice.text}</p>}
+      {sessionError !== undefined && <p className="snail-memory-notice" role="alert">{sessionError}</p>}
       <div
         role="tabpanel"
         id="snail-memory-panel"
         aria-labelledby={tab === 'global' ? 'snail-memory-global-tab' : tab === 'workspaces' ? 'snail-memory-workspaces-tab' : 'snail-memory-settings-tab'}
       >
         {tab === 'settings' ? <SettingsPanel store={store} t={t} /> : <>
-          {tab === 'workspaces' && <div className="snail-memory-workspace-picker">
-            <label htmlFor="snail-memory-workspace-select">{t('workspaceSelect')}</label>
-            <select
-              id="snail-memory-workspace-select"
-              value={selectedWorkspaceId ?? ''}
-              disabled={workspaces === undefined || workspaces.length === 0}
-              onChange={event => {
-                detailRequest.current += 1
-                consolidationRequest.current += 1
-                setDetail(null)
-                setConfirming(false)
-                setConsolidating(false)
-                setConsolidationConfirming(false)
-                setConsolidationFeedback(null)
-                setNotice(null)
-                setWorkspaceSelection({ id: event.target.value as WorkspaceId, manual: true })
-              }}
-            >
-              {selectedWorkspaceId === undefined && <option value="" />}
-              {workspaces?.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.title}</option>)}
-            </select>
-          </div>}
-          {tab === 'workspaces' && workspacesError !== undefined && <div role="alert">{workspacesError} <button type="button" onClick={() => { void store.loadWorkspaces() }}>{t('retry')}</button></div>}
-          {tab === 'workspaces' && workspaces === undefined && workspacesError === undefined && <p role="status">{t('loading')}</p>}
-          {tab === 'workspaces' && workspaces?.length === 0 ? <p>{t('noWorkspaces')}</p> : scope !== undefined && <>
-          <div className="snail-memory-consolidation">
-            <button
-              type="button"
-              disabled={consolidating}
-              onClick={() => {
-                setConsolidationFeedback(null)
-                setConsolidationConfirming(true)
-              }}
-            >
-              {consolidating ? t('consolidating') : t(tab === 'global' ? 'consolidateGlobal' : 'consolidateWorkspace')}
-            </button>
-            {consolidationConfirming && <>
+          {showToolbar && toolbar}
+          {tab === 'workspaces' && workspacesError !== undefined && (
+            <p className="snail-memory-feedback-line" role="alert">
+              {workspacesError} <button type="button" className="snail-memory-button" onClick={() => { void store.loadWorkspaces() }}>{t('retry')}</button>
+            </p>
+          )}
+          {tab === 'workspaces' && workspaces === undefined && workspacesError === undefined && (
+            <p className="snail-memory-feedback-line" role="status">{t('loading')}</p>
+          )}
+          {tab === 'workspaces' && workspaces?.length === 0 && (
+            <div className="snail-memory-empty snail-memory-empty--plain">
+              <p className="snail-memory-empty-title">{t('noWorkspaces')}</p>
+            </div>
+          )}
+          {consolidationConfirming && scope !== undefined && (
+            <div className="snail-memory-confirm">
               <p role="alert">{t(tab === 'global' ? 'consolidateGlobalConfirmation' : 'consolidateWorkspaceConfirmation')}</p>
-              <button type="button" onClick={() => { void consolidate() }}>{t('confirmConsolidation')}</button>
-              <button type="button" onClick={() => setConsolidationConfirming(false)}>{t('cancel')}</button>
-            </>}
-            {consolidationFeedback !== null && <p role={consolidationFeedback.kind}>{consolidationFeedback.text}</p>}
-          </div>
-          {indexError !== undefined && <div role="alert">{indexError} <button type="button" onClick={() => { void store.loadIndex(scope) }}>{t('retry')}</button></div>}
-          {index === undefined && indexError === undefined && <p role="status">{t('loading')}</p>}
-          {index !== undefined && entries.length === 0 && <p>{t(tab === 'global' ? 'emptyGlobal' : 'emptyWorkspace')}</p>}
-          <ul className="snail-memory-list">
-            {entries.map(entry => (
-              <li className="snail-memory-entry" key={`${entry.scope.kind}:${entry.scope.kind === 'workspace' ? entry.scope.workspaceId : ''}:${entry.id}`}>
-                <h2>{entry.summary}</h2>
-                <p>{t(CATEGORY_COPY[entry.category])}</p>
-                <div className="snail-memory-entry-meta">
-                  <small>{t('rank')}: {entry.rank} · {t('updatedAt')}: {formatBeijingTime(entry.updatedAt)} · {t('revision')} {entry.revision}</small>
-                  <button type="button" aria-label={`${t('viewDetails')} ${entry.summary}`} onClick={event => { void openDetails(entry, event.currentTarget) }}>{t('details')}</button>
+              <div className="snail-memory-confirm-actions">
+                <button type="button" className="snail-memory-button" data-variant="primary" onClick={() => { void consolidate() }}>{t('confirmConsolidation')}</button>
+                <button type="button" className="snail-memory-button" onClick={() => setConsolidationConfirming(false)}>{t('cancel')}</button>
+              </div>
+            </div>
+          )}
+          {consolidationFeedback !== null && <p className="snail-memory-feedback-line" role={consolidationFeedback.kind}>{consolidationFeedback.text}</p>}
+          {scope !== undefined && (tab !== 'workspaces' || (workspaces !== undefined && workspaces.length > 0)) && <>
+            {indexError !== undefined && (
+              <p className="snail-memory-feedback-line" role="alert">
+                {indexError} <button type="button" className="snail-memory-button" onClick={() => { void store.loadIndex(scope) }}>{t('retry')}</button>
+              </p>
+            )}
+            {index === undefined && indexError === undefined && (
+              <div className="snail-memory-list" role="status" aria-label={t('loading')}>
+                {[0, 1, 2].map(row => (
+                  <div className="snail-memory-entry" key={row}>
+                    <div className="snail-memory-skeleton">
+                      <span className="snail-memory-bar" />
+                      <span className="snail-memory-bar snail-memory-bar--short" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {index !== undefined && entries.length === 0 && (
+              <div className={tab === 'global' ? 'snail-memory-empty' : 'snail-memory-empty snail-memory-empty--plain'}>
+                <div className="snail-memory-empty-main">
+                  <p className="snail-memory-empty-title">{emptyScope}</p>
+                  {tab === 'global' && <p>{t('emptyGlobalWhy')}</p>}
+                  {tab === 'global' && <button type="button" className="snail-memory-button" onClick={() => selectTab('workspaces')}>{t('browseWorkspaces')}</button>}
                 </div>
-              </li>
-            ))}
-          </ul>
+                {tab === 'global' && (
+                  <dl className="snail-memory-kinds">
+                    {CATEGORY_ORDER.map(category => (
+                      <div className="snail-memory-kind" key={category}>
+                        <dt>{t(CATEGORY_COPY[category])}</dt>
+                        <dd>{t(CATEGORY_HELP[category])}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
+              </div>
+            )}
+            <ul className="snail-memory-list">
+              {entries.map(entry => (
+                <li className="snail-memory-entry" key={`${entry.scope.kind}:${entry.scope.kind === 'workspace' ? entry.scope.workspaceId : ''}:${entry.id}`}>
+                  <div className="snail-memory-entry-main">
+                    <h2>{entry.summary}</h2>
+                    <p className="snail-memory-entry-meta">
+                      <span className="snail-memory-tag">{t(CATEGORY_COPY[entry.category])}</span>
+                      <span className="snail-memory-meta">{t('rank')}: {entry.rank} · {t('updatedAt')}: {formatBeijingMinute(entry.updatedAt)} · {t('revision')} {entry.revision}</span>
+                    </p>
+                  </div>
+                  <button type="button" className="snail-memory-entry-action" aria-label={`${t('viewDetails')} ${entry.summary}`} onClick={event => { void openDetails(entry, event.currentTarget) }}>{t('details')}</button>
+                </li>
+              ))}
+            </ul>
           </>}
         </>}
       </div>
       {detail !== null && (
         <div className="snail-memory-detail-backdrop" onPointerDown={event => { if (event.target === event.currentTarget) closeDetails() }}>
           <div className="snail-memory-detail" role="dialog" aria-modal="true" aria-labelledby="snail-memory-detail-title">
-            <h2 id="snail-memory-detail-title">{detail.summary}</h2>
-            {detail.entry === undefined && detail.error === undefined && <p role="status">{t('loading')}</p>}
-            {detail.error !== undefined && <p role="alert">{detail.error}</p>}
-            {detail.entry !== undefined && <>
-              <p>{t('category')}: {t(CATEGORY_COPY[detail.entry.category])}</p>
-              <p>{t('rank')}: {detail.entry.rank}</p>
-              <p>{t('updatedAt')}: {formatBeijingTime(detail.entry.updatedAt)}</p>
-              <pre>{detail.entry.detail}</pre>
-            </>}
-            {confirming && <p role="alert">{t('deleteConfirmation')}</p>}
-            <div className="snail-memory-actions">
+            <div className="snail-memory-detail-head">
+              <h2 id="snail-memory-detail-title">{detail.summary}</h2>
+              {detail.entry !== undefined && (
+                <dl className="snail-memory-detail-facts">
+                  <div>
+                    <dt>{t('category')}</dt>
+                    <dd>{t(CATEGORY_COPY[detail.entry.category])}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('rank')}</dt>
+                    <dd data-snail="detail-rank">{detail.entry.rank}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('updatedAt')}</dt>
+                    <dd data-snail="detail-updated">{formatBeijingTime(detail.entry.updatedAt)}</dd>
+                  </div>
+                </dl>
+              )}
+            </div>
+            {detail.entry === undefined && detail.error === undefined && <p className="snail-memory-detail-body" role="status">{t('loading')}</p>}
+            {detail.error !== undefined && <p className="snail-memory-detail-note" role="alert">{detail.error}</p>}
+            {detail.entry !== undefined && (
+              <div className="snail-memory-detail-body">{detailText === '' ? t('noDetail') : detailText}</div>
+            )}
+            {confirming && <p className="snail-memory-detail-note" role="alert">{t('deleteConfirmation')}</p>}
+            <div className="snail-memory-detail-foot">
               {confirming ? <>
-                <button type="button" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
-                <button type="button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
+                <button type="button" className="snail-memory-button" data-variant="danger-fill" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
+                <button type="button" className="snail-memory-button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
               </> : <>
-                {detail.scope.kind === 'workspace' && <button type="button" disabled={detail.entry === undefined || promoting || deleting} onClick={() => { void promote() }}>{promoting ? t('promoting') : t('promote')}</button>}
-                <button type="button" disabled={detail.entry === undefined || promoting || deleting} onClick={() => setConfirming(true)}>{t('delete')}</button>
-                <button type="button" autoFocus disabled={promoting || deleting} onClick={closeDetails}>{t('close')}</button>
+                {detail.scope.kind === 'workspace' && <button type="button" className="snail-memory-button" disabled={detail.entry === undefined || promoting || deleting} onClick={() => { void promote() }}>{promoting ? t('promoting') : t('promote')}</button>}
+                <button type="button" className="snail-memory-button" data-variant="danger" disabled={detail.entry === undefined || promoting || deleting} onClick={() => setConfirming(true)}>{t('delete')}</button>
+                <span className="snail-memory-spacer" />
+                <button type="button" className="snail-memory-button" autoFocus disabled={promoting || deleting} onClick={closeDetails}>{t('close')}</button>
               </>}
             </div>
           </div>
@@ -328,6 +441,20 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     </section>
   )
 }
+
+const SETTINGS_FIELDS = [
+  { key: 'reviewEveryUserTurns', id: 'snail-memory-review-turns', label: 'reviewEveryUserTurns', help: 'reviewEveryUserTurnsHelp', whole: true },
+  { key: 'idleDelayMinutes', id: 'snail-memory-idle-delay', label: 'idleDelayMinutes', help: 'idleDelayMinutesHelp', whole: false },
+  { key: 'consolidationCooldownHours', id: 'snail-memory-consolidation-delay', label: 'consolidationCooldownHours', help: 'consolidationCooldownHoursHelp', whole: false },
+  { key: 'globalConsolidationCooldownDays', id: 'snail-memory-global-consolidation-delay', label: 'globalConsolidationCooldownDays', help: 'globalConsolidationCooldownDaysHelp', whole: false },
+  { key: 'snapshotTokenBudget', id: 'snail-memory-snapshot-token-budget', label: 'snapshotTokenBudget', help: 'snapshotTokenBudgetHelp', whole: true },
+] as const satisfies readonly { key: string; id: string; label: MemoryCopyKey; help: MemoryCopyKey; whole: boolean }[]
+
+const SETTINGS_SECTIONS = [
+  { id: 'trigger', title: 'sectionTrigger', help: 'sectionTriggerHelp', fields: SETTINGS_FIELDS.slice(0, 2) },
+  { id: 'consolidation', title: 'sectionConsolidation', help: 'sectionConsolidationHelp', fields: SETTINGS_FIELDS.slice(2, 4) },
+  { id: 'snapshot', title: 'sectionSnapshot', help: 'sectionSnapshotHelp', fields: SETTINGS_FIELDS.slice(4) },
+] as const satisfies readonly { id: string; title: MemoryCopyKey; help: MemoryCopyKey; fields: readonly { key: string }[] }[]
 
 function SettingsPanel({ store, t }: { readonly store: MemoryClientStore; readonly t: MemoryTranslator }) {
   const settings = store.getSettings()
@@ -397,108 +524,74 @@ function SettingsPanel({ store, t }: { readonly store: MemoryClientStore; readon
 
   if (settings === undefined) {
     return <>
-      {error !== undefined && <div role="alert">{error} <button type="button" onClick={() => { void store.loadSettings() }}>{t('retry')}</button></div>}
-      {error === undefined && <p role="status">{t('loading')}</p>}
+      {error !== undefined && <p className="snail-memory-feedback-line" role="alert">{error} <button type="button" className="snail-memory-button" onClick={() => { void store.loadSettings() }}>{t('retry')}</button></p>}
+      {error === undefined && <p className="snail-memory-feedback-line" role="status">{t('loading')}</p>}
     </>
+  }
+
+  const update = (key: (typeof SETTINGS_FIELDS)[number]['key'], value: string): void => {
+    setDraft(current => ({ ...current, [key]: value }))
   }
 
   return (
     <form className="snail-memory-settings" onSubmit={event => { event.preventDefault(); void save() }}>
-      <div className="snail-memory-setting">
-        <label htmlFor="snail-memory-review-turns">{t('reviewEveryUserTurns')}</label>
-        <input
-          id="snail-memory-review-turns"
-          type="number"
-          min={1}
-          step={1}
-          required
-          disabled={saving}
-          value={draft.reviewEveryUserTurns}
-          onChange={event => setDraft(current => ({ ...current, reviewEveryUserTurns: event.target.value }))}
-        />
-        <p>{t('reviewEveryUserTurnsHelp')}</p>
-      </div>
-      <div className="snail-memory-setting">
-        <label htmlFor="snail-memory-idle-delay">{t('idleDelayMinutes')}</label>
-        <input
-          id="snail-memory-idle-delay"
-          type="number"
-          min={0}
-          step="any"
-          required
-          disabled={saving}
-          value={draft.idleDelayMinutes}
-          onChange={event => setDraft(current => ({ ...current, idleDelayMinutes: event.target.value }))}
-        />
-        <p>{t('idleDelayMinutesHelp')}</p>
-      </div>
-      <div className="snail-memory-setting">
-        <label htmlFor="snail-memory-consolidation-delay">{t('consolidationCooldownHours')}</label>
-        <input
-          id="snail-memory-consolidation-delay"
-          type="number"
-          min={0}
-          step="any"
-          required
-          disabled={saving}
-          value={draft.consolidationCooldownHours}
-          onChange={event => setDraft(current => ({ ...current, consolidationCooldownHours: event.target.value }))}
-        />
-        <p>{t('consolidationCooldownHoursHelp')}</p>
-      </div>
-      <div className="snail-memory-setting">
-        <label htmlFor="snail-memory-global-consolidation-delay">{t('globalConsolidationCooldownDays')}</label>
-        <input
-          id="snail-memory-global-consolidation-delay"
-          type="number"
-          min={0}
-          step="any"
-          required
-          disabled={saving}
-          value={draft.globalConsolidationCooldownDays}
-          onChange={event => setDraft(current => ({ ...current, globalConsolidationCooldownDays: event.target.value }))}
-        />
-        <p>{t('globalConsolidationCooldownDaysHelp')}</p>
-      </div>
-      <div className="snail-memory-setting">
-        <label htmlFor="snail-memory-snapshot-token-budget">{t('snapshotTokenBudget')}</label>
-        <input
-          id="snail-memory-snapshot-token-budget"
-          type="number"
-          min={1}
-          step={1}
-          required
-          disabled={saving}
-          value={draft.snapshotTokenBudget}
-          onChange={event => setDraft(current => ({ ...current, snapshotTokenBudget: event.target.value }))}
-        />
-        <p>{t('snapshotTokenBudgetHelp')}</p>
-      </div>
-      <fieldset className="snail-memory-retention">
-        <legend>{t('retentionSettings')}</legend>
-        <p>{t('retentionDaysHelp')}</p>
-        {RETENTION_CATEGORIES.map(category => (
-          <div className="snail-memory-setting" key={category}>
-            <label htmlFor={`snail-memory-retention-${category}`}>{t(CATEGORY_COPY[category])} {t('retentionDays')}</label>
-            <input
-              id={`snail-memory-retention-${category}`}
-              type="number"
-              min={0}
-              step="any"
-              required
-              disabled={saving}
-              value={draft.retentionDays[category]}
-              onChange={event => setDraft(current => ({
-                ...current,
-                retentionDays: { ...current.retentionDays, [category]: event.target.value },
-              }))}
-            />
+      {SETTINGS_SECTIONS.map(section => (
+        <div className="snail-memory-section" key={section.id}>
+          <div className="snail-memory-section-head">
+            <h2>{t(section.title)}</h2>
+            <p>{t(section.help)}</p>
           </div>
-        ))}
-      </fieldset>
-      {error !== undefined && <p role="alert">{error}</p>}
-      {feedback !== null && <p role={feedback.kind}>{feedback.text}</p>}
-      <button type="submit" disabled={saving}>{saving ? t('savingSettings') : t('saveSettings')}</button>
+          <div className="snail-memory-fields">
+            {section.fields.map(field => (
+              <div className="snail-memory-field" key={field.id}>
+                <label htmlFor={field.id}>{t(field.label)}</label>
+                <input
+                  id={field.id}
+                  type="number"
+                  min={field.whole ? 1 : 0}
+                  step={field.whole ? 1 : 'any'}
+                  required
+                  disabled={saving}
+                  value={draft[field.key]}
+                  onChange={event => update(field.key, event.target.value)}
+                />
+                <p>{t(field.help)}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="snail-memory-section">
+        <div className="snail-memory-section-head">
+          <h2>{t('retentionSettings')}</h2>
+          <p>{t('retentionDaysHelp')}</p>
+        </div>
+        <div className="snail-memory-lines">
+          {RETENTION_CATEGORIES.map(category => (
+            <div className="snail-memory-line" key={category}>
+              <label htmlFor={`snail-memory-retention-${category}`}>{t(CATEGORY_COPY[category])} {t('retentionDays')}</label>
+              <input
+                id={`snail-memory-retention-${category}`}
+                type="number"
+                min={0}
+                step="any"
+                required
+                disabled={saving}
+                value={draft.retentionDays[category]}
+                onChange={event => setDraft(current => ({
+                  ...current,
+                  retentionDays: { ...current.retentionDays, [category]: event.target.value },
+                }))}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="snail-memory-settings-foot">
+        {feedback !== null && <p role={feedback.kind}>{feedback.text}</p>}
+        {feedback === null && error !== undefined && <p role="alert">{error}</p>}
+        <button type="submit" className="snail-memory-button" data-variant="primary" disabled={saving}>{saving ? t('savingSettings') : t('saveSettings')}</button>
+      </div>
     </form>
   )
 }

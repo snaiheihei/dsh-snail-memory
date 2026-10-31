@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import type { MemoryLayer, WorkspaceId } from '../../src/store/types.js'
+import { formatCount } from './format.js'
 import { MemoryIcon, RefreshIcon } from './icons.js'
 import type { MemoryCopyKey, MemoryTranslator } from './locale.js'
 import type { MemoryClientStore } from './store.js'
@@ -115,6 +116,15 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
     </>
   }
 
+  const layerState = (layer: MemoryLayer): string => {
+    const view = state?.layers[layer]
+    if (view === undefined) return ''
+    // Only one workspace layer can be injected per session: a different selection has none.
+    if (layer === 'workspace' && selectedWorkspaceId !== enabledWorkspaceId) return t('notInjected')
+    if (view.committedTokens <= 0) return t('notInjected')
+    return t('tokensInjected').replace('{count}', formatCount(view.committedTokens))
+  }
+
   const enableButton = (layer: MemoryLayer) => {
     const enabled = activeLayer === layer && (layer === 'global' || selectedWorkspaceId === enabledWorkspaceId)
     const disabled = state === undefined || busy || (layer === 'workspace'
@@ -142,7 +152,10 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
       ><MemoryIcon size={16} /><span>{t('panel')}</span></button>
       {open && <div className="snail-memory-popover" id={popoverId} ref={popover} role="dialog" aria-modal={false} aria-label={t('panel')}>
         <div className="snail-memory-row" role="group" aria-label={t('global')}>
-          <span className="snail-memory-row-label">{t('global')}</span>
+          <span className="snail-memory-row-label">
+            {t('global')}
+            {state !== undefined && <span className="snail-memory-row-state">{layerState('global')}</span>}
+          </span>
           {enableButton('global')}
           {state === undefined && sessionError === undefined && <span className="snail-memory-feedback" role="status">{t('loading')}</span>}
           {sessionError !== undefined && <span className="snail-memory-feedback snail-memory-error" role="alert">{sessionError}</span>}
@@ -163,6 +176,7 @@ export function ComposerMemory({ sessionId, store, t }: ComposerMemoryProps) {
             {workspaces?.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.title}</option>)}
           </select>
           {enableButton('workspace')}
+          {state !== undefined && <span className="snail-memory-row-state snail-memory-row-state--line">{layerState('workspace')}</span>}
           {workspaces === undefined && workspacesError === undefined && <span className="snail-memory-feedback" role="status">{t('loading')}</span>}
           {workspacesError !== undefined && <span className="snail-memory-feedback snail-memory-error" role="alert">{workspacesError}</span>}
           {rowMessages('workspace')}

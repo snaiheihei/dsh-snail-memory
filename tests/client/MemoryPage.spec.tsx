@@ -48,12 +48,12 @@ describe('MemoryPage', () => {
     expect(screen.getByRole('tab', { name: 'Global memory index' }).getAttribute('aria-selected')).toBe('true')
     expect(screen.getByRole('tab', { name: 'Workspaces' }).getAttribute('aria-selected')).toBe('false')
     expect(screen.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('false')
-    expect(await screen.findByText('1 active memory')).toBeTruthy()
-    expect(screen.getByText('Estimated injected tokens: 20')).toBeTruthy()
-    expect(screen.getByText('Latest snapshot: revision 1')).toBeTruthy()
+    await waitFor(() => expect(document.querySelector('[data-snail="memory-count"]')?.textContent).toBe('1'))
+    expect(document.querySelector('[data-snail="session-tokens"]')?.textContent).toBe('20')
+    expect(document.querySelector('[data-snail="session-revision"]')?.textContent).toBe('1')
     expect(screen.getByText('Use pnpm workspaces')).toBeTruthy()
     expect(screen.getByText('Project convention')).toBeTruthy()
-    expect(screen.getByText('Rank: 0 · Updated: 2026-01-02 11:04:05 +08:00 · revision 2')).toBeTruthy()
+    expect(screen.getByText('Rank: 0 · Updated: 2026-01-02 11:04 · revision 2')).toBeTruthy()
     expect(screen.queryByText(/Sources:/)).toBeNull()
     expect(screen.getByRole('button', { name: 'View details for Use pnpm workspaces' }).textContent).toBe('Detail')
     expect(screen.queryByText('Workspace references')).toBeNull()
@@ -64,7 +64,7 @@ describe('MemoryPage', () => {
     const select = await screen.findByRole('combobox', { name: 'Workspace' })
     expect((select as HTMLSelectElement).value).toBe('workspace-1')
     expect(screen.getByRole('option', { name: 'Second project' })).toBeTruthy()
-    expect(await screen.findByText('1 active memory')).toBeTruthy()
+    await waitFor(() => expect(document.querySelector('[data-snail="memory-count"]')?.textContent).toBe('1'))
 
     fireEvent.change(select, { target: { value: 'workspace-2' } })
     await waitFor(() => expect(rpc.calls.some(call => call.method === 'list'
@@ -147,7 +147,8 @@ describe('MemoryPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'View details for Same rank A' }))
     const dialog = await screen.findByRole('dialog', { name: 'Same rank A' })
-    expect(within(dialog).getByText('Rank: 2')).toBeTruthy()
+    expect(within(dialog).getByText('Rank')).toBeTruthy()
+    expect(document.querySelector('[data-snail="detail-rank"]')?.textContent).toBe('2')
   })
 
   it('shows an empty state when the Host has no registered workspaces', async () => {
@@ -172,7 +173,7 @@ describe('MemoryPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
     expect(await screen.findByRole('dialog', { name: 'Use pnpm workspaces' })).toBeTruthy()
     expect(screen.getByText(ENTRY.detail)).toBeTruthy()
-    expect(screen.getByText('Updated: 2026-01-02 11:04:05 +08:00')).toBeTruthy()
+    expect(document.querySelector('[data-snail="detail-updated"]')?.textContent).toBe('2026-01-02 11:04:05 +08:00')
     expect(rpc.calls.find(call => call.method === 'read')?.payload).toEqual({ scope: GLOBAL_SCOPE, id: ENTRY.id })
     fireEvent.click(screen.getByRole('button', { name: 'Delete memory' }))
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }))
@@ -251,7 +252,8 @@ describe('MemoryPage', () => {
     const store = new MemoryClientStore(rpc)
     render(<MemoryPage store={store} t={t} />)
 
-    expect(await screen.findByText('Estimated injected tokens: 0')).toBeTruthy()
+    await waitFor(() => expect(document.querySelector('[data-snail="session-tokens"]')?.textContent).toBe('0'))
+    expect(document.querySelector('[data-snail="session-revision"]')?.textContent).toBe('—')
     expect(rpc.count('getSessionState')).toBe(0)
     expect(rpc.calls.filter(call => call.method === 'list')).toHaveLength(1)
     expect(WORKSPACE_SCOPE.kind).toBe('workspace')
