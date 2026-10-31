@@ -1,9 +1,16 @@
 import type { ConsolidateMemoryResult, MemorySettings, SessionStateView, WorkspaceView } from '../../src/contract.js'
-import type { MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope, PromoteMemoryResult, WorkspaceId } from '../../src/store/types.js'
+import type { MemoryCategory, MemoryEntry, MemoryId, MemoryIndex, MemoryLayer, MemoryScope, PromoteMemoryResult, WorkspaceId } from '../../src/store/types.js'
 import type { MemoryOperationResult, MemoryRpc } from './rpc.js'
 
 interface StoreOptions {
   readonly eventTarget?: EventTarget
+}
+
+export interface CorrectInput {
+  readonly category: MemoryCategory
+  readonly summary: string
+  readonly detail: string
+  readonly sessionId?: string
 }
 
 function scopeKey(scope: MemoryScope): string {
@@ -193,6 +200,15 @@ export class MemoryClientStore {
     const result = await this.rpc.call('promote', { scope, id })
     await this.refreshActive()
     return result
+  }
+
+  async correct(scope: MemoryScope, id: MemoryId, input: CorrectInput): Promise<MemoryEntry> {
+    const entry = await this.rpc.call('correct', {
+      scope, id, category: input.category, summary: input.summary, detail: input.detail,
+      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+    })
+    await this.refreshActive()
+    return entry
   }
 
   async consolidate(scope: MemoryScope): Promise<ConsolidateMemoryResult> {

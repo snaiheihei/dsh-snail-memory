@@ -130,6 +130,25 @@ export const MEMORY_STYLES = `
 .snail-memory-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .snail-memory-feedback-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 16px; font-size: 12px; line-height: 1.5; color: var(--sm-muted); }
 .snail-memory-feedback-line[role='alert'] { color: var(--sm-danger); }
+.snail-memory-filters { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0 0 14px; }
+.snail-memory-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--sm-control-radius);
+  background: none;
+  color: var(--sm-muted);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.snail-memory-chip:hover { background: var(--sm-hover); color: var(--sm-ink); }
+.snail-memory-chip[aria-pressed='true'] { background: var(--sm-active); color: var(--sm-ink); font-weight: 500; }
+.snail-memory-chip-count { color: var(--sm-faint); font-variant-numeric: tabular-nums; }
+.snail-memory-chip[aria-pressed='true'] .snail-memory-chip-count { color: var(--sm-muted); }
 
 .snail-memory-list { display: grid; margin: 0; padding: 0; list-style: none; border-top: var(--sm-line); }
 .snail-memory-entry {
@@ -307,7 +326,6 @@ export const MEMORY_STYLES = `
   margin: 0;
   padding: 18px 24px 22px;
   overflow-y: auto;
-  white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
   font: inherit;
@@ -315,9 +333,46 @@ export const MEMORY_STYLES = `
   line-height: 1.7;
   color: var(--sm-ink);
 }
+.snail-memory-detail-body > * { margin: 0; }
+.snail-memory-detail-body > * + * { margin-top: 12px; }
+.snail-memory-detail-body h3 { font-size: 14px; line-height: 1.45; font-weight: 600; }
+.snail-memory-detail-body ul, .snail-memory-detail-body ol { padding-inline-start: 20px; }
+.snail-memory-detail-body li + li { margin-top: 4px; }
+.snail-memory-detail-body blockquote { padding-inline-start: 12px; border-inline-start: 2px solid var(--sm-control); color: var(--sm-muted); }
+.snail-memory-detail-body a { color: var(--sm-ink); text-decoration: underline; text-decoration-color: var(--sm-faint); text-underline-offset: 2px; }
+.snail-memory-detail-body a:hover { text-decoration-color: var(--sm-ink); }
+.snail-memory-detail-body code { font-family: var(--ds-font-family-code, ui-monospace, monospace); font-size: 12.5px; }
+.snail-memory-detail-body pre { padding: 10px 12px; overflow-x: auto; border-radius: 6px; background: var(--sm-raised); }
+.snail-memory-detail-body pre code { font-size: 12.5px; line-height: 1.55; }
 .snail-memory-detail-note { margin: 0; padding: 0 24px 16px; font-size: 13px; line-height: 1.55; color: var(--sm-danger); }
+.snail-memory-detail-note--status { color: var(--sm-muted); }
 .snail-memory-detail-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 15px 24px; border-top: var(--sm-line); }
 .snail-memory-detail-foot .snail-memory-spacer { flex: 1 1 auto; }
+
+/* ---------- editing a memory ---------- */
+.snail-memory-edit { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.snail-memory-edit-fields { display: grid; gap: 14px; padding: 18px 24px; overflow-y: auto; min-height: 0; }
+.snail-memory-edit-field { display: grid; gap: 6px; min-width: 0; }
+.snail-memory-edit-field label { font-size: 13px; line-height: 1.4; font-weight: 500; color: var(--sm-ink); }
+.snail-memory-edit-field p { margin: 0; font-size: 12px; line-height: 1.4; color: var(--sm-muted); font-variant-numeric: tabular-nums; }
+.snail-memory-edit-field input,
+.snail-memory-edit-field select,
+.snail-memory-edit-field textarea {
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--sm-ink);
+  border: 1px solid var(--sm-control);
+  border-radius: var(--sm-control-radius);
+  background: var(--sm-input);
+}
+.snail-memory-edit-field select { max-width: 220px; }
+.snail-memory-edit-field textarea { min-height: 150px; resize: vertical; }
+.snail-memory-edit-field input:disabled,
+.snail-memory-edit-field select:disabled,
+.snail-memory-edit-field textarea:disabled { color: var(--sm-faint); background: var(--sm-raised); }
 
 /* ---------- composer control ---------- */
 .snail-memory-controls { position: relative; display: flex; align-items: center; min-width: 0; }
@@ -402,6 +457,9 @@ export const MEMORY_STYLES = `
   .snail-memory-page { padding: 20px 16px 36px; }
   .snail-memory-page h1 { font-size: 21px; }
   .snail-memory-tabs { gap: 18px; overflow-x: auto; }
+  .snail-memory-filters { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
+  .snail-memory-edit-fields { padding: 14px 16px; }
+  .snail-memory-edit-field select { max-width: 100%; }
   .snail-memory-tabs [role='tab'] { padding: 11px 0 12px; }
   .snail-memory-entry { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 14px 0; }
   .snail-memory-entry h2 { font-size: 13.5px; }

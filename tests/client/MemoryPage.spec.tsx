@@ -52,7 +52,7 @@ describe('MemoryPage', () => {
     expect(document.querySelector('[data-snail="session-tokens"]')?.textContent).toBe('20')
     expect(document.querySelector('[data-snail="session-revision"]')?.textContent).toBe('1')
     expect(screen.getByText('Use pnpm workspaces')).toBeTruthy()
-    expect(screen.getByText('Project convention')).toBeTruthy()
+    expect(within(screen.getByRole('list')).getByText('Project convention')).toBeTruthy()
     expect(screen.getByText('Rank: 0 · Updated: 2026-01-02 11:04 · revision 2')).toBeTruthy()
     expect(screen.queryByText(/Sources:/)).toBeNull()
     expect(screen.getByRole('button', { name: 'View details for Use pnpm workspaces' }).textContent).toBe('Detail')
@@ -201,6 +201,72 @@ describe('MemoryPage', () => {
     expect(screen.getByRole('dialog', { name: 'Use pnpm workspaces' })).toBeTruthy()
     fireEvent.pointerDown(reopened.parentElement!)
     expect(screen.queryByRole('dialog', { name: 'Use pnpm workspaces' })).toBeNull()
+  })
+
+  it('corrects a workspace memory from its detail dialog and reloads the index', async () => {
+    const rpc = readyRpc().on('correct', ({ scope, id, category, summary, detail }) => ({
+      ...ENTRY, id, scope, category, summary, detail, revision: 3, updatedAt: '2026-01-03T00:00:00.000Z',
+    }))
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Summary' }), { target: { value: '  Use the pnpm workspace protocol  ' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: 'Every package keeps a workspace dependency.' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Category' }), { target: { value: 'environment-fact' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('Memory updated.')).toBeTruthy()
+    expect(rpc.calls.find(call => call.method === 'correct')?.payload).toEqual({
+      scope: WORKSPACE_SCOPE,
+      id: ENTRY.id,
+      category: 'environment-fact',
+      summary: 'Use the pnpm workspace protocol',
+      detail: 'Every package keeps a workspace dependency.',
+      sessionId: 'session-1',
+    })
+    expect(await screen.findByRole('dialog', { name: 'Use the pnpm workspace protocol' })).toBeTruthy()
+    await waitFor(() => expect(rpc.count('list')).toBeGreaterThanOrEqual(2))
+  })
+
+  it('refuses a whitespace-only correction without calling the Host', async () => {
+    const rpc = readyRpc().on('correct', () => ENTRY)
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspaces' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'View details for Use pnpm workspaces' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Summary' }), { target: { value: '   ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByText('A summary and a body are both required.')).toBeTruthy()
+    expect(rpc.count('correct')).toBe(0)
+  })
+
+  it('filters the list by category and restores the whole list', async () => {
+    const entries = [
+      { ...ENTRY, id: 'memory-a' as typeof ENTRY.id, summary: 'Prefer terse answers', category: 'preference' as const },
+      { ...ENTRY, id: 'memory-b' as typeof ENTRY.id, summary: 'Use pnpm workspaces', category: 'project-convention' as const },
+      { ...ENTRY, id: 'memory-c' as typeof ENTRY.id, summary: 'Node runs on port 3080', category: 'environment-fact' as const },
+    ]
+    const rpc = readyRpc()
+      .on('list', ({ scope }) => ({ ...memoryIndex(scope), entries: entries.map(entry => ({ ...entry, scope })) }))
+    const store = new MemoryClientStore(rpc)
+    render(<MemoryPage sessionId="session-1" store={store} t={t} />)
+
+    await screen.findByRole('button', { name: 'View details for Prefer terse answers' })
+    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(3)
+    expect(document.querySelector('[data-snail="memory-count"]')?.textContent).toBe('3')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preference 1' }))
+    expect(screen.getAllByRole('heading', { level: 2 }).map(heading => heading.textContent)).toEqual(['Prefer terse answers'])
+    expect(document.querySelector('[data-snail="memory-count"]')?.textContent).toBe('1')
+
+    fireEvent.click(screen.getByRole('button', { name: 'All 3' }))
+    expect(screen.getAllByRole('heading', { level: 2 })).toHaveLength(3)
   })
 
   it('promotes a workspace memory from its detail dialog', async () => {

@@ -189,6 +189,25 @@ describe('MemoryController', () => {
     expect(store.list({ kind: 'global' }).revision).toBe(0)
   })
 
+  it('keeps the provenance of a corrected memory and appends the editing session once', async () => {
+    const { controller, store } = await setup()
+    const scope = { kind: 'workspace', workspaceId: workspaceId('workspace-1') } as const
+    const source = await store.upsert({
+      scope, category: 'preference', summary: 'Original', detail: 'Original detail',
+      sourceRefs: [{ sessionId: 'session-0', eventSeqs: [1, 2] }], lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    })
+
+    const corrected = await controller.call('correct', {
+      id: source.id, scope, category: 'preference', summary: 'Edited', detail: 'Edited detail', sessionId: 'session-1',
+    })
+    expect(corrected.sourceRefs).toEqual([{ sessionId: 'session-0', eventSeqs: [1, 2] }, { sessionId: 'session-1' }])
+
+    const again = await controller.call('correct', {
+      id: source.id, scope, category: 'preference', summary: 'Edited twice', detail: 'Edited detail', sessionId: 'session-1',
+    })
+    expect(again.sourceRefs).toEqual([{ sessionId: 'session-0', eventSeqs: [1, 2] }, { sessionId: 'session-1' }])
+  })
+
   it('forgets only a memory and preserves all session injection history', async () => {
     const { controller, store } = await setup()
     await controller.call('enable', { sessionId: 'session-1', layer: 'global' })

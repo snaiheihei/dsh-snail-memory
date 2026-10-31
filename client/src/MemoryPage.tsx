@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import type { FormEvent } from 'react'
 import type { MemoryEntry, MemoryIndexEntry, MemoryScope, WorkspaceId } from '../../src/store/types.js'
 import { formatBeijingMinute, formatBeijingTime } from '../../src/time.js'
 import { formatCount } from './format.js'
 import type { MemoryCopyKey, MemoryTranslator } from './locale.js'
+import { renderMarkdown } from './markdown.js'
 import type { MemoryClientStore } from './store.js'
 
 const GLOBAL_SCOPE: MemoryScope = { kind: 'global' }
@@ -47,25 +49,17 @@ const CATEGORY_HELP = {
 } as const satisfies Record<MemoryEntry['category'], MemoryCopyKey>
 
 /** The stored detail repeats the summary and metadata the dialog already shows. */
-function detailBody(entry: MemoryEntry): string {
-  const lines = entry.detail.split('\n')
-  const first = lines.findIndex(line => line.trim() !== '')
-  if (first === -1) return ''
-  let cursor = first
-  if (lines[first]!.replace(/^#\s+/, '').trim() !== entry.summary.trim()) return entry.detail
-  cursor += 1
-  while (cursor < lines.length && /^-\s+(Category|Updated|Last verified|Revision):/i.test(lines[cursor]!.trim())) cursor += 1
-  return lines.slice(cursor).join('\n').trim()
-}
-
 export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const [tab, setTab] = useState<MemoryTab>('global')
   const [workspaceSelection, setWorkspaceSelection] = useState<{ id: WorkspaceId; manual: boolean } | null>(null)
+  const [categoryFilter, setCategoryFilter] = useState<MemoryEntry['category'] | 'all'>('all')
   const [detail, setDetail] = useState<DetailState | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [promoting, setPromoting] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editStatus, setEditStatus] = useState<{ kind: 'status' | 'alert'; text: string } | null>(null)
   const [consolidating, setConsolidating] = useState(false)
   const [consolidationConfirming, setConsolidationConfirming] = useState(false)
   const [consolidationFeedback, setConsolidationFeedback] = useState<{ kind: 'status' | 'alert'; text: string } | null>(null)
@@ -124,6 +118,9 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     consolidationRequest.current += 1
     setDetail(null)
     setConfirming(false)
+    setEditing(false)
+    setEditStatus(null)
+    setCategoryFilter('all')
     setConsolidating(false)
     setConsolidationConfirming(false)
     setConsolidationFeedback(null)
@@ -136,6 +133,8 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     detailTrigger.current = trigger
     setDetail({ scope: entry.scope, id: entry.id, summary: entry.summary })
     setConfirming(false)
+    setEditing(false)
+    setEditStatus(null)
     setNotice(null)
     try {
       const full = await store.read(entry.scope, entry.id)
@@ -153,10 +152,11 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
   }
 
   const closeDetails = (): void => {
-    if (deleting || promoting) return
+    if (deleting || promoting || editing) return
     detailRequest.current += 1
     setDetail(null)
     setConfirming(false)
+    setEditStatus(null)
     detailTrigger.current?.focus()
   }
 
@@ -167,6 +167,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
       event.preventDefault()
+      if (editing) { setEditing(false); setEditStatus(null); return }
       closeDetails()
     }
     document.addEventListener('keydown', onKeyDown)
@@ -174,7 +175,18 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
       document.body.style.overflow = previousOverflow
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [detail, deleting, promoting])
+  }, [detail, deleting, promoting, editing])
+
+  const savedEdit = (entry: MemoryEntry): void => {
+    setEditing(false)
+    setEditStatus({ kind: 'status', text: t('editSaved') })
+    setDetail(current => current === null ? current : { ...current, summary: entry.summary, entry })
+  }
+
+  const cancelEdit = (): void => {
+    setEditing(false)
+    setEditStatus(null)
+  }
 
   const remove = async (): Promise<void> => {
     if (detail === null || deleting) return
@@ -237,11 +249,13 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
     .filter((revision): revision is number => revision !== null)
   const latestRevision = revisions.length === 0 ? null : Math.max(...revisions)
   const tokens = (state?.layers.global.committedTokens ?? 0) + (state?.layers.workspace.committedTokens ?? 0)
-  const entries = [...(index?.entries ?? [])].sort((a, b) =>
+  const allEntries = [...(index?.entries ?? [])].sort((a, b) =>
     b.rank - a.rank || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+  const categoryCounts = CATEGORY_ORDER.map(category => allEntries.filter(entry => entry.category === category).length)
+  const entries = categoryFilter === 'all' ? allEntries : allEntries.filter(entry => entry.category === categoryFilter)
   const emptyScope = tab === 'global' ? t('emptyGlobal') : t('emptyWorkspace')
-  const showToolbar = scope !== undefined && (tab === 'workspaces' || index === undefined || entries.length > 0)
-  const detailText = detail?.entry === undefined ? '' : detailBody(detail.entry)
+  const showToolbar = scope !== undefined && (tab === 'workspaces' || index === undefined || allEntries.length > 0)
+  const showFilters = tab !== 'settings' && index !== undefined && allEntries.length > 0
 
   const toolbar = scope === undefined ? null : (
     <div className="snail-memory-toolbar">
@@ -257,6 +271,9 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
               consolidationRequest.current += 1
               setDetail(null)
               setConfirming(false)
+              setEditing(false)
+              setEditStatus(null)
+              setCategoryFilter('all')
               setConsolidating(false)
               setConsolidationConfirming(false)
               setConsolidationFeedback(null)
@@ -319,6 +336,18 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
       >
         {tab === 'settings' ? <SettingsPanel store={store} t={t} /> : <>
           {showToolbar && toolbar}
+          {showFilters && (
+            <div className="snail-memory-filters" role="group" aria-label={t('filterByCategory')}>
+              <button type="button" className="snail-memory-chip" aria-pressed={categoryFilter === 'all'} onClick={() => setCategoryFilter('all')}>
+                {t('filterAll')}{' '}<span className="snail-memory-chip-count">{formatCount(allEntries.length)}</span>
+              </button>
+              {CATEGORY_ORDER.map((category, position) => (categoryCounts[position] ?? 0) === 0 ? null : (
+                <button type="button" className="snail-memory-chip" key={category} aria-pressed={categoryFilter === category} onClick={() => setCategoryFilter(category)}>
+                  {t(CATEGORY_COPY[category])}{' '}<span className="snail-memory-chip-count">{formatCount(categoryCounts[position] ?? 0)}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {tab === 'workspaces' && workspacesError !== undefined && (
             <p className="snail-memory-feedback-line" role="alert">
               {workspacesError} <button type="button" className="snail-memory-button" onClick={() => { void store.loadWorkspaces() }}>{t('retry')}</button>
@@ -360,7 +389,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
                 ))}
               </div>
             )}
-            {index !== undefined && entries.length === 0 && (
+            {index !== undefined && allEntries.length === 0 && (
               <div className={tab === 'global' ? 'snail-memory-empty' : 'snail-memory-empty snail-memory-empty--plain'}>
                 <div className="snail-memory-empty-main">
                   <p className="snail-memory-empty-title">{emptyScope}</p>
@@ -379,7 +408,15 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
                 )}
               </div>
             )}
-            <ul className="snail-memory-list">
+            {index !== undefined && allEntries.length > 0 && entries.length === 0 && (
+              <div className="snail-memory-empty snail-memory-empty--plain">
+                <div className="snail-memory-empty-main">
+                  <p className="snail-memory-empty-title">{t('emptyCategory')}</p>
+                  <button type="button" className="snail-memory-button" onClick={() => setCategoryFilter('all')}>{t('showAll')}</button>
+                </div>
+              </div>
+            )}
+            {entries.length > 0 && <ul className="snail-memory-list">
               {entries.map(entry => (
                 <li className="snail-memory-entry" key={`${entry.scope.kind}:${entry.scope.kind === 'workspace' ? entry.scope.workspaceId : ''}:${entry.id}`}>
                   <div className="snail-memory-entry-main">
@@ -392,7 +429,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
                   <button type="button" className="snail-memory-entry-action" aria-label={`${t('viewDetails')} ${entry.summary}`} onClick={event => { void openDetails(entry, event.currentTarget) }}>{t('details')}</button>
                 </li>
               ))}
-            </ul>
+            </ul>}
           </>}
         </>}
       </div>
@@ -401,7 +438,7 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
           <div className="snail-memory-detail" role="dialog" aria-modal="true" aria-labelledby="snail-memory-detail-title">
             <div className="snail-memory-detail-head">
               <h2 id="snail-memory-detail-title">{detail.summary}</h2>
-              {detail.entry !== undefined && (
+              {detail.entry !== undefined && !editing && (
                 <dl className="snail-memory-detail-facts">
                   <div>
                     <dt>{t('category')}</dt>
@@ -418,27 +455,135 @@ export function MemoryPage({ sessionId, store, t }: MemoryPageProps) {
                 </dl>
               )}
             </div>
-            {detail.entry === undefined && detail.error === undefined && <p className="snail-memory-detail-body" role="status">{t('loading')}</p>}
-            {detail.error !== undefined && <p className="snail-memory-detail-note" role="alert">{detail.error}</p>}
-            {detail.entry !== undefined && (
-              <div className="snail-memory-detail-body">{detailText === '' ? t('noDetail') : detailText}</div>
-            )}
-            {confirming && <p className="snail-memory-detail-note" role="alert">{t('deleteConfirmation')}</p>}
-            <div className="snail-memory-detail-foot">
-              {confirming ? <>
-                <button type="button" className="snail-memory-button" data-variant="danger-fill" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
-                <button type="button" className="snail-memory-button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
-              </> : <>
-                {detail.scope.kind === 'workspace' && <button type="button" className="snail-memory-button" disabled={detail.entry === undefined || promoting || deleting} onClick={() => { void promote() }}>{promoting ? t('promoting') : t('promote')}</button>}
-                <button type="button" className="snail-memory-button" data-variant="danger" disabled={detail.entry === undefined || promoting || deleting} onClick={() => setConfirming(true)}>{t('delete')}</button>
-                <span className="snail-memory-spacer" />
-                <button type="button" className="snail-memory-button" autoFocus disabled={promoting || deleting} onClick={closeDetails}>{t('close')}</button>
-              </>}
-            </div>
+            {editing && detail.entry !== undefined ? (
+              <EditMemoryForm key={detail.entry.id} store={store} t={t} scope={detail.scope} entry={detail.entry} sessionId={sessionId} onSaved={savedEdit} onCancel={cancelEdit} />
+            ) : <>
+              {editStatus !== null && <p className="snail-memory-detail-note snail-memory-detail-note--status" role={editStatus.kind}>{editStatus.text}</p>}
+              {detail.entry === undefined && detail.error === undefined && <p className="snail-memory-detail-body" role="status">{t('loading')}</p>}
+              {detail.error !== undefined && <p className="snail-memory-detail-note" role="alert">{detail.error}</p>}
+              {detail.entry !== undefined && (
+                <div className="snail-memory-detail-body">
+                  {detail.entry.detail.trim() === '' ? t('noDetail') : renderMarkdown(detail.entry.detail)}
+                </div>
+              )}
+              {detail.entry !== undefined && detail.scope.kind === 'global' && (
+                <p className="snail-memory-detail-note snail-memory-detail-note--status">{t('globalEditHint')}</p>
+              )}
+              {confirming && <p className="snail-memory-detail-note" role="alert">{t('deleteConfirmation')}</p>}
+              <div className="snail-memory-detail-foot">
+                {confirming ? <>
+                  <button type="button" className="snail-memory-button" data-variant="danger-fill" autoFocus disabled={deleting} onClick={() => { void remove() }}>{deleting ? t('deleting') : t('confirmDelete')}</button>
+                  <button type="button" className="snail-memory-button" disabled={deleting} onClick={() => setConfirming(false)}>{t('cancel')}</button>
+                </> : <>
+                  {detail.scope.kind === 'workspace' && <button type="button" className="snail-memory-button" data-variant="primary" disabled={detail.entry === undefined || promoting || deleting} onClick={() => { setConfirming(false); setEditStatus(null); setEditing(true) }}>{t('edit')}</button>}
+                  {detail.scope.kind === 'workspace' && <button type="button" className="snail-memory-button" disabled={detail.entry === undefined || promoting || deleting} onClick={() => { void promote() }}>{promoting ? t('promoting') : t('promote')}</button>}
+                  <button type="button" className="snail-memory-button" data-variant="danger" disabled={detail.entry === undefined || promoting || deleting} onClick={() => setConfirming(true)}>{t('delete')}</button>
+                  <span className="snail-memory-spacer" />
+                  <button type="button" className="snail-memory-button" autoFocus disabled={promoting || deleting} onClick={closeDetails}>{t('close')}</button>
+                </>}
+              </div>
+            </>}
           </div>
         </div>
       )}
     </section>
+  )
+}
+
+interface EditMemoryFormProps {
+  readonly store: MemoryClientStore
+  readonly t: MemoryTranslator
+  readonly scope: MemoryScope
+  readonly entry: MemoryEntry
+  readonly sessionId?: string | undefined
+  readonly onSaved: (entry: MemoryEntry) => void
+  readonly onCancel: () => void
+}
+
+function EditMemoryForm({ store, t, scope, entry, sessionId, onSaved, onCancel }: EditMemoryFormProps) {
+  const [summary, setSummary] = useState(entry.summary)
+  const [detail, setDetail] = useState(entry.detail)
+  const [category, setCategory] = useState<MemoryEntry['category']>(entry.category)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const mounted = useRef(true)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault()
+    if (saving) return
+    if (summary.trim() === '' || detail.trim() === '') {
+      setError(t('editRequired'))
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const updated = await store.correct(scope, entry.id, {
+        category, summary: summary.trim(), detail: detail.trim(),
+        ...(sessionId === undefined ? {} : { sessionId }),
+      })
+      if (mounted.current) onSaved(updated)
+    } catch (reason) {
+      if (mounted.current) setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      if (mounted.current) setSaving(false)
+    }
+  }
+
+  return (
+    <form className="snail-memory-edit" onSubmit={event => { void submit(event) }}>
+      <div className="snail-memory-edit-fields">
+        <div className="snail-memory-edit-field">
+          <label htmlFor="snail-memory-edit-summary">{t('summaryLabel')}</label>
+          <input
+            id="snail-memory-edit-summary"
+            value={summary}
+            maxLength={500}
+            required
+            autoFocus
+            disabled={saving}
+            aria-describedby="snail-memory-edit-summary-count"
+            onChange={event => setSummary(event.target.value)}
+          />
+          <p id="snail-memory-edit-summary-count">{formatCount(summary.length)} / 500</p>
+        </div>
+        <div className="snail-memory-edit-field">
+          <label htmlFor="snail-memory-edit-category">{t('category')}</label>
+          <select
+            id="snail-memory-edit-category"
+            value={category}
+            disabled={saving}
+            onChange={event => setCategory(event.target.value as MemoryEntry['category'])}
+          >
+            {CATEGORY_ORDER.map(value => <option key={value} value={value}>{t(CATEGORY_COPY[value])}</option>)}
+          </select>
+        </div>
+        <div className="snail-memory-edit-field">
+          <label htmlFor="snail-memory-edit-detail">{t('detailLabel')}</label>
+          <textarea
+            id="snail-memory-edit-detail"
+            value={detail}
+            maxLength={16_000}
+            required
+            rows={9}
+            disabled={saving}
+            aria-describedby="snail-memory-edit-detail-count"
+            onChange={event => setDetail(event.target.value)}
+          />
+          <p id="snail-memory-edit-detail-count">{formatCount(detail.length)} / 16,000</p>
+        </div>
+        {error !== null && <p className="snail-memory-detail-note" role="alert">{error}</p>}
+      </div>
+      <div className="snail-memory-detail-foot">
+        <button type="submit" className="snail-memory-button" data-variant="primary" disabled={saving}>{saving ? t('savingEdit') : t('saveEdit')}</button>
+        <button type="button" className="snail-memory-button" disabled={saving} onClick={onCancel}>{t('cancel')}</button>
+      </div>
+    </form>
   )
 }
 

@@ -169,7 +169,15 @@ export class MemoryController {
       lastVerifiedAt: this.now().toISOString(),
     }
     if (correction) {
-      const corrected = { ...input, id: (request as CorrectRequest).id }
+      const id = (request as CorrectRequest).id
+      // A correction rewrites the record, so carry the provenance it already has instead of
+      // replacing it with the editor's session.
+      const existing = await this.store.read(request.scope, id)
+      const sourceRefs = [...(existing?.sourceRefs ?? [])]
+      if (request.sessionId !== undefined && !sourceRefs.some(ref => ref.sessionId === request.sessionId)) {
+        sourceRefs.push({ sessionId: request.sessionId })
+      }
+      const corrected = { ...input, sourceRefs, id }
       return this.options.lifecycle ? this.options.lifecycle.correct(corrected) : this.store.upsert(corrected)
     }
     return this.options.lifecycle ? this.options.lifecycle.remember(input) : this.store.upsert(input)
