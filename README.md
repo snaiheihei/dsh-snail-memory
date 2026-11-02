@@ -1,8 +1,8 @@
 # Snail Memory
 
-DeepSeek Harness（dsh）插件：单用户、**显式开启**的全局 / workspace 分层记忆，只追加、不改写会话历史。
+DeepSeek Harness（dsh）插件：单用户、**全局 / workspace 分层**的记忆。在 Web 面板里查看、控制记忆条目，调整对话记忆的整理与整合；启用后索引常驻上下文、详情按需加载，每个对话手动选择要加载的记忆层。
 
-> Single-user global and workspace memory for DeepSeek Harness, with explicit, append-only context injection.
+> Layered single-user global and workspace memory for DeepSeek Harness, with a web panel to browse entries and tune distillation and consolidation, an index kept in context with records loaded on demand, and a per-session choice of layer.
 
 - npm 包名：`dsh-snail-memory`
 - 源码：<https://github.com/snaiheihei/dsh-snail-memory>

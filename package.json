@@ -1,7 +1,7 @@
 {
   "name": "dsh-snail-memory",
   "version": "0.1.5",
-  "description": "Single-user global and workspace memory for DeepSeek Harness",
+  "description": "Layered single-user memory for DeepSeek Harness, with a web panel, an in-context index and on-demand records.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

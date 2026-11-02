@@ -3,8 +3,8 @@
   "name": "Snail Memory",
   "version": "0.1.5",
   "description": {
-    "en": "Single-user global and workspace memory with explicit, append-only context injection.",
-    "zh": "单用户全局与 workspace 分层记忆，采用显式、只追加的上下文注入。"
+    "en": "Layered single-user global and workspace memory with a web panel, an in-context index, on-demand records and per-session opt-in.",
+    "zh": "单用户、分层的全局与 workspace 记忆：Web 面板管理条目与整理、整合设置；索引常驻上下文、详情按需加载，按对话手动开启。"
   },
   "author": "snaiheihei",
   "license": "MIT",
