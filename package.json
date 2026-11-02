@@ -49,6 +49,10 @@
     "node": ">=22.19.0",
     "dsh": ">=0.2.1-rc.3 <0.3.0-0"
   },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "keywords": [
     "dsh",
     "deepseek-harness",
