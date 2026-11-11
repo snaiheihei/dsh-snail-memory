@@ -1,0 +1,30 @@
+schema_version: "1.0"
+
+extension:
+  id: tech
+  name: "Tech Selection Gate"
+  version: "0.2.3"
+  description: "在 /speckit-plan 之前插入强制门禁：按需使用参考材料，复用已确认决策，否则比较候选并等待用户拍板"
+  author: snail
+  repository: local
+  license: MIT
+
+requires:
+  speckit_version: ">=1.0.0"
+
+provides:
+  commands:
+    - name: speckit.tech.gate
+      file: commands/speckit.tech.gate.md
+      description: "技术选型评审：候选对比 + 五维打分 + 等待拍板，确认后写 tech-decisions.md"
+
+hooks:
+  before_plan:
+    command: speckit.tech.gate
+    optional: false
+    description: "生成计划前必须完成技术选型评审并取得用户确认"
+
+tags:
+  - "tech-selection"
+  - "gate"
+  - "plan"

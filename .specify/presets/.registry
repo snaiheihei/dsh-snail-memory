@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "presets": {
+    "spec-addendum": {
+      "version": "0.20.4",
+      "source": "local",
+      "manifest_hash": "sha256:70810453f0504501688c2cabe6579e8a6937f70938e250eaa5ffcb8ffb6eb708",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "qodercli": [
+          "speckit.constitution",
+          "speckit.specify",
+          "speckit.plan",
+          "speckit.tasks",
+          "speckit.implement",
+          "speckit.converge",
+          "speckit.change",
+          "speckit.references",
+          "speckit.baseline"
+        ]
+      },
+      "registered_skills": {
+        "qodercli": [
+          "speckit-constitution",
+          "speckit-specify",
+          "speckit-plan",
+          "speckit-tasks",
+          "speckit-implement",
+          "speckit-converge",
+          "speckit-change",
+          "speckit-references",
+          "speckit-baseline"
+        ]
+      },
+      "installed_at": "2026-11-11T08:56:40.393663+00:00"
+    }
+  }
+}

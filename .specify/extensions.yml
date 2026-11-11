@@ -1,0 +1,32 @@
+installed:
+- tech
+- verify
+settings:
+  auto_execute_hooks: true
+hooks:
+  before_plan:
+  - extension: tech
+    command: speckit.tech.gate
+    enabled: true
+    optional: false
+    priority: 10
+    prompt: Execute speckit.tech.gate?
+    description: 生成计划前必须完成技术选型评审并取得用户确认
+    condition: null
+  after_implement:
+  - extension: verify
+    command: speckit.analyze
+    enabled: true
+    optional: false
+    priority: 1
+    prompt: Execute speckit.analyze?
+    description: Spec 轴：跨 spec/plan/tasks 的一致性分析
+    condition: null
+  - extension: verify
+    command: speckit.verify.standards
+    enabled: true
+    optional: false
+    priority: 2
+    prompt: Execute speckit.verify.standards?
+    description: Standards 轴：本次 diff 的代码质量评审
+    condition: null

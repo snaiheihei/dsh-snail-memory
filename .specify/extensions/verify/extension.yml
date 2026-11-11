@@ -1,0 +1,36 @@
+schema_version: "1.0"
+
+extension:
+  id: verify
+  name: "Post-Implement Verification"
+  version: "0.3.2"
+  description: "实现完成后跑两道检查：speckit.analyze 查跨产物一致性（Spec 轴），speckit.verify.standards 独立评审本次完整工作区 diff（Standards 轴）"
+  author: snail
+  repository: local
+  license: MIT
+
+requires:
+  speckit_version: ">=1.0.0"
+
+provides:
+  commands:
+    - name: speckit.verify.standards
+      file: commands/speckit.verify.standards.md
+      description: "代码质量评审（只看 diff）：硬违规 vs 判断项，不改代码"
+
+hooks:
+  after_implement:
+    - command: speckit.analyze
+      optional: false
+      priority: 1
+      description: "Spec 轴：跨 spec/plan/tasks 的一致性分析"
+    - command: speckit.verify.standards
+      optional: false
+      priority: 2
+      description: "Standards 轴：本次 diff 的代码质量评审"
+
+tags:
+  - "verify"
+  - "analyze"
+  - "code-review"
+  - "implement"

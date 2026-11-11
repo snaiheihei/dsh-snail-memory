@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "extensions": {
+    "tech": {
+      "version": "0.2.3",
+      "source": "local",
+      "manifest_hash": "sha256:7876b618d1fef51f444dfa2e033b5beb48987d4bd78b88fcc0b532323c05b5fa",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "qodercli": [
+          "speckit.tech.gate"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-11-11T08:56:42.039791+00:00"
+    },
+    "verify": {
+      "version": "0.3.2",
+      "source": "local",
+      "manifest_hash": "sha256:658ff7d0bbba4553fb622d27aea40986364faf1fef1fcb700bc3a1d9657011f9",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "qodercli": [
+          "speckit.verify.standards"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-11-11T08:56:43.195902+00:00"
+    }
+  }
+}

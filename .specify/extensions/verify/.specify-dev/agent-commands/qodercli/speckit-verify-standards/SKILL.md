@@ -1,0 +1,92 @@
+---
+name: speckit-verify-standards
+description: 实现后的代码质量评审（只看本次 diff）：区分硬违规与判断项，不改代码
+compatibility: Requires spec-kit project structure with .specify/ directory
+metadata:
+  author: snail
+  source: verify:commands/speckit.verify.standards.md
+---
+
+# 代码质量评审（Standards 轴）
+
+`after_implement` 的第二个钩子。只看本次改动写得体不体面。
+
+- 需求是否实现完整 → `/speckit-analyze` 与 `/speckit-converge` 负责
+- 本命令**只出报告**，不动代码
+
+## Step 0 · 在新上下文里跑
+
+本评审由**全新上下文的子代理**执行：它只看 diff 与标准来源，不看实现过程。
+同一上下文里评审自己刚写的代码，会倾向于为它辩护。
+重要且影响合并/归档结论的完整评审，应显式调用子代理并等待完整报告；只在提示中声明使用子代理不算执行。
+
+判据：子代理返回完整报告，且没有要求它"顺便修一下"。
+
+## Step 1 · 钉基线与工作区范围
+
+```bash
+git diff <baseline>
+git log <baseline>..HEAD --oneline
+git ls-files --others --exclude-standard
+```
+
+基线由用户给；没给就用本 feature 开始前的提交，再取不到用 `HEAD`。`git diff <baseline>` 覆盖该基线之后的提交、暂存和未暂存跟踪文件改动；列出的未跟踪文件逐个按新增文件评审。
+
+Git 不可用、基线解析失败或无法读取改动文件 → 报告“评审受阻”，不得写成空 diff。只有 tracked diff 与 untracked 清单同时为空，才报告“无可评审改动”。
+
+## Step 2 · 找标准来源
+
+按优先级：
+
+1. `.specify/memory/constitution.md` 的编码/质量原则与质量门
+   - 质量门缺失，或其中仍有 `___` / `TODO(...)` 时，报告“质量门迁移未完成”，建议运行 `/speckit-constitution`；未完成条目不得作为硬违规依据
+   - 已填写的具体规则仍可使用；其他仍为占位符的规则跳过并注明
+2. 仓库文档：`CONTRIBUTING.md`、`CODING_STANDARDS.md`、`docs/`
+3. Linter / formatter 配置——能自动查的交给工具，人工不重复
+4. 改动文件周围的既有风格
+5. 下面的坏味道基线
+
+仓库文档明确认可的做法，压过基线，不报。质量门迁移提示不中断其他来源的评审。
+
+## Step 3 · 坏味道基线
+
+只对 diff 里出现的代码匹配，一律算**判断项**：
+
+| 坏味道 | 长什么样 | 改法 |
+|---|---|---|
+| 神秘命名 | 名字不说明它做什么 | 改名；改不出来说明设计含糊 |
+| 重复代码 | 同一形状在 diff 里出现两次以上 | 提取共用 |
+| 过长函数 | 要滚屏才能读完 | 按"一件事"拆 |
+| 深嵌套 | 三层以上 if/for 叠着 | 提前 return、提取判断 |
+| 魔法值 | 散落的数字或字符串常量 | 命名常量 |
+| 死代码 | 注释掉的代码、`// removed`、没人用的参数 | 删掉 |
+| 臆测的通用性 | 为"以后可能要用"加的抽象或参数 | 删掉，等真需求 |
+| 中间人 | 只做转发的函数/类 | 直接调目标 |
+| 特性依恋 | 方法大量访问别人的数据 | 搬到数据所在处 |
+
+## Step 4 · 报告
+
+```markdown
+## 代码质量评审（Standards）
+**基线**：<commit/branch> ｜ **范围**：<committed/staged/unstaged/untracked> ｜ **改动**：<N 文件，+X/−Y>
+
+### 硬违规（违反已文档化的标准）
+| # | 位置 | 违反了哪条 | 说明 |
+
+### 判断项（坏味道）
+| # | 位置 | 坏味道 | 说明 |
+
+### 结论
+硬违规 N 条 / 判断项 M 条 → 可直接进入 converge ／ 先修硬违规
+```
+
+- 每条带 `path:line`，不写"某处"
+- 硬违规必须指名文档与规则；指不出来就降级为判断项
+- 总长 ≤400 字，宁少而准
+
+## Done When
+
+- [ ] 基线与 committed/staged/unstaged/untracked 范围已钉住；空范围有双重空证据，Git/读取失败标为受阻
+- [ ] 标准来源已列出，质量门迁移状态已注明
+- [ ] 硬违规与判断项分开，各自带 `path:line`
+- [ ] 代码一行未动
