@@ -1,4 +1,4 @@
-import { appendFile, readFile, rm } from 'node:fs/promises'
+import { appendFile, readFile, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { entriesForScope, revisionForScope, workspaceIndexRefs } from './aggregate.js'
 import { WriterLock, WriterLockOwnershipError } from './lock.js'
@@ -477,7 +477,7 @@ export class MemoryStore {
     await rm(this.paths.legacyState, { force: true })
   }
 
-  private async readPendingProjections(): Promise<ProjectionPending | null> {
+  private async readPendingProjections(): Promise<ProjectionPending | 'all' | null> {
     let text: string
     try {
       text = await readFile(this.paths.projectionPending, 'utf8')
@@ -485,22 +485,43 @@ export class MemoryStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error
     }
-    const value = JSON.parse(text) as Partial<ProjectionPending>
-    if (value.formatVersion !== 1 || !Array.isArray(value.ids)
-      || value.ids.some(id => typeof id !== 'string')) {
-      throw new Error('Cannot read projection recovery intent')
+    try {
+      const value: unknown = JSON.parse(text)
+      const candidate = value as Partial<ProjectionPending>
+      if (!value || typeof value !== 'object' || candidate.formatVersion !== 1
+        || !Array.isArray(candidate.ids)
+        || candidate.ids.some(id => typeof id !== 'string')) {
+        throw new Error('Cannot read projection recovery intent')
+      }
+      return candidate as ProjectionPending
+    } catch {
+      // The intent file is only a rebuild hint. A damaged hint must never
+      // block startup or writes: quarantine it and rebuild every projection
+      // from the authoritative state instead.
+      await rename(this.paths.projectionPending, `${this.paths.projectionPending}.corrupt`)
+        .catch(() => rm(this.paths.projectionPending, { force: true }).catch(() => {}))
+      return 'all'
     }
-    return value as ProjectionPending
   }
 
   private async recoverPendingProjections(): Promise<void> {
     const pending = await this.readPendingProjections()
     if (!pending) return
-    for (const id of pending.ids) {
+    const ids = pending === 'all'
+      ? this.state.entries.map(entry => entry.id as string)
+      : pending.ids
+    for (const id of ids) {
       await this.lock.heartbeat()
       const index = this.state.entries.find(entry => entry.id === id)
-      if (index) await writeDetailProjection(this.paths, await readDetailRecord(this.paths, index))
-      else await removeDetailProjection(this.paths, id)
+      if (index) {
+        try {
+          await writeDetailProjection(this.paths, await readDetailRecord(this.paths, index))
+        } catch (error) {
+          // A full rebuild skips records that cannot be read; an explicit
+          // intent still surfaces damaged authoritative data.
+          if (pending !== 'all') throw error
+        }
+      } else await removeDetailProjection(this.paths, id)
     }
     await this.lock.heartbeat()
     await writeIndexProjections(this.paths, this.state)

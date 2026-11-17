@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -142,6 +142,14 @@ export async function writeTextAtomic(path: string, text: string): Promise<void>
   const temporary = `${path}.${randomUUID()}.tmp`
   await writeFile(temporary, text, 'utf8')
   try {
+    // Flush the temporary file before publishing it by rename, so a crash can
+    // never leave a zero-byte or partially written destination behind.
+    const handle = await open(temporary, 'r+')
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
     for (let attempt = 0; ; attempt += 1) {
       try {
         await rename(temporary, path)

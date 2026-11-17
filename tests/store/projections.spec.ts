@@ -229,4 +229,41 @@ describe('projection and detail publication', () => {
 
     expect(await readFile(join(root, 'details', entry.id, 'part-001.md'), 'utf8')).toContain('new-')
   })
+
+  it.each([
+    ['an empty', ''],
+    ['a malformed', '{"formatVersion":1,"ids":'],
+    ['an invalid-shape', JSON.stringify({ formatVersion: 1, ids: [42] })],
+  ])('opens and keeps writing when the projection intent file is %s file', async (_label, contents) => {
+    const root = await mkdtemp(join(tmpdir(), 'snail-memory-pending-corrupt-'))
+    roots.push(root)
+    const store = await MemoryStore.open({ root, heartbeatMs: 60_000 })
+    stores.push(store)
+    const scope = { kind: 'global' } as const
+    const base = {
+      scope,
+      category: 'project-convention',
+      summary: 'Survives a damaged intent',
+      sourceRefs: [{ sessionId: 'session-1' }],
+      lastVerifiedAt: '2026-10-26T00:00:00.000Z',
+    } as const
+    const entry = await store.upsert({ ...base, detail: 'authoritative detail' })
+    await store.close()
+    stores.pop()
+    // Simulate the crash artifact: the rebuild hint is damaged after commit.
+    await writeFile(store.paths.projectionPending, contents)
+    await rm(store.paths.detail(entry.id), { force: true })
+
+    const reopened = await MemoryStore.open({ root, heartbeatMs: 60_000 })
+    stores.push(reopened)
+
+    // The store opens, rebuilds every projection, and quarantines the hint.
+    await expect(readFile(store.paths.detail(entry.id), 'utf8')).resolves.toContain('authoritative detail')
+    await expect(readFile(store.paths.projectionPending, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(`${store.paths.projectionPending}.corrupt`, 'utf8')).resolves.toBe(contents)
+
+    const next = await reopened.upsert({ ...base, summary: 'Still writable', detail: 'next detail' })
+    expect(next.summary).toBe('Still writable')
+    expect((await reopened.read(scope, entry.id))?.detail).toBe('authoritative detail')
+  })
 })
